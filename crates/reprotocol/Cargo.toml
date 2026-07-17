@@ -1,0 +1,60 @@
+[package]
+name = "peerseal"
+version = "0.3.0"
+edition = "2024"
+description = "Secure direct-first P2P: QR pairing, Noise E2EE, identity/SAS, HD VC media (25 MiB frames), relay"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["p2p", "noise", "e2e", "qr", "relay"]
+categories = ["network-programming", "cryptography"]
+rust-version = "1.85"
+
+[features]
+default = ["relay"]
+relay = ["dep:tokio-tungstenite", "dep:futures-util", "dep:http", "dep:rustls"]
+qr-image = ["dep:qrcode", "dep:image"]
+
+[dependencies]
+base64 = "0.22"
+bytes = "1"
+rand = "0.8"
+sha2 = "0.10"
+snow = "0.9"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
+
+# Optional: WebSocket relay client (WSS needs an explicit rustls crypto backend)
+tokio-tungstenite = { version = "0.26", optional = true, features = ["rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", optional = true }
+http = { version = "1", optional = true }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["std", "tls12", "ring"] }
+
+# Optional: QR PNG rendering
+qrcode = { version = "0.14", optional = true, default-features = false, features = ["image"] }
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3"
+
+[[example]]
+name = "pair_demo"
+required-features = ["relay"]
+
+[[example]]
+name = "relay_smoke"
+required-features = ["relay"]
+
+[[example]]
+name = "transfer_demo"
+required-features = ["relay"]
+
+[[example]]
+name = "vc_demo"
+required-features = ["relay"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

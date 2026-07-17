@@ -1,0 +1,20 @@
+[package]
+name = "talkyss-bot"
+version = "0.1.0"
+edition = "2021"
+description = "Headless Talkyss bot SDK (Convex-backed)"
+license = "MIT"
+
+[dependencies]
+convex = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+futures = "0.3"
+maplit = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "1"
+
+[[example]]
+name = "echo"
+path = "examples/echo.rs"

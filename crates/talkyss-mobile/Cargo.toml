@@ -1,0 +1,76 @@
+# Standalone workspace so `cargo apk` works (parent Talkyss workspace is ignored).
+[workspace]
+
+[package]
+name = "talkyss-mobile"
+version = "0.2.0"
+edition = "2021"
+description = "Talkyss mobile client — native Rust (egui), same Convex backend as desktop"
+publish = false
+
+[lib]
+name = "talkyss_mobile"
+# cdylib for Android NativeActivity; rlib for desktop example linking.
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+egui = "0.31"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Pure rustls — no OpenSSL (required for clean Android NDK builds).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+dirs = "5"
+log = "0.4"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+env_logger = "0.11"
+eframe = { version = "0.31", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "accesskit",
+] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.14"
+eframe = { version = "0.31", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "accesskit",
+    "android-native-activity",
+] }
+winit = { version = "0.30", default-features = false, features = ["android-native-activity"] }
+# OS clipboard (egui has none on Android).
+jni = "0.21"
+ndk-context = "0.1"
+
+[package.metadata.android]
+package = "com.talkyss.mobile"
+apk_name = "Talkyss"
+build_targets = ["aarch64-linux-android"]
+
+[package.metadata.android.sdk]
+min_sdk_version = 26
+target_sdk_version = 35
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.INTERNET"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.ACCESS_NETWORK_STATE"
+
+[package.metadata.android.application]
+label = "Talkyss"
+
+# Same idea as the Kotlin app: debug keystore for local release installs.
+[package.metadata.android.signing.release]
+path = "../../.android-debug.keystore"
+keystore_password = "android"
+key_alias = "androiddebugkey"
+key_password = "android"
+
+[[example]]
+name = "desktop"
+path = "examples/desktop.rs"

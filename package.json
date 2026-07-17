@@ -1,0 +1,11 @@
+{
+  "name": "talkyss-backend",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "convex dev"
+  },
+  "dependencies": {
+    "convex": "^1.42.1"
+  }
+}

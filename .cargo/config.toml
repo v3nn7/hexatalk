@@ -1,0 +1,6 @@
+# Statically links the MSVC C runtime into the executable so it doesn't
+# depend on the Visual C++ Redistributable (vcruntime140.dll, msvcp140.dll,
+# ...) being installed on the machine that runs it -- everything ends up in
+# the one .exe.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
