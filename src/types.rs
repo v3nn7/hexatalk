@@ -3,9 +3,7 @@
 //! selected, which settings category, etc). No behavior beyond a couple of
 //! tiny `Friend` display helpers.
 
-use iced::widget::image;
-
-use crate::style::is_online;
+use crate::utils::is_online;
 
 // ---------- Domain types ----------
 
@@ -187,7 +185,6 @@ pub(crate) enum AttachmentPick {
 pub(crate) struct PendingAttachment {
     pub(crate) bytes: Vec<u8>,
     pub(crate) content_type: String,
-    pub(crate) preview: image::Handle,
 }
 
 impl std::fmt::Debug for PendingAttachment {

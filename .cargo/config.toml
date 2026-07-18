@@ -2,5 +2,12 @@
 # depend on the Visual C++ Redistributable (vcruntime140.dll, msvcp140.dll,
 # ...) being installed on the machine that runs it -- everything ends up in
 # the one .exe.
+#
+# /STACK:16777216 raises the main thread's reserved stack from the PE
+# default of 1MB to 16MB. Slint (winit) runs the UI event loop -- including
+# layout of deeply nested `if`/`HorizontalLayout`/`VerticalLayout` trees like
+# the per-message chat delegate -- on that same main thread, and the debug
+# build's much larger per-frame stack usage was overflowing the 1MB default
+# as soon as a chat with real message history opened.
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-args=/STACK:16777216"]

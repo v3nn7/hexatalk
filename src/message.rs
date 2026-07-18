@@ -43,9 +43,9 @@ pub(crate) enum Message {
     UpdateCheckFinished(UpdateOutcome),
     MeasurePing,
     PingMeasured(Option<u64>),
-    WindowCloseRequested(iced::window::Id),
+    WindowCloseRequested,
     TrayEvent(tray::TrayEvent),
-    WindowFocusChanged(iced::window::Event),
+    WindowFocusChanged(bool),
 
     FriendsUpdated(Vec<Friend>),
     RequestsUpdated(Vec<IncomingRequest>),
@@ -94,8 +94,11 @@ pub(crate) enum Message {
     SupportDmOpened(Result<(String, String, String), String>),
     CycleFriendRequestPrivacy,
 
-    OpenConversationWithFriend(Friend),
-    OpenConversationDirect(ConversationSummary),
+    /// user_id -- looked up in `self.friends` by the handler (Slint callbacks
+    /// only ever hand back plain ids, not whole domain rows).
+    OpenConversationWithFriend(String),
+    /// conversation_id -- looked up in `self.conversations`.
+    OpenConversationDirect(String),
     ConversationOpened(Result<(String, Option<String>, String), String>),
     MarkReadFinished,
 
@@ -112,7 +115,8 @@ pub(crate) enum Message {
     JoinServerCodeChanged(String),
     JoinServer,
     JoinServerFinished(Result<(), String>),
-    SelectServer(ServerSummary),
+    /// server_id -- looked up in `self.servers`.
+    SelectServer(String),
     BackToServerList,
     /// Home / DMs rail button (clears selected server).
     GoHome,
@@ -132,7 +136,8 @@ pub(crate) enum Message {
     /// link instead of the bare code.
     CopyInviteLink(String),
     ChannelsUpdated(Vec<ChannelSummary>),
-    OpenChannel(ChannelSummary),
+    /// conversation_id -- looked up in `self.channels`.
+    OpenChannel(String),
     ToggleNewChannelInput,
     NewChannelNameChanged(String),
     CreateChannel,
@@ -198,6 +203,10 @@ pub(crate) enum Message {
     SignOutOthersFinished(Result<u32, String>),
 
     NewChannelIsVoice(bool),
+    /// Flips `new_channel_is_voice` in place -- the Slint toggle button has
+    /// no access to the current value to negate itself the way the iced
+    /// view used to when constructing `NewChannelIsVoice(!self.x)`.
+    ToggleNewChannelIsVoice,
     JoinVoiceChannel,
     LeaveVoiceChannel,
     VoiceUsersUpdated(Vec<VoiceUserRow>),
@@ -274,7 +283,9 @@ pub(crate) enum Message {
 
     ToggleSharePicker,
     ShareTargetsLoaded(Vec<screenshare::ShareTarget>),
-    StartShare(screenshare::ShareTarget),
+    /// Encoded via `viewmodel::encode_share_target`/`decode_share_target`
+    /// since Slint callbacks only ever hand back plain strings.
+    StartShare(String),
     StopShare,
     ToggleShareViewSize,
     EscapePressed,

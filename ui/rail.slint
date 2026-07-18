@@ -1,0 +1,170 @@
+// Left-most icon rail: home (DMs), server list, add-server, friends,
+// requests, admin. Port of the rail section of src/view/chat.rs.
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Badge, Avatar } from "widgets.slint";
+import { ServerRow } from "chat_types.slint";
+
+component RailButton inherits Rectangle {
+    in property <bool> active: false;
+    in property <int> badge: 0;
+    callback clicked;
+
+    width: 44px;
+    height: 44px;
+    clip: true;
+    background: root.active ? Theme.accent-soft-strong : (touch.has-hover ? Theme.bg-hover : Theme.bg-secondary);
+    border-width: 1px;
+    border-color: root.active ? Theme.accent : (touch.has-hover ? Theme.border-strong : Theme.border);
+
+    touch := TouchArea { clicked => { root.clicked(); } }
+
+    HorizontalLayout {
+        alignment: center;
+        VerticalLayout {
+            alignment: center;
+            @children
+        }
+    }
+
+    if root.active: Rectangle {
+        x: 0;
+        y: (parent.height - self.height) / 2;
+        width: 3px;
+        height: 32px;
+        background: Theme.accent;
+    }
+
+    if root.badge > 0: Badge {
+        text: root.badge > 9 ? "9+" : root.badge;
+        x: parent.width - self.width;
+        y: 0;
+    }
+}
+
+export component ServerRail inherits Rectangle {
+    in property <bool> home_active: false;
+    in property <int> unread_count: 0;
+    in property <[ServerRow]> servers: [];
+    in property <bool> add_menu_open: false;
+    in property <int> friends_online: 0;
+    in property <bool> friends_active: false;
+    in property <int> incoming_count: 0;
+    in property <bool> requests_active: false;
+    in property <bool> show_admin: false;
+    in property <bool> admin_active: false;
+
+    callback go_home;
+    callback select_server(string);
+    callback toggle_add_menu;
+    callback open_friends;
+    callback open_requests;
+    callback open_admin;
+
+    width: 68px;
+    background: Theme.bg-tertiary;
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+        // No `alignment: start` -- an alignment'd layout of fixed-height
+        // children reports a bounded maximum height, and since a
+        // HorizontalLayout row can only be as tall as its least-stretchable
+        // child, that clamped the entire chat screen (and with it the whole
+        // window scene) to the rail's ~330px natural height. Instead the
+        // trailing stretchy spacer Rectangle absorbs the leftover space,
+        // keeping the buttons top-aligned while the layout stays
+        // height-unbounded.
+
+        RailButton {
+            active: root.home_active;
+            badge: root.unread_count;
+            clicked => { root.go_home(); }
+            Image {
+                source: @image-url("../assets/textures/talkyssicon.png");
+                width: 32px;
+                height: 32px;
+                image-fit: ImageFit.cover;
+            }
+        }
+
+        Rectangle { height: 1px; background: Theme.border-strong; }
+
+        ListView {
+            // Size to the actual server count so the icon strip hugs the
+            // servers instead of reserving a fixed 300px of dead space
+            // when there are only 1-2 servers; caps at ~6 rows so a long
+            // list still scrolls instead of pushing the bottom buttons
+            // (+/friends/requests/admin) off the rail.
+            height: min(264px, max(44px, root.servers.length * 44px));
+            for srv in root.servers: RailButton {
+                height: 44px;
+                active: srv.active;
+                clicked => { root.select_server(srv.server_id); }
+                Avatar {
+                    size: 44px;
+                    initial: srv.initial;
+                    avatar-color: Theme.accent;
+                    photo-source: srv.icon;
+                }
+            }
+        }
+
+        Rectangle { height: 1px; background: Theme.border-strong; }
+
+        RailButton {
+            active: root.add_menu_open;
+            clicked => { root.toggle_add_menu(); }
+            Text {
+                text: "+";
+                font-size: 22px;
+                font-family: Theme.font-medium;
+                color: root.add_menu_open ? #050d05 : Theme.accent;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        RailButton {
+            active: root.friends_active;
+            badge: root.friends_online;
+            clicked => { root.open_friends(); }
+            Image {
+                source: @image-url("../assets/textures/friendsicon.png");
+                width: 28px;
+                height: 28px;
+                image-fit: ImageFit.cover;
+            }
+        }
+
+        RailButton {
+            active: root.requests_active;
+            badge: root.incoming_count;
+            clicked => { root.open_requests(); }
+            Text {
+                text: "In";
+                font-size: 14px;
+                font-family: Theme.font-medium;
+                color: root.requests_active ? #050d05 : Theme.text-primary;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        if root.show_admin: RailButton {
+            active: root.admin_active;
+            clicked => { root.open_admin(); }
+            Text {
+                text: "Ad";
+                font-size: 14px;
+                font-family: Theme.font-medium;
+                color: root.admin_active ? #050d05 : Theme.text-primary;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        // Stretchy spacer -- see the comment on this VerticalLayout.
+        Rectangle {}
+    }
+}

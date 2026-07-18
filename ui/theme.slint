@@ -1,0 +1,63 @@
+// Shared design tokens for the whole app: muted-emerald, low-neon dark
+// theme, ported from the previous iced `src/style.rs`. Everything stays
+// perfectly square -- `radius` is 0px everywhere on purpose ("kanciasto").
+// Depth comes from hairline borders + hard-offset shadows (no blur, no
+// glow) rather than rounding or soft gradients.
+export global Theme {
+    // ---------- Backgrounds ----------
+    out property <color> bg-primary: #0c0d0d;
+    out property <color> bg-secondary: #090a09;
+    out property <color> bg-tertiary: #050706;
+    out property <color> bg-elevated: #0f1211;
+    out property <color> bg-hover: #141816;
+
+    // ---------- Accent (muted emerald) ----------
+    out property <color> accent: #4db884;
+    out property <color> accent-dim: #3d946b;
+    out property <color> accent-soft: #4db88424;
+    out property <color> accent-soft-strong: #4db8843d;
+
+    // ---------- Text ----------
+    out property <color> text-primary: #bdd1c4;
+    out property <color> text-muted: #80948b;
+    out property <color> text-on-accent: #05100a;
+
+    // ---------- Borders ----------
+    out property <color> border: #4db8842e;
+    out property <color> border-strong: #4db88459;
+    out property <color> border-hairline: #ffffff14;
+
+    // ---------- Status ----------
+    out property <color> online: #4db884;
+    out property <color> offline: #4d614d;
+    out property <color> danger: #d95257;
+    out property <color> danger-soft: #d9525724;
+    out property <color> warning: #d1bc4d;
+    out property <color> success: #3d946b;
+
+    // ---------- Shape ----------
+    // Sharp corners everywhere -- the whole point of the "kanciasto" pass.
+    out property <length> radius: 0px;
+
+    // ---------- Spacing scale ----------
+    out property <length> space-1: 4px;
+    out property <length> space-2: 8px;
+    out property <length> space-3: 12px;
+    out property <length> space-4: 16px;
+    out property <length> space-5: 24px;
+    out property <length> space-6: 32px;
+
+    // ---------- Typography ----------
+    out property <string> font-body: "Roboto";
+    out property <string> font-medium: "Roboto Medium";
+    out property <length> text-xs: 10px;
+    out property <length> text-sm: 12px;
+    out property <length> text-md: 14px;
+    out property <length> text-lg: 18px;
+    out property <length> text-xl: 24px;
+
+    // ---------- Shadows (hard offset, zero blur -- no "AI glow") ----------
+    out property <brush> shadow-color: #000000a6;
+    out property <length> shadow-offset: 3px;
+    out property <length> shadow-offset-light: 2px;
+}

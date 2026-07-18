@@ -1,0 +1,202 @@
+// One chat message delegate -- port of the per-message rendering loop in
+// src/view/chat.rs. Hover-reveal action bar is native Slint (TouchArea
+// has-hover) instead of the iced round-trip through Message::MessageHovered.
+import { Theme } from "theme.slint";
+import { Avatar } from "widgets.slint";
+import { ChatMessageRow } from "chat_types.slint";
+
+component ActionLink inherits Text {
+    callback clicked;
+    color: area.has-hover ? Theme.accent : Theme.text-muted;
+    font-size: 10px;
+    area := TouchArea { clicked => { root.clicked(); } }
+}
+
+export component MessageRow inherits Rectangle {
+    in property <ChatMessageRow> msg;
+    in property <[string]> quick_emojis: [];
+
+    callback react(string, string);
+    callback reply(string, string, string);
+    callback copy(string);
+    callback edit(string, string, bool);
+    callback delete(string);
+    callback purge(string);
+    callback open_attachment(string);
+
+    background: hover.has-hover ? Theme.bg-elevated : transparent;
+    border-width: 1px;
+    border-color: transparent;
+
+    // ListView delegates must have a well-defined own height -- without
+    // this binding every row collapsed and all messages rendered on top of
+    // each other. `content` wraps both conditional branches so the active
+    // one's preferred height drives the row height.
+    height: content.preferred-height;
+
+    hover := TouchArea {
+        // Rows don't need their own click behavior -- only hover detection
+        // for the action bar -- but TouchArea must exist to read has-hover.
+    }
+
+    content := VerticalLayout {
+
+    if msg.is_call_log: VerticalLayout {
+        padding: 6px;
+        spacing: 4px;
+        Text {
+            text: msg.body;
+            font-size: 12px;
+            color: msg.body_danger ? Theme.danger : Theme.text-muted;
+            horizontal-alignment: center;
+        }
+        if hover.has-hover && (msg.can_delete || msg.can_purge): HorizontalLayout {
+            alignment: center;
+            spacing: 10px;
+            if msg.can_delete: ActionLink { text: "Delete"; clicked => { root.delete(msg.id); } }
+            if msg.can_purge: ActionLink { text: "Delete forever"; clicked => { root.purge(msg.id); } }
+        }
+    }
+
+    if !msg.is_call_log: HorizontalLayout {
+        padding: 6px;
+        spacing: 12px;
+        // No `alignment` here (default `stretch`): the avatar column is
+        // pinned to 36px via `horizontal-stretch: 0` below, and the message
+        // content VerticalLayout (stretch: 1 by default) must fill the rest
+        // of the row -- otherwise it sizes to its own unconstrained natural
+        // width, which for `wrap: word-wrap` Text with no real width to wrap
+        // against (e.g. a long unbroken string) sent the text layout into a
+        // pathological, unbounded recursion and overflowed the stack.
+        Rectangle {
+            width: 36px;
+            horizontal-stretch: 0;
+            if !msg.grouped: Avatar {
+                y: 0;
+                initial: msg.author_initial;
+                avatar-color: msg.author_avatar_color;
+                photo-source: msg.author_photo;
+            }
+        }
+
+        VerticalLayout {
+            spacing: 2px;
+            alignment: start;
+
+            if !msg.grouped: HorizontalLayout {
+                spacing: 6px;
+                alignment: start;
+                Text {
+                    text: msg.author_name;
+                    font-size: 14px;
+                    color: msg.mine ? Theme.accent : white;
+                    vertical-alignment: center;
+                }
+                if msg.is_bot: Rectangle {
+                    background: Theme.accent;
+                    width: bot-label.preferred-width + 8px;
+                    height: 14px;
+                    bot-label := Text {
+                        text: "*bot";
+                        font-size: 9px;
+                        font-family: Theme.font-medium;
+                        color: #050d05;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                Text {
+                    text: msg.meta;
+                    font-size: 10px;
+                    font-family: Theme.font-medium;
+                    color: Theme.text-muted;
+                    vertical-alignment: center;
+                }
+            }
+
+            if msg.reply_line != "": Text {
+                text: msg.reply_line;
+                font-size: 11px;
+                color: Theme.text-muted;
+                wrap: word-wrap;
+            }
+
+            if msg.body != "": Text {
+                text: msg.body;
+                font-size: 14px;
+                color: msg.body_danger ? Theme.danger : Theme.text-primary;
+                wrap: word-wrap;
+            }
+
+            if msg.has_attachment && msg.attachment.width > 0: Rectangle {
+                width: 288px;
+                height: 240px;
+                background: Theme.bg-tertiary;
+                border-width: 1px;
+                border-color: Theme.border;
+                VerticalLayout {
+                    padding: 4px;
+                    spacing: 4px;
+                    alignment: center;
+                    Image {
+                        source: msg.attachment;
+                        width: 280px;
+                        height: 210px;
+                        image-fit: ImageFit.contain;
+                    }
+                    Text {
+                        text: "click to enlarge";
+                        font-size: 10px;
+                        color: Theme.accent;
+                        horizontal-alignment: center;
+                    }
+                }
+                att_touch := TouchArea { clicked => { root.open_attachment(msg.id); } }
+            }
+            if msg.has_attachment && msg.attachment.width <= 0: Text {
+                text: "[loading image...]";
+                font-size: 12px;
+                color: Theme.text-muted;
+            }
+
+            if msg.reactions.length > 0: HorizontalLayout {
+                spacing: 4px;
+                alignment: start;
+                for r in msg.reactions: Rectangle {
+                    background: r.reacted_by_me ? Theme.accent-soft : Theme.bg-tertiary;
+                    border-width: 1px;
+                    border-color: r.reacted_by_me ? Theme.accent : Theme.border;
+                    width: pill-text.preferred-width + 16px;
+                    height: 22px;
+                    pill-text := Text {
+                        text: "\{r.emoji} \{r.count}";
+                        font-size: 13px;
+                        color: Theme.text-primary;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    pill_touch := TouchArea { clicked => { root.react(msg.id, r.emoji); } }
+                }
+            }
+
+            if hover.has-hover && (msg.can_edit || msg.can_delete || msg.can_purge || msg.can_react): HorizontalLayout {
+                spacing: 10px;
+                alignment: start;
+                if msg.can_react: HorizontalLayout {
+                    spacing: 4px;
+                    for e in root.quick_emojis: ActionLink {
+                        text: e;
+                        font-size: 14px;
+                        clicked => { root.react(msg.id, e); }
+                    }
+                }
+                if msg.can_react: ActionLink { text: "Reply"; clicked => { root.reply(msg.id, msg.author_name, msg.body); } }
+                if msg.can_react: ActionLink { text: "Copy"; clicked => { root.copy(msg.body); } }
+                if msg.can_edit: ActionLink { text: "Edit"; clicked => { root.edit(msg.id, msg.body, msg.encrypted); } }
+                if msg.can_delete: ActionLink { text: "Delete"; clicked => { root.delete(msg.id); } }
+                if msg.can_purge: ActionLink { text: "Delete forever"; clicked => { root.purge(msg.id); } }
+            }
+        }
+    }
+    } // content
+}

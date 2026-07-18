@@ -1,0 +1,201 @@
+// Read-only profile viewer -- port of src/view/profile.rs.
+import { Theme } from "theme.slint";
+import { Avatar, SecondaryButton, PrimaryButton, DangerButton, Badge } from "widgets.slint";
+import { RoleTagRow } from "chat_types.slint";
+
+export component ProfileScreen inherits Rectangle {
+    in property <bool> loading: false;
+    in property <string> error;
+
+    in property <string> user_id;
+    in property <string> username;
+    in property <string> display_name;
+    in property <string> initial;
+    in property <color> avatar_color: Theme.accent;
+    in property <image> photo;
+    in property <bool> online: false;
+    in property <string> status_message;
+    in property <string> bio;
+    in property <bool> is_staff: false;
+
+    in property <bool> show_support_dm: false;
+    in property <bool> is_friend: false;
+    in property <bool> favorite: false;
+    in property <string> relation;
+    in property <string> request_id;
+    in property <bool> friend_request_busy: false;
+
+    in property <bool> can_moderate: false;
+    in property <bool> is_blocked: false;
+    in property <bool> confirm_block: false;
+
+    in property <string> mutual_servers_line;
+    in property <bool> has_role_info: false;
+    in property <string> role_section_title;
+    in property <bool> role_is_owner: false;
+    in property <[RoleTagRow]> role_badges: [];
+
+    callback back;
+    callback support_dm(string);
+    callback message_friend(string);
+    callback toggle_favorite(string);
+    callback respond_request(string);
+    callback send_friend_request(string);
+    callback unblock(string);
+    callback confirm_block_click(string);
+    callback block(string);
+    callback cancel_block;
+
+    background: Theme.bg-primary;
+
+    VerticalLayout {
+        Rectangle {
+            height: 56px;
+            HorizontalLayout {
+                padding: 16px;
+                SecondaryButton { text: "← Back"; width: 90px; clicked => { root.back(); } }
+                Rectangle { horizontal-stretch: 1; }
+                Text { text: "Profile"; font-size: 18px; color: Theme.text-primary; vertical-alignment: center; }
+                Rectangle { horizontal-stretch: 1; }
+                Rectangle { width: 90px; }
+            }
+        }
+
+        if root.loading: Text {
+            text: "Loading profile…";
+            font-size: 13px;
+            color: Theme.text-muted;
+            horizontal-alignment: center;
+        }
+
+        if !root.loading && root.error != "": HorizontalLayout {
+            alignment: center;
+            padding-top: 32px;
+            Rectangle {
+                width: 420px;
+                background: Theme.danger-soft;
+                border-width: 1px;
+                border-color: Theme.danger;
+                Text { x: 16px; y: 16px; text: root.error; font-size: 13px; color: Theme.danger; wrap: word-wrap; }
+            }
+        }
+
+        if !root.loading && root.error == "": HorizontalLayout {
+            alignment: center;
+            Rectangle {
+                width: 420px;
+                background: Theme.bg-secondary;
+                border-width: 1px;
+                border-color: Theme.border;
+                VerticalLayout {
+                    padding: 32px;
+                    spacing: 8px;
+                    alignment: center;
+
+                    Avatar {
+                        size: 72px;
+                        initial: root.initial;
+                        avatar-color: root.avatar_color;
+                        photo-source: root.photo;
+                        show-presence: true;
+                        online: root.online;
+                    }
+                    Text { text: root.display_name; font-size: 22px; color: Theme.text-primary; horizontal-alignment: center; }
+                    Text { text: "@" + root.username; font-size: 13px; color: Theme.text-muted; horizontal-alignment: center; }
+                    Rectangle {
+                        width: presence-label.preferred-width + 20px;
+                        height: 22px;
+                        background: root.online ? Theme.accent-soft : #4db8840a;
+                        border-width: 1px;
+                        border-color: root.online ? Theme.border-strong : Theme.border;
+                        presence-label := Text {
+                            text: root.online ? "● Online" : "○ Offline";
+                            font-size: 11px;
+                            color: root.online ? Theme.online : Theme.text-muted;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    if root.status_message != "": Text {
+                        text: root.status_message;
+                        font-size: 14px;
+                        color: Theme.text-primary;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                    }
+                    if root.bio != "": Rectangle {
+                        width: 380px;
+                        background: Theme.bg-tertiary;
+                        border-width: 1px;
+                        border-color: Theme.border;
+                        bio-text := Text {
+                            x: 16px;
+                            y: 16px;
+                            width: parent.width - 32px;
+                            text: root.bio;
+                            font-size: 13px;
+                            color: Theme.text-primary;
+                            wrap: word-wrap;
+                        }
+                        height: bio-text.preferred-height + 32px;
+                    }
+                    if root.is_staff: Badge { text: "STAFF"; bg: #d1664719; fg: #d16647; }
+
+                    if root.has_role_info: VerticalLayout {
+                        spacing: 6px;
+                        alignment: center;
+                        Text { text: root.role_section_title; font-size: 10px; font-family: Theme.font-medium; color: Theme.text-muted; horizontal-alignment: center; }
+                        if root.role_is_owner: Badge { text: "Owner"; bg: Theme.warning; fg: #0d0d05; }
+                        if !root.role_is_owner && root.role_badges.length > 0: HorizontalLayout {
+                            alignment: center;
+                            spacing: 4px;
+                            for tag in root.role_badges: Badge { text: tag.name; bg: tag.color; fg: white; }
+                        }
+                        if !root.role_is_owner && root.role_badges.length == 0: Text { text: "No role"; font-size: 12px; color: Theme.text-muted; }
+                    }
+
+                    if root.mutual_servers_line != "": Text {
+                        text: root.mutual_servers_line;
+                        font-size: 12px;
+                        color: Theme.text-muted;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: center;
+                        if root.show_support_dm: PrimaryButton { text: "Support message"; width: 140px; clicked => { root.support_dm(root.user_id); } }
+                        if root.is_friend: SecondaryButton { text: "Message"; width: 90px; clicked => { root.message_friend(root.user_id); } }
+                        if root.is_friend: SecondaryButton { text: root.favorite ? "★ Fav" : "☆ Fav"; width: 70px; clicked => { root.toggle_favorite(root.user_id); } }
+                        if !root.is_friend && root.relation == "incoming" && root.request_id != "": PrimaryButton { text: "Accept request"; width: 130px; clicked => { root.respond_request(root.request_id); } }
+                        if !root.is_friend && root.relation == "outgoing": Text { text: "Friend request pending…"; font-size: 12px; color: Theme.text-muted; vertical-alignment: center; }
+                        if !root.is_friend && root.relation != "incoming" && root.relation != "outgoing" && root.relation != "self": PrimaryButton {
+                            text: root.friend_request_busy ? "Sending…" : "Add friend";
+                            enabled: !root.friend_request_busy;
+                            width: 100px;
+                            clicked => { root.send_friend_request(root.username); }
+                        }
+                    }
+
+                    if root.can_moderate && root.is_blocked: SecondaryButton { text: "Unblock"; width: 90px; clicked => { root.unblock(root.user_id); } }
+                    if root.can_moderate && !root.is_blocked && !root.confirm_block: DangerButton { text: "Block"; width: 90px; clicked => { root.confirm_block_click(root.user_id); } }
+                    if root.can_moderate && !root.is_blocked && root.confirm_block: HorizontalLayout {
+                        spacing: 8px;
+                        alignment: center;
+                        Text { text: "Block this person?"; font-size: 12px; color: Theme.text-muted; vertical-alignment: center; }
+                        DangerButton { text: "Yes, block"; width: 90px; clicked => { root.block(root.user_id); } }
+                        SecondaryButton { text: "Cancel"; width: 80px; clicked => { root.cancel_block(); } }
+                    }
+                }
+            }
+        }
+
+        // Stretchy spacer: every other child of this column is fixed-height,
+        // and a column of only bounded-max children clamps the whole window
+        // scene to its content height (see ResizeHandle in widgets.slint for
+        // the same story). The spacer keeps the column height-unbounded.
+        Rectangle {}
+    }
+}

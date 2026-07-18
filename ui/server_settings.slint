@@ -1,0 +1,503 @@
+// Per-server Settings screen (Overview / Channels / Members / Roles /
+// Invites / Danger Zone) -- port of src/view/server_settings.rs.
+import { Theme } from "theme.slint";
+import { Avatar, SecondaryButton, PrimaryButton, DangerButton, TextInputField, FieldLabel, SectionTitle, Badge } from "widgets.slint";
+import { SSChannelRow, SSMemberRow, SSRoleRow, SSPermRow } from "server_settings_types.slint";
+
+export enum ServerSettingsCategory { Overview, Channels, Members, Roles, Invites, Danger }
+
+component Card inherits Rectangle {
+    background: Theme.bg-secondary;
+    border-width: 1px;
+    border-color: Theme.border;
+    VerticalLayout { padding: 24px; spacing: 14px; @children }
+}
+
+component StatusBanner inherits Rectangle {
+    in property <string> text;
+    in property <bool> danger: false;
+    height: label.preferred-height + 20px;
+    background: root.danger ? Theme.danger-soft : Theme.accent-soft;
+    border-width: 1px;
+    border-color: root.danger ? Theme.danger : Theme.border-strong;
+    label := Text { x: 12px; y: 10px; width: parent.width - 24px; text: root.text; font-size: 12px; color: root.danger ? Theme.danger : Theme.text-primary; wrap: word-wrap; }
+}
+
+component NavItem inherits Rectangle {
+    in property <string> label;
+    in property <string> hint;
+    in property <bool> active: false;
+    in property <bool> danger: false;
+    callback clicked;
+    height: content.preferred-height + 16px;
+    background: root.active ? Theme.accent-soft : (touch.has-hover ? Theme.bg-hover : transparent);
+    border-width: root.active ? 1px : 0px;
+    border-color: Theme.accent;
+    touch := TouchArea { clicked => { root.clicked(); } }
+    content := VerticalLayout {
+        padding: 8px;
+        spacing: 2px;
+        Text { text: root.label; font-size: 13px; color: root.danger ? Theme.danger : Theme.text-primary; }
+        Text { text: root.hint; font-size: 10px; color: Theme.text-muted; }
+    }
+}
+
+export component ServerSettingsScreen inherits Rectangle {
+    in property <ServerSettingsCategory> category: ServerSettingsCategory.Overview;
+    in property <string> server_name;
+    in property <string> server_initial;
+    in property <image> server_icon;
+    in property <string> header_meta;
+
+    // Overview
+    in property <bool> is_owner: false;
+    in property <bool> is_platform_admin: false;
+    in property <bool> server_icon_busy: false;
+    in-out property <string> rename_server_input;
+    in property <string> server_status;
+    in property <bool> server_status_danger: false;
+    in-out property <string> custom_slug_input;
+    in property <string> custom_slug_display;
+
+    // Channels
+    in property <bool> can_manage_channels: false;
+    in-out property <string> new_channel_name_input;
+    in property <bool> new_channel_is_voice: false;
+    in property <[SSChannelRow]> channels: [];
+    in property <bool> can_delete_channel: false;
+    in-out property <string> rename_channel_input;
+
+    // Members
+    in property <bool> can_manage_roles: false;
+    in property <bool> can_kick: false;
+    in property <[SSMemberRow]> members: [];
+
+    // Roles
+    in property <[SSRoleRow]> roles: [];
+    in-out property <string> new_role_name_input;
+    in property <string> editing_role_id;
+    in-out property <string> role_name_edit_input;
+    in property <string> role_edit_color;
+    in property <[SSPermRow]> role_permissions: [];
+    in property <bool> editing_role_is_default: false;
+    in property <bool> confirm_delete_role: false;
+
+    // Invites
+    in property <string> invite_code;
+
+    // Danger
+    in property <bool> confirm_delete_server: false;
+
+    callback back;
+    callback category_changed(ServerSettingsCategory);
+
+    callback pick_icon;
+    callback remove_icon;
+    callback rename_server_input_changed(string);
+    callback rename_server;
+    callback custom_slug_changed(string);
+    callback save_custom_slug;
+    callback clear_custom_slug;
+
+    callback new_channel_name_changed(string);
+    callback toggle_new_channel_voice;
+    callback create_channel;
+    callback start_rename_channel(string, string);
+    callback rename_channel_input_changed(string);
+    callback save_rename_channel;
+    callback cancel_rename_channel;
+    callback delete_channel(string);
+
+    callback toggle_member_picker(string);
+    callback toggle_member_role(string, string);
+    callback kick_member(string);
+    callback open_profile(string);
+
+    callback new_role_name_changed(string);
+    callback create_role;
+    callback select_role_for_edit(string);
+    callback close_role_editor;
+    callback role_name_edit_changed(string);
+    callback save_role_name;
+    callback set_role_color(string, string);
+    callback toggle_role_permission(string, int);
+    callback confirm_delete_role_click(string);
+    callback cancel_delete_role;
+    callback delete_role(string);
+
+    callback copy_invite_code(string);
+    callback copy_invite_link(string);
+    callback regenerate_invite_code;
+
+    callback toggle_confirm_delete_server;
+    callback delete_server;
+
+    background: Theme.bg-primary;
+
+    VerticalLayout {
+        Rectangle {
+            height: 64px;
+            background: Theme.bg-secondary;
+            border-width: 1px;
+            border-color: Theme.border;
+            HorizontalLayout {
+                padding: 16px;
+                spacing: 12px;
+                SecondaryButton { text: "← Back"; width: 90px; clicked => { root.back(); } }
+                Avatar { size: 36px; initial: root.server_initial; photo-source: root.server_icon; avatar-color: Theme.bg-elevated; }
+                VerticalLayout {
+                    spacing: 2px;
+                    alignment: center;
+                    Text { text: root.server_name + " · Settings"; font-size: 18px; color: Theme.text-primary; }
+                    Text { text: root.header_meta; font-size: 11px; color: Theme.text-muted; }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            vertical-stretch: 1;
+            Rectangle {
+                width: 240px;
+                background: Theme.bg-secondary;
+                border-width: 1px;
+                border-color: Theme.border;
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 2px;
+                    Text { text: "SERVER SETTINGS"; font-size: 11px; color: Theme.text-muted; }
+                    Rectangle { height: 6px; }
+                    NavItem { label: "Overview"; hint: "Name, icon, vanity URL"; active: root.category == ServerSettingsCategory.Overview; clicked => { root.category_changed(ServerSettingsCategory.Overview); } }
+                    NavItem { label: "Channels"; hint: "Create, rename, delete"; active: root.category == ServerSettingsCategory.Channels; clicked => { root.category_changed(ServerSettingsCategory.Channels); } }
+                    NavItem { label: "Members"; hint: "Assign roles, kick"; active: root.category == ServerSettingsCategory.Members; clicked => { root.category_changed(ServerSettingsCategory.Members); } }
+                    NavItem { label: "Roles"; hint: "Create roles, edit permissions"; active: root.category == ServerSettingsCategory.Roles; clicked => { root.category_changed(ServerSettingsCategory.Roles); } }
+                    NavItem { label: "Invites"; hint: "Share join codes"; active: root.category == ServerSettingsCategory.Invites; clicked => { root.category_changed(ServerSettingsCategory.Invites); } }
+                    NavItem { label: "Danger Zone"; hint: "Irreversible actions"; danger: true; active: root.category == ServerSettingsCategory.Danger; clicked => { root.category_changed(ServerSettingsCategory.Danger); } }
+                }
+            }
+
+            Flickable {
+                horizontal-stretch: 1;
+                viewport-height: pane.preferred-height;
+                pane := VerticalLayout {
+                    width: parent.width;
+                    padding: 24px;
+                    spacing: 20px;
+
+                    if root.category == ServerSettingsCategory.Overview: Card {
+                        SectionTitle { text: "Server identity"; }
+                        Text { text: "Icon and display name shown in the rail and member lists."; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
+                        HorizontalLayout {
+                            spacing: 16px;
+                            Rectangle {
+                                width: 80px;
+                                height: 80px;
+                                horizontal-stretch: 0;
+                                background: root.server_icon.width > 0 ? transparent : Theme.accent-soft;
+                                border-width: 1px;
+                                border-color: Theme.border-strong;
+                                clip: true;
+                                if root.server_icon.width > 0: Image { source: root.server_icon; width: 80px; height: 80px; image-fit: ImageFit.cover; }
+                                if root.server_icon.width <= 0: Text { text: root.server_initial; font-size: 26px; color: Theme.accent; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                            VerticalLayout {
+                                spacing: 6px;
+                                alignment: start;
+                                if root.is_owner: SecondaryButton { text: root.server_icon_busy ? "Uploading…" : "Upload icon"; enabled: !root.server_icon_busy; clicked => { root.pick_icon(); } }
+                                if root.is_owner && root.server_icon.width > 0: Text { text: "Remove icon"; font-size: 12px; color: Theme.accent; TouchArea { clicked => { root.remove_icon(); } } }
+                                if root.is_owner: Text { text: "PNG or JPG · under 2MB · square looks best"; font-size: 10px; color: Theme.text-muted; }
+                                if !root.is_owner: Text { text: "Only the server owner can change the icon."; font-size: 11px; color: Theme.text-muted; }
+                            }
+                        }
+                        FieldLabel { text: "Server name"; }
+                        if root.is_owner: HorizontalLayout {
+                            spacing: 8px;
+                            TextInputField { placeholder: "Server name"; value <=> root.rename_server_input; edited(t) => { root.rename_server_input_changed(t); } submitted => { root.rename_server(); } }
+                            PrimaryButton { text: "Save"; width: 80px; clicked => { root.rename_server(); } }
+                        }
+                        if !root.is_owner: Text { text: root.server_name; font-size: 16px; color: Theme.text-primary; }
+                        if !root.is_owner: Text { text: "Only the server owner can rename this server."; font-size: 11px; color: Theme.text-muted; }
+                        if root.server_status != "": StatusBanner { text: root.server_status; danger: root.server_status_danger; }
+                    }
+
+                    if root.category == ServerSettingsCategory.Overview && root.is_platform_admin: Card {
+                        SectionTitle { text: "Custom URL"; }
+                        Text { text: "Platform admin only. Vanity path for this server."; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Text { text: "talkyss.app/"; font-size: 13px; color: Theme.text-muted; vertical-alignment: center; }
+                            TextInputField { placeholder: "slug"; value <=> root.custom_slug_input; edited(t) => { root.custom_slug_changed(t); } submitted => { root.save_custom_slug(); } }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            PrimaryButton { text: "Save URL"; width: 90px; clicked => { root.save_custom_slug(); } }
+                            SecondaryButton { text: "Clear"; width: 80px; clicked => { root.clear_custom_slug(); } }
+                        }
+                    }
+                    if root.category == ServerSettingsCategory.Overview && !root.is_platform_admin && root.custom_slug_display != "": Card {
+                        SectionTitle { text: "Custom URL"; }
+                        Text { text: "/" + root.custom_slug_display; font-size: 16px; color: Theme.accent; }
+                        Text { text: "Set by Talkyss administration."; font-size: 11px; color: Theme.text-muted; }
+                    }
+
+                    if root.category == ServerSettingsCategory.Channels: Card {
+                        SectionTitle { text: "Channels"; }
+                        Text { text: "Text for chat, voice for hangouts. At least one channel is required."; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
+                        if root.can_manage_channels: FieldLabel { text: "Create channel"; }
+                        if root.can_manage_channels: HorizontalLayout {
+                            spacing: 8px;
+                            TextInputField { placeholder: "channel-name"; value <=> root.new_channel_name_input; edited(t) => { root.new_channel_name_changed(t); } submitted => { root.create_channel(); } }
+                            SecondaryButton { text: root.new_channel_is_voice ? "Voice" : "Text"; width: 70px; clicked => { root.toggle_new_channel_voice(); } }
+                            PrimaryButton { text: "Create"; width: 90px; clicked => { root.create_channel(); } }
+                        }
+                        if !root.can_manage_channels: Text { text: "Channels are managed by members with the Manage Channels permission."; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
+                        if root.server_status != "": StatusBanner { text: root.server_status; }
+                    }
+                    if root.category == ServerSettingsCategory.Channels: Card {
+                        FieldLabel { text: "All channels (\{root.channels.length})"; }
+                        if root.channels.length == 0: Text { text: "No channels yet — create one above."; font-size: 13px; color: Theme.text-muted; }
+                        for ch in root.channels: Rectangle {
+                            background: Theme.bg-tertiary;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            // Two sibling `if` blocks below (only one ever
+                            // active) mean this Rectangle doesn't reliably
+                            // get an implicit fill-to-content height -- same
+                            // root cause as the AppWindow screens and
+                            // MessageRow overlap bugs. `row` gives it a
+                            // single structural child to size against.
+                            height: row.preferred-height;
+                            row := VerticalLayout {
+                            if !ch.is_renaming: HorizontalLayout {
+                                padding: 12px;
+                                spacing: 10px;
+                                Text { text: ch.is_voice ? "V" : "#"; font-size: 14px; color: Theme.text-muted; vertical-alignment: center; }
+                                VerticalLayout {
+                                    spacing: 2px;
+                                    horizontal-stretch: 1;
+                                    Text { text: ch.name; font-size: 14px; color: Theme.text-primary; }
+                                    Text { text: ch.is_voice ? "Voice channel" : "Text channel"; font-size: 11px; color: Theme.text-muted; }
+                                }
+                                if root.can_manage_channels: SecondaryButton { text: "Rename"; clicked => { root.start_rename_channel(ch.conversation_id, ch.name); } }
+                                if root.can_manage_channels && root.can_delete_channel: DangerButton { text: "Delete"; clicked => { root.delete_channel(ch.conversation_id); } }
+                            }
+                            if ch.is_renaming: HorizontalLayout {
+                                padding: 10px;
+                                spacing: 8px;
+                                TextInputField { placeholder: "channel-name"; value <=> root.rename_channel_input; edited(t) => { root.rename_channel_input_changed(t); } submitted => { root.save_rename_channel(); } }
+                                PrimaryButton { text: "Save"; width: 70px; clicked => { root.save_rename_channel(); } }
+                                SecondaryButton { text: "Cancel"; width: 80px; clicked => { root.cancel_rename_channel(); } }
+                            }
+                            } // row
+                        }
+                    }
+
+                    if root.category == ServerSettingsCategory.Members: Card {
+                        SectionTitle { text: "Members (\{root.members.length})"; }
+                        Text {
+                            text: (root.can_manage_roles || root.can_kick)
+                                ? "Add roles from the flyout — click one to grant it, click again to revoke. Kick removes the user from this server."
+                                : "Roles are managed by members with the Manage Roles permission.";
+                            font-size: 12px;
+                            color: Theme.text-muted;
+                            wrap: word-wrap;
+                        }
+                        if root.members.length == 0: Text { text: "Loading members…"; font-size: 13px; color: Theme.text-muted; }
+                        for m in root.members: Rectangle {
+                            background: Theme.bg-tertiary;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 8px;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    Avatar { initial: m.initial; avatar-color: m.avatar_color; photo-source: m.photo; }
+                                    VerticalLayout {
+                                        spacing: 2px;
+                                        horizontal-stretch: 1;
+                                        Text { text: m.display_name; font-size: 14px; color: Theme.text-primary; }
+                                        Text { text: "@" + m.username + " · " + m.role_label; font-size: 11px; color: Theme.text-muted; }
+                                    }
+                                    if m.is_owner: Badge { text: "OWNER"; bg: #e0b347; fg: #0d0a00; }
+                                }
+                                if !m.is_owner && (root.can_manage_roles || root.can_kick): HorizontalLayout {
+                                    spacing: 6px;
+                                    if root.can_manage_roles: SecondaryButton { text: m.picker_open ? "Close" : "+ Add role"; clicked => { root.toggle_member_picker(m.user_id); } }
+                                    if root.can_kick: DangerButton { text: "Kick"; clicked => { root.kick_member(m.user_id); } }
+                                }
+                                if !m.is_owner && root.can_manage_roles && m.picker_open: Rectangle {
+                                    background: Theme.bg-elevated;
+                                    border-width: 1px;
+                                    border-color: Theme.border;
+                                    VerticalLayout {
+                                        padding: 10px;
+                                        spacing: 6px;
+                                        Text { text: "Click to grant, click again to revoke:"; font-size: 11px; color: Theme.text-muted; }
+                                        if m.assignable_roles.length == 0: Text { text: "No custom roles yet — create one in the Roles tab."; font-size: 11px; color: Theme.text-muted; }
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            for r in m.assignable_roles: SecondaryButton {
+                                                text: (r.assigned ? "✓ " : "+ ") + r.name;
+                                                clicked => { root.toggle_member_role(m.user_id, r.role_id); }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if root.category == ServerSettingsCategory.Roles: Card {
+                        SectionTitle { text: "Roles"; }
+                        Text {
+                            text: root.can_manage_roles
+                                ? "Create roles, then click one to edit its name, color, and permissions."
+                                : "Roles are managed by members with the Manage Roles permission.";
+                            font-size: 12px;
+                            color: Theme.text-muted;
+                            wrap: word-wrap;
+                        }
+                        if root.can_manage_roles: HorizontalLayout {
+                            spacing: 8px;
+                            TextInputField { placeholder: "New role name"; value <=> root.new_role_name_input; edited(t) => { root.new_role_name_changed(t); } submitted => { root.create_role(); } }
+                            PrimaryButton { text: "Add role"; width: 90px; clicked => { root.create_role(); } }
+                        }
+                        if root.roles.length == 0: Text { text: "No custom roles yet."; font-size: 12px; color: Theme.text-muted; }
+                        for role in root.roles: VerticalLayout {
+                            spacing: 2px;
+                            Rectangle {
+                                background: Theme.bg-tertiary;
+                                border-width: 1px;
+                                border-color: Theme.border;
+                                HorizontalLayout {
+                                    padding: 10px;
+                                    spacing: 10px;
+                                    Rectangle { width: 12px; height: 12px; background: role.color; vertical-stretch: 0; }
+                                    Text { text: role.name; font-size: 13px; color: Theme.text-primary; vertical-alignment: center; horizontal-stretch: 1; }
+                                    if root.can_manage_roles: SecondaryButton {
+                                        text: role.is_editing ? "Close" : "Edit";
+                                        clicked => { role.is_editing ? root.close_role_editor() : root.select_role_for_edit(role.role_id); }
+                                    }
+                                }
+                            }
+                            if role.is_editing: Rectangle {
+                                background: Theme.bg-secondary;
+                                border-width: 1px;
+                                border-color: Theme.border;
+                                VerticalLayout {
+                                    padding: 14px;
+                                    spacing: 10px;
+                                    FieldLabel { text: "Rename"; }
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        TextInputField { placeholder: "Role name"; value <=> root.role_name_edit_input; edited(t) => { root.role_name_edit_changed(t); } submitted => { root.save_role_name(); } }
+                                        PrimaryButton { text: "Save"; width: 70px; clicked => { root.save_role_name(); } }
+                                    }
+                                    FieldLabel { text: "Color"; }
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        for hex[i] in [
+                                            { h: "#33FF66", c: #33FF66 }, { h: "#88FFAA", c: #88FFAA },
+                                            { h: "#00CC55", c: #00CC55 }, { h: "#CCFF33", c: #CCFF33 },
+                                            { h: "#66DD88", c: #66DD88 }, { h: "#FAA61A", c: #FAA61A },
+                                            { h: "#EB459E", c: #EB459E }, { h: "#ED4245", c: #ED4245 },
+                                        ]: Rectangle {
+                                            width: 24px;
+                                            height: 24px;
+                                            background: hex.c;
+                                            border-width: root.role_edit_color == hex.h ? 2px : 1px;
+                                            border-color: root.role_edit_color == hex.h ? Theme.accent : Theme.border;
+                                            TouchArea { clicked => { root.set_role_color(role.role_id, hex.h); } }
+                                        }
+                                    }
+                                    FieldLabel { text: "Permissions"; }
+                                    VerticalLayout {
+                                        spacing: 4px;
+                                        for perm in root.role_permissions: HorizontalLayout {
+                                            spacing: 8px;
+                                            Rectangle {
+                                                width: 16px;
+                                                height: 16px;
+                                                background: perm.enabled ? Theme.accent : transparent;
+                                                border-width: 1px;
+                                                border-color: Theme.border-strong;
+                                                TouchArea { clicked => { root.toggle_role_permission(role.role_id, perm.bit); } }
+                                            }
+                                            Text { text: perm.label; font-size: 12px; color: Theme.text-primary; vertical-alignment: center; }
+                                        }
+                                    }
+                                    if root.confirm_delete_role: HorizontalLayout {
+                                        spacing: 8px;
+                                        Text { text: "Delete this role? This can't be undone."; font-size: 12px; color: Theme.text-muted; vertical-alignment: center; }
+                                        DangerButton { text: "Yes, delete"; clicked => { root.delete_role(role.role_id); } }
+                                        SecondaryButton { text: "Cancel"; clicked => { root.cancel_delete_role(); } }
+                                    }
+                                    if !root.confirm_delete_role && !root.editing_role_is_default: DangerButton { text: "Delete role"; width: 110px; clicked => { root.confirm_delete_role_click(role.role_id); } }
+                                    if !root.confirm_delete_role && root.editing_role_is_default: Text { text: "The default role can't be deleted."; font-size: 11px; color: Theme.text-muted; }
+                                }
+                            }
+                        }
+                        if root.server_status != "": StatusBanner { text: root.server_status; }
+                    }
+
+                    if root.category == ServerSettingsCategory.Invites: Card {
+                        SectionTitle { text: "Invite people"; }
+                        Text { text: "Share this code. Anyone with it can join. Regenerating invalidates the old code."; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
+                        if root.invite_code == "": Text { text: "Loading invite code…"; font-size: 13px; color: Theme.text-muted; }
+                        if root.invite_code != "": Rectangle {
+                            background: Theme.bg-tertiary;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            VerticalLayout {
+                                padding: 24px;
+                                spacing: 12px;
+                                alignment: center;
+                                FieldLabel { text: "Invite code"; }
+                                Text { text: root.invite_code; font-size: 28px; font-family: Theme.font-medium; color: Theme.accent; horizontal-alignment: center; }
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    alignment: center;
+                                    PrimaryButton { text: "Copy code"; width: 110px; clicked => { root.copy_invite_code(root.invite_code); } }
+                                    SecondaryButton { text: "Copy link"; width: 110px; clicked => { root.copy_invite_link(root.invite_code); } }
+                                    if root.is_owner: SecondaryButton { text: "Regenerate"; width: 110px; clicked => { root.regenerate_invite_code(); } }
+                                }
+                            }
+                        }
+                        if root.server_status != "": StatusBanner { text: root.server_status; }
+                    }
+
+                    if root.category == ServerSettingsCategory.Danger: Rectangle {
+                        background: Theme.danger-soft;
+                        border-width: 1px;
+                        border-color: Theme.danger;
+                        VerticalLayout {
+                            padding: 22px;
+                            spacing: 12px;
+                            Text { text: "Danger Zone"; font-size: 16px; color: Theme.danger; }
+                            Text { text: "Deleting a server permanently removes all channels, messages, roles and memberships. This cannot be undone."; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
+                            if !root.is_owner: Text { text: "Only the server owner can delete this server."; font-size: 12px; color: Theme.text-muted; }
+                            if root.is_owner && !root.confirm_delete_server: DangerButton { text: "Delete server"; width: 140px; clicked => { root.toggle_confirm_delete_server(); } }
+                            if root.is_owner && root.confirm_delete_server: Rectangle {
+                                background: Theme.danger-soft;
+                                border-width: 1px;
+                                border-color: Theme.danger;
+                                VerticalLayout {
+                                    padding: 16px;
+                                    spacing: 12px;
+                                    Text { text: "Are you sure you want to delete this server?"; font-size: 13px; color: Theme.danger; }
+                                    Text { text: "This action is permanent."; font-size: 11px; color: Theme.text-muted; }
+                                    HorizontalLayout {
+                                        spacing: 10px;
+                                        DangerButton { text: "Yes, delete forever"; width: 160px; clicked => { root.delete_server(); } }
+                                        SecondaryButton { text: "Cancel"; width: 90px; clicked => { root.toggle_confirm_delete_server(); } }
+                                    }
+                                }
+                            }
+                            if root.server_status != "": StatusBanner { text: root.server_status; danger: true; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,413 @@
+// App-wide Settings screen (Account / Privacy / Bots / Voice / About) --
+// port of src/view/settings.rs.
+import { Slider } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Avatar, SecondaryButton, PrimaryButton, DangerButton, TextInputField, FieldLabel, SectionTitle, Badge } from "widgets.slint";
+
+export enum SettingsCategory { Account, Privacy, Bots, Voice, About }
+
+export struct BotRow {
+    bot_id: string,
+    display_name: string,
+    username: string,
+}
+
+export struct DeviceRow {
+    name: string,
+    selected: bool,
+}
+
+component SectionCard inherits Rectangle {
+    background: Theme.bg-secondary;
+    border-width: 1px;
+    border-color: Theme.border;
+    VerticalLayout { padding: 24px; spacing: 14px; @children }
+}
+
+component ToggleRow inherits Rectangle {
+    in property <string> title;
+    in property <string> description;
+    in property <bool> value;
+    callback toggled;
+    height: content.preferred-height;
+    content := HorizontalLayout {
+        spacing: 12px;
+        VerticalLayout {
+            spacing: 2px;
+            horizontal-stretch: 1;
+            Text { text: root.title; font-size: 13px; color: Theme.text-primary; }
+            Text { text: root.description; font-size: 11px; color: Theme.text-muted; wrap: word-wrap; }
+        }
+        Rectangle {
+            width: 44px;
+            height: 24px;
+            vertical-stretch: 0;
+            background: root.value ? Theme.accent-dim : Theme.bg-tertiary;
+            border-width: 1px;
+            border-color: root.value ? Theme.accent : Theme.border;
+            Rectangle {
+                x: root.value ? parent.width - self.width - 3px : 3px;
+                y: 3px;
+                width: 16px;
+                height: 16px;
+                background: white;
+            }
+            TouchArea { clicked => { root.toggled(); } }
+        }
+    }
+}
+
+component SidebarItem inherits Rectangle {
+    in property <string> text;
+    in property <bool> active: false;
+    callback clicked;
+    height: 40px;
+    background: root.active ? Theme.accent-soft : (touch.has-hover ? Theme.bg-hover : transparent);
+    border-width: root.active ? 1px : 0px;
+    border-color: Theme.accent;
+    touch := TouchArea { clicked => { root.clicked(); } }
+    Text { x: 12px; text: root.text; font-size: 13px; color: Theme.text-primary; vertical-alignment: center; }
+}
+
+component DeviceItem inherits Rectangle {
+    in property <string> text;
+    in property <bool> active: false;
+    callback clicked;
+    height: 32px;
+    background: root.active ? Theme.accent-soft : (touch.has-hover ? Theme.bg-hover : transparent);
+    touch := TouchArea { clicked => { root.clicked(); } }
+    Text { x: 8px; text: root.text; font-size: 13px; color: Theme.text-primary; vertical-alignment: center; }
+}
+
+export component SettingsScreen inherits Rectangle {
+    in property <SettingsCategory> category: SettingsCategory.Account;
+
+    // Account
+    in property <string> avatar_initial;
+    in property <color> avatar_color: Theme.accent;
+    in property <image> avatar_photo;
+    in property <bool> has_photo: false;
+    in property <bool> avatar_upload_busy: false;
+    in-out property <string> display_name_input;
+    in-out property <string> status_input;
+    in-out property <string> bio_input;
+    in property <int> selected_avatar_index: -1;
+    in property <string> profile_status;
+    in-out property <string> current_password_input;
+    in-out property <string> new_password_input;
+    in-out property <string> confirm_password_input;
+    in property <string> password_status;
+
+    // Privacy
+    in property <string> my_badge_text;
+    in property <color> my_badge_bg;
+    in property <color> my_badge_fg;
+    in property <bool> store_chat_history: true;
+    in property <bool> hide_online_status: false;
+    in property <bool> friends_only_dms: false;
+    in property <bool> discoverable: true;
+    in property <string> friend_request_privacy_label;
+    in property <string> presence_status_label;
+    in property <bool> is_staff: false;
+
+    // Bots
+    in-out property <string> new_bot_name_input;
+    in property <string> bot_token_reveal;
+    in property <[BotRow]> my_bots: [];
+    in-out property <string> bot_invite_username_input;
+    in property <string> bot_status;
+
+    // Voice
+    in property <[DeviceRow]> input_devices: [];
+    in property <[DeviceRow]> output_devices: [];
+    in property <float> noise_gate: 0;
+    in property <string> noise_gate_label;
+
+    // About
+    in property <string> version_line;
+    in property <string> vault_hint;
+    in property <string> update_check_status;
+    in property <string> ping_status;
+
+    callback close;
+    callback category_changed(SettingsCategory);
+
+    callback pick_avatar;
+    callback remove_avatar;
+    callback display_name_changed(string);
+    callback status_changed(string);
+    callback bio_changed(string);
+    callback avatar_color_selected(string);
+    callback save_profile;
+    callback current_password_changed(string);
+    callback new_password_changed(string);
+    callback confirm_password_changed(string);
+    callback change_password;
+    callback log_out;
+
+    callback toggle_store_history;
+    callback toggle_hide_online;
+    callback toggle_friends_only_dms;
+    callback toggle_discoverable;
+    callback cycle_friend_request_privacy;
+    callback cycle_presence;
+    callback sign_out_others;
+
+    callback new_bot_name_changed(string);
+    callback create_bot;
+    callback refresh_bots;
+    callback copy_token(string);
+    callback dismiss_token;
+    callback regenerate_bot_token(string);
+    callback delete_bot(string);
+    callback bot_invite_username_changed(string);
+    callback invite_bot;
+
+    callback input_device_selected(string);
+    callback output_device_selected(string);
+    callback noise_gate_changed(float);
+
+    callback check_for_update;
+    callback measure_ping;
+
+    background: Theme.bg-primary;
+
+    VerticalLayout {
+        Rectangle {
+            height: 56px;
+            HorizontalLayout {
+                padding: 16px;
+                SecondaryButton { text: "← Back"; width: 90px; clicked => { root.close(); } }
+                Rectangle { horizontal-stretch: 1; }
+                Text { text: "Settings"; font-size: 20px; color: Theme.text-primary; vertical-alignment: center; }
+                Rectangle { horizontal-stretch: 1; }
+                Rectangle { width: 90px; }
+            }
+        }
+
+        HorizontalLayout {
+            vertical-stretch: 1;
+
+            Rectangle {
+                width: 220px;
+                background: Theme.bg-secondary;
+                border-width: 1px;
+                border-color: Theme.border;
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 2px;
+                    Text { text: "SETTINGS"; font-size: 11px; color: Theme.text-muted; }
+                    Rectangle { height: 4px; }
+                    SidebarItem { text: "My Account"; active: root.category == SettingsCategory.Account; clicked => { root.category_changed(SettingsCategory.Account); } }
+                    SidebarItem { text: "Privacy"; active: root.category == SettingsCategory.Privacy; clicked => { root.category_changed(SettingsCategory.Privacy); } }
+                    SidebarItem { text: "Bots"; active: root.category == SettingsCategory.Bots; clicked => { root.category_changed(SettingsCategory.Bots); } }
+                    SidebarItem { text: "Voice & Video"; active: root.category == SettingsCategory.Voice; clicked => { root.category_changed(SettingsCategory.Voice); } }
+                    SidebarItem { text: "About"; active: root.category == SettingsCategory.About; clicked => { root.category_changed(SettingsCategory.About); } }
+                }
+            }
+
+            Flickable {
+                horizontal-stretch: 1;
+                viewport-height: pane.preferred-height;
+                pane := VerticalLayout {
+                    width: parent.width;
+                    padding: 24px;
+                    spacing: 20px;
+
+                    if root.category == SettingsCategory.Account: SectionCard {
+                        SectionTitle { text: "Profile"; }
+                        HorizontalLayout {
+                            spacing: 16px;
+                            Avatar { size: 72px; initial: root.avatar_initial; avatar-color: root.avatar_color; photo-source: root.avatar_photo; }
+                            VerticalLayout {
+                                spacing: 6px;
+                                alignment: start;
+                                SecondaryButton { text: root.avatar_upload_busy ? "Uploading..." : "Upload photo"; enabled: !root.avatar_upload_busy; clicked => { root.pick_avatar(); } }
+                                if root.has_photo: Text { text: "Remove photo"; font-size: 12px; color: Theme.accent; TouchArea { clicked => { root.remove_avatar(); } } }
+                                Text { text: "PNG or JPG, under 2MB."; font-size: 11px; color: Theme.text-muted; }
+                            }
+                        }
+                        FieldLabel { text: "Display name"; }
+                        TextInputField { placeholder: "Display name"; value <=> root.display_name_input; edited(t) => { root.display_name_changed(t); } }
+                        FieldLabel { text: "Status message"; }
+                        TextInputField { placeholder: "What's on your mind?"; value <=> root.status_input; edited(t) => { root.status_changed(t); } }
+                        FieldLabel { text: "Bio"; }
+                        TextInputField { placeholder: "Tell people a bit about yourself"; value <=> root.bio_input; edited(t) => { root.bio_changed(t); } }
+                        FieldLabel { text: "Avatar color"; }
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: start;
+                            for c[i] in [
+                                { hex: "#3FB36B", col: #3FB36B },
+                                { hex: "#2E9E6B", col: #2E9E6B },
+                                { hex: "#7FCBA0", col: #7FCBA0 },
+                                { hex: "#2F8F57", col: #2F8F57 },
+                                { hex: "#A9B85E", col: #A9B85E },
+                                { hex: "#5FB98C", col: #5FB98C },
+                                { hex: "#27814F", col: #27814F },
+                                { hex: "#9FD3B5", col: #9FD3B5 },
+                            ]: Rectangle {
+                                width: 28px;
+                                height: 28px;
+                                background: c.col;
+                                border-width: root.selected_avatar_index == i ? 2px : 1px;
+                                border-color: root.selected_avatar_index == i ? Theme.accent : Theme.border;
+                                TouchArea { clicked => { root.avatar_color_selected(c.hex); } }
+                            }
+                        }
+                        PrimaryButton { text: "Save profile"; width: 200px; clicked => { root.save_profile(); } }
+                        if root.profile_status != "": Text { text: root.profile_status; font-size: 12px; color: Theme.text-muted; }
+                    }
+                    if root.category == SettingsCategory.Account: SectionCard {
+                        SectionTitle { text: "Change password"; }
+                        TextInputField { placeholder: "Current password"; is-password: true; value <=> root.current_password_input; edited(t) => { root.current_password_changed(t); } }
+                        TextInputField { placeholder: "New password"; is-password: true; value <=> root.new_password_input; edited(t) => { root.new_password_changed(t); } }
+                        TextInputField { placeholder: "Confirm new password"; is-password: true; value <=> root.confirm_password_input; edited(t) => { root.confirm_password_changed(t); } }
+                        PrimaryButton { text: "Change password"; width: 200px; clicked => { root.change_password(); } }
+                        if root.password_status != "": Text { text: root.password_status; font-size: 12px; color: Theme.text-muted; }
+                    }
+                    if root.category == SettingsCategory.Account: SectionCard {
+                        SectionTitle { text: "Session"; }
+                        Text { text: "Sign out of this device. You can sign back in anytime."; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
+                        DangerButton { text: "Log out"; width: 200px; clicked => { root.log_out(); } }
+                    }
+
+                    if root.category == SettingsCategory.Privacy: SectionCard {
+                        SectionTitle { text: "Privacy & Security"; }
+                        Text { text: "Control how others see you, what is stored, and who can reach you."; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text { text: "Your badges:"; font-size: 12px; color: Theme.text-muted; vertical-alignment: center; }
+                            if root.my_badge_text != "": Badge { text: root.my_badge_text; bg: root.my_badge_bg; fg: root.my_badge_fg; }
+                            if root.my_badge_text == "": Text { text: "none"; font-size: 11px; color: Theme.text-muted; vertical-alignment: center; }
+                        }
+                        ToggleRow { title: "Chat history storage"; description: "Off = live-only (peerseal); nothing saved on Convex for chats you're in."; value: root.store_chat_history; toggled => { root.toggle_store_history(); } }
+                        ToggleRow { title: "Hide online status"; description: "Others see you as offline (you still receive messages)."; value: root.hide_online_status; toggled => { root.toggle_hide_online(); } }
+                        ToggleRow { title: "Friends-only DMs"; description: "Only people on your friends list can start a direct chat."; value: root.friends_only_dms; toggled => { root.toggle_friends_only_dms(); } }
+                        ToggleRow { title: "Discoverable profile"; description: "When off, you are harder to find (exact username still works)."; value: root.discoverable; toggled => { root.toggle_discoverable(); } }
+                        FieldLabel { text: "Friend requests"; }
+                        SecondaryButton { text: "Who can request: " + root.friend_request_privacy_label; clicked => { root.cycle_friend_request_privacy(); } }
+                        Text { text: "Everyone · Shared servers only · Nobody. Click to cycle. Decline has a 24h re-request cooldown."; font-size: 11px; color: Theme.text-muted; wrap: word-wrap; }
+                        FieldLabel { text: "My presence"; }
+                        SecondaryButton { text: "Status: " + root.presence_status_label; clicked => { root.cycle_presence(); } }
+                        Text { text: "Online · Idle · Do not disturb · Invisible. Invisible hides you like offline."; font-size: 11px; color: Theme.text-muted; wrap: word-wrap; }
+                        FieldLabel { text: "Sessions"; }
+                        SecondaryButton { text: "Sign out other devices"; clicked => { root.sign_out_others(); } }
+                        Text { text: "Keeps this session; revokes every other login token on this account."; font-size: 11px; color: Theme.text-muted; wrap: word-wrap; }
+                        Text { text: "Per-chat Store ON/OFF is in the DM header (not on server channels)."; font-size: 11px; color: Theme.text-muted; wrap: word-wrap; }
+                        if root.is_staff: Rectangle {
+                            background: Theme.bg-tertiary;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            VerticalLayout {
+                                padding: 10px;
+                                spacing: 4px;
+                                Text { text: "STAFF PRIVILEGES"; font-size: 11px; color: Theme.warning; }
+                                Text {
+                                    text: "Admins cannot be blocked or kicked from servers. Friend requests still require acceptance. Support DMs work without friendship. Moderators can ban users but not staff.";
+                                    font-size: 11px;
+                                    color: Theme.text-muted;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                    }
+
+                    if root.category == SettingsCategory.Bots: SectionCard {
+                        SectionTitle { text: "Talkyss bots"; }
+                        Text { text: "Headless bots: create here, invite to a server, run with crates/talkyss-bot."; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            TextInputField { placeholder: "Bot display name"; value <=> root.new_bot_name_input; edited(t) => { root.new_bot_name_changed(t); } submitted => { root.create_bot(); } }
+                            PrimaryButton { text: "Create"; width: 90px; clicked => { root.create_bot(); } }
+                        }
+                        Text { text: "Refresh list"; font-size: 11px; color: Theme.accent; TouchArea { clicked => { root.refresh_bots(); } } }
+                        if root.bot_token_reveal != "": Rectangle {
+                            background: Theme.bg-tertiary;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 8px;
+                                Text { text: "COPY TOKEN NOW (shown once)"; font-size: 11px; color: Theme.warning; }
+                                Text { text: root.bot_token_reveal; font-size: 12px; color: Theme.accent; wrap: word-wrap; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    PrimaryButton { text: "Copy"; width: 80px; clicked => { root.copy_token(root.bot_token_reveal); } }
+                                    SecondaryButton { text: "Dismiss"; width: 80px; clicked => { root.dismiss_token(); } }
+                                }
+                            }
+                        }
+                        for bot in root.my_bots: Rectangle {
+                            background: Theme.bg-tertiary;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            VerticalLayout {
+                                padding: 10px;
+                                spacing: 6px;
+                                HorizontalLayout {
+                                    Text { text: bot.display_name + "  *bot"; font-size: 13px; color: Theme.text-primary; horizontal-stretch: 1; }
+                                    Text { text: "@" + bot.username; font-size: 11px; color: Theme.text-muted; vertical-alignment: center; }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    SecondaryButton { text: "New token"; clicked => { root.regenerate_bot_token(bot.bot_id); } }
+                                    DangerButton { text: "Delete"; clicked => { root.delete_bot(bot.bot_id); } }
+                                }
+                            }
+                        }
+                        FieldLabel { text: "Invite bot to current server"; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            TextInputField { placeholder: "bot_username"; value <=> root.bot_invite_username_input; edited(t) => { root.bot_invite_username_changed(t); } submitted => { root.invite_bot(); } }
+                            PrimaryButton { text: "Invite"; width: 90px; clicked => { root.invite_bot(); } }
+                        }
+                        Text { text: "Select a server on the rail first. Owner only."; font-size: 10px; color: Theme.text-muted; }
+                        if root.bot_status != "": Text { text: root.bot_status; font-size: 12px; color: Theme.text-muted; }
+                    }
+
+                    if root.category == SettingsCategory.Voice: SectionCard {
+                        SectionTitle { text: "Voice & audio"; }
+                        FieldLabel { text: "Microphone"; }
+                        VerticalLayout {
+                            spacing: 4px;
+                            for d in root.input_devices: DeviceItem { text: d.name; active: d.selected; clicked => { root.input_device_selected(d.name); } }
+                        }
+                        FieldLabel { text: "Speaker"; }
+                        VerticalLayout {
+                            spacing: 4px;
+                            for d in root.output_devices: DeviceItem { text: d.name; active: d.selected; clicked => { root.output_device_selected(d.name); } }
+                        }
+                        Text { text: "Device choice applies the next time you start or accept a call."; font-size: 11px; color: Theme.text-muted; wrap: word-wrap; }
+                        FieldLabel { text: "Noise gate sensitivity"; }
+                        Slider {
+                            minimum: 0;
+                            maximum: 0.03;
+                            value: root.noise_gate;
+                            changed(v) => { root.noise_gate_changed(v); }
+                        }
+                        HorizontalLayout {
+                            Text { text: "Off"; font-size: 10px; color: Theme.text-muted; }
+                            Rectangle { horizontal-stretch: 1; }
+                            Text { text: root.noise_gate_label; font-size: 11px; color: Theme.text-primary; }
+                            Rectangle { horizontal-stretch: 1; }
+                            Text { text: "Aggressive"; font-size: 10px; color: Theme.text-muted; }
+                        }
+                        Text { text: "Cuts background hiss between words. Applies live, even mid-call."; font-size: 11px; color: Theme.text-muted; wrap: word-wrap; }
+                    }
+
+                    if root.category == SettingsCategory.About: SectionCard {
+                        SectionTitle { text: "About"; }
+                        Text { text: root.version_line; font-size: 14px; font-family: Theme.font-medium; color: Theme.accent; }
+                        Text { text: "DM history lives on Convex (shared). Live transport is peerseal."; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
+                        Text { text: "Local data dir: " + root.vault_hint; font-size: 10px; color: Theme.text-muted; wrap: word-wrap; }
+                        SecondaryButton { text: "Check for updates"; width: 180px; clicked => { root.check_for_update(); } }
+                        if root.update_check_status != "": Text { text: root.update_check_status; font-size: 12px; color: Theme.text-muted; }
+                        SecondaryButton { text: "Ping server"; width: 180px; clicked => { root.measure_ping(); } }
+                        if root.ping_status != "": Text { text: "ping: " + root.ping_status; font-size: 12px; color: Theme.accent; }
+                    }
+                }
+            }
+        }
+    }
+}

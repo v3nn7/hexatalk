@@ -1,0 +1,260 @@
+// Small reusable building blocks shared by every screen: buttons, text
+// inputs, avatars, badges, section labels. Pure presentation -- no app
+// state lives here, only `in`/`out` properties and callbacks.
+import { Theme } from "theme.slint";
+
+export component PrimaryButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> busy: false;
+    callback clicked;
+
+    height: 38px;
+    background: touch.pressed ? Theme.accent-dim : (touch.has-hover ? Theme.accent : Theme.accent-dim);
+    border-width: 1px;
+    border-color: Theme.accent;
+    opacity: root.enabled ? 1.0 : 0.5;
+
+    touch := TouchArea {
+        enabled: root.enabled && !root.busy;
+        clicked => { root.clicked(); }
+    }
+
+    Text {
+        text: root.busy ? "…" : root.text;
+        color: Theme.text-on-accent;
+        font-size: Theme.text-md;
+        font-family: Theme.font-medium;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component SecondaryButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked;
+
+    height: 34px;
+    background: touch.pressed ? Theme.bg-elevated : (touch.has-hover ? Theme.bg-hover : Theme.bg-secondary);
+    border-width: 1px;
+    border-color: touch.has-hover ? Theme.border-strong : Theme.border;
+    opacity: root.enabled ? 1.0 : 0.5;
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+
+    Text {
+        text: root.text;
+        color: Theme.text-primary;
+        font-size: Theme.text-sm;
+        font-family: Theme.font-body;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component DangerButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked;
+
+    height: 34px;
+    background: touch.has-hover ? Theme.danger-soft : transparent;
+    border-width: 1px;
+    border-color: Theme.danger;
+    opacity: root.enabled ? 1.0 : 0.5;
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+
+    Text {
+        text: root.text;
+        color: Theme.danger;
+        font-size: Theme.text-sm;
+        font-family: Theme.font-body;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component LinkButton inherits Rectangle {
+    in property <string> text;
+    callback clicked;
+    background: transparent;
+
+    touch := TouchArea { clicked => { root.clicked(); } }
+
+    Text {
+        text: root.text;
+        color: touch.has-hover ? Theme.accent : Theme.text-muted;
+        font-size: Theme.text-sm;
+        font-family: Theme.font-body;
+    }
+}
+
+export component FieldLabel inherits Text {
+    color: Theme.text-muted;
+    font-size: Theme.text-xs;
+    font-family: Theme.font-medium;
+    letter-spacing: 0.6px;
+}
+
+export component TextInputField inherits Rectangle {
+    in property <string> placeholder;
+    in property <bool> is-password: false;
+    in property <bool> enabled: true;
+    in-out property <string> value;
+    callback edited(string);
+    callback submitted;
+
+    height: 38px;
+    background: Theme.bg-tertiary;
+    border-width: 1px;
+    border-color: inner.has-focus ? Theme.accent : Theme.border;
+
+    inner := TextInput {
+        x: 10px;
+        width: parent.width - 20px;
+        y: 0;
+        height: parent.height;
+        vertical-alignment: center;
+        text <=> root.value;
+        color: Theme.text-primary;
+        font-size: Theme.text-md;
+        font-family: Theme.font-body;
+        input-type: root.is-password ? InputType.password : InputType.text;
+        enabled: root.enabled;
+        edited => { root.edited(self.text); }
+        accepted => { root.submitted(); }
+    }
+
+    if root.value == "" && !inner.has-focus: Text {
+        x: 10px;
+        text: root.placeholder;
+        color: Theme.text-muted;
+        font-size: Theme.text-md;
+        font-family: Theme.font-body;
+        vertical-alignment: center;
+        height: parent.height;
+    }
+}
+
+export component SectionTitle inherits Text {
+    color: Theme.accent;
+    font-size: Theme.text-xs;
+    font-family: Theme.font-medium;
+    letter-spacing: 1px;
+}
+
+export component Divider inherits Rectangle {
+    height: 1px;
+    background: Theme.border-hairline;
+}
+
+export component Badge inherits Rectangle {
+    in property <string> text;
+    in property <color> bg: Theme.danger;
+    in property <color> fg: white;
+    width: max(16px, label.preferred-width + 8px);
+    height: 16px;
+    background: root.bg;
+    border-width: 1px;
+    border-color: Theme.bg-tertiary;
+    label := Text {
+        text: root.text;
+        color: root.fg;
+        font-size: Theme.text-xs;
+        font-family: Theme.font-medium;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component PresenceDot inherits Rectangle {
+    in property <bool> online: false;
+    width: 10px;
+    height: 10px;
+    background: root.online ? Theme.online : Theme.offline;
+    border-width: 2px;
+    border-color: Theme.bg-secondary;
+}
+
+// 36x36 avatar: photo image when `photo-source` is non-empty, otherwise a
+// flat-colored initial square. Optional presence dot bottom-right.
+export component Avatar inherits Rectangle {
+    // Precomputed by Rust (Slint's `string` has no indexing/substring) --
+    // single uppercase character shown when there's no photo.
+    in property <string> initial: "?";
+    in property <color> avatar-color: Theme.accent;
+    in property <image> photo-source;
+    in property <bool> show-presence: false;
+    in property <bool> online: false;
+    in property <length> size: 36px;
+
+    width: root.size;
+    height: root.size;
+    background: root.photo-source.width > 0 ? transparent : root.avatar-color;
+    border-width: root.photo-source.width > 0 ? 0px : 1px;
+    border-color: Theme.border-strong;
+    clip: true;
+
+    if root.photo-source.width > 0: Image {
+        source: root.photo-source;
+        width: parent.width;
+        height: parent.height;
+        image-fit: ImageFit.cover;
+    }
+
+    if root.photo-source.width <= 0: Text {
+        text: root.initial;
+        color: #050a06;
+        font-size: root.size * 0.4;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    if root.show-presence: PresenceDot {
+        online: root.online;
+        x: parent.width - self.width;
+        y: parent.height - self.height;
+    }
+}
+
+// Thin vertical drag handle between two horizontally resizable panels.
+// Deliberately has no explicit height: as a layout child it stretches to
+// the row's full height, and as a plain child it fills its parent. (An
+// earlier version had a fixed `track-length: 100px` height, which not only
+// drew a 100px stub instead of a full-height bar but also -- because a
+// fixed-height layout child caps the whole row's maximum height -- clamped
+// the entire chat screen, and with it the window scene, to ~content height.)
+export component ResizeHandle inherits Rectangle {
+    callback drag-started;
+    callback drag-moved(length);
+    callback drag-ended;
+
+    width: 4px;
+    background: touch.has-hover || touch.pressed ? Theme.border-strong : Theme.border;
+
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.col-resize;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.drag-started();
+            }
+            if (event.kind == PointerEventKind.up) {
+                root.drag-ended();
+            }
+        }
+        moved => {
+            if (self.pressed) {
+                root.drag-moved(self.mouse-x);
+            }
+        }
+    }
+}

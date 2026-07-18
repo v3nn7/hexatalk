@@ -9,7 +9,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-iced = { version = "0.13.1", features = ["tokio", "image"] }
+# GUI toolkit: Slint (see ui/*.slint + src/rt.rs). The old iced frontend
+# (src/view/*.rs) has been fully ported and removed.
+slint = "1.17.1"
+copypasta = "0.10"
 convex = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
 futures = "0.3"
@@ -25,7 +28,7 @@ bytes = "1.12.1"
 rfd = "0.17.2"
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
 xcap = "0.9.6"
-image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 x25519-dalek = { version = "3.0.0", features = ["static_secrets", "getrandom"] }
 aes-gcm = "0.10"
 hkdf = "0.13.0"
@@ -56,6 +59,9 @@ glib = "0.18"
 # shortcut icon before the app is even launched) — separate from the
 # runtime window icon set in main.rs, which only affects the icon while
 # the app is actually running.
+[build-dependencies]
+slint-build = "1.17.1"
+
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "2"
 image = { version = "0.25", default-features = false, features = ["ico", "png"] }

@@ -6,8 +6,7 @@
 //! browser, no separate installer. Fully silent; the only visible trace is
 //! a toast once the download finishes and the "About" status line.
 
-use iced::Task;
-
+use crate::rt::Task;
 use crate::*;
 
 // astrakit.pro is set up as a public custom domain in front of the R2

@@ -1,0 +1,933 @@
+// Root window. Composes every screen; `current-screen` (driven from Rust)
+// picks which one is visible. Screens are added incrementally as they're
+// ported off iced -- see the per-screen .slint files in this directory.
+//
+// Font imports embed the file at compile time and register it under its
+// own font-family name ("Roboto" / "Roboto Medium") -- Slint's recommended
+// way to bundle custom fonts, no runtime registration needed.
+import "../assets/fonts/Roboto-Regular.ttf";
+import "../assets/fonts/Roboto-Medium.ttf";
+import { Theme } from "theme.slint";
+import { AuthScreen, AuthMode } from "auth.slint";
+import { ServerRail } from "rail.slint";
+import { Sidebar, SidebarTab } from "sidebar.slint";
+import { ChatArea } from "chat_area.slint";
+import { MembersDrawer } from "members.slint";
+import { CallBanner } from "call_banner.slint";
+import { ProfileScreen } from "profile.slint";
+import { SettingsScreen, SettingsCategory, BotRow, DeviceRow } from "settings.slint";
+import { ServerSettingsScreen, ServerSettingsCategory } from "server_settings.slint";
+import { SSChannelRow, SSMemberRow, SSRoleRow, SSPermRow } from "server_settings_types.slint";
+import {
+    ServerRow, ConversationRow, FriendRow, IncomingRequestRow, OutgoingRequestRow,
+    PeopleHitRow, SuggestionRow, BlockedRow, ChannelRow, AdminUserRow, GroupCandidateRow,
+    ChatMessageRow, MemberRow, ShareTargetRow, RoleTagRow,
+} from "chat_types.slint";
+
+export { AuthMode, SidebarTab }
+
+export enum Screen { Auth, Chat, Profile, Settings, ServerSettings }
+
+export component AppWindow inherits Window {
+    title: "Talkyss";
+    background: Theme.bg-primary;
+    preferred-width: 1180px;
+    preferred-height: 760px;
+    min-width: 980px;
+    min-height: 600px;
+    default-font-family: Theme.font-body;
+
+    in property <Screen> current-screen: Screen.Auth;
+
+    // ---- Auth screen state (see auth.slint) ----
+    in property <AuthMode> auth-mode: AuthMode.Login;
+    in-out property <string> username-input;
+    in-out property <string> password-input;
+    in-out property <string> display-name-input;
+    in property <string> auth-error;
+    in property <bool> auth-busy;
+    in property <string> connect-status;
+    in property <string> app-version-line;
+
+    callback auth-switch-mode(AuthMode);
+    callback auth-username-changed(string);
+    callback auth-password-changed(string);
+    callback auth-display-name-changed(string);
+    callback auth-submit;
+
+    // Passive, always-present sizing reference: a plain child of Window
+    // with a `100%` binding, which is the ordinary unambiguous parent-fill
+    // every other Rectangle in this codebase already relies on. Each screen
+    // below binds its own width/height to `size_ref` instead of `root`,
+    // because a Window's own `width`/`height` aren't a hard-set value here
+    // -- only `preferred-width`/`min-width` hints are -- and binding
+    // screens directly to `root.width` was observed resolving differently
+    // between debug and release builds (correct in debug, collapsed to a
+    // small natural size in release). It renders nothing and has no
+    // TouchArea, so it doesn't intercept input or paint over the screens.
+    size_ref := Rectangle {
+        width: 100%;
+        height: 100%;
+    }
+
+    if root.current-screen == Screen.Auth: AuthScreen {
+        width: size_ref.width;
+        height: size_ref.height;
+        auth-mode: root.auth-mode;
+        username-input <=> root.username-input;
+        password-input <=> root.password-input;
+        display-name-input <=> root.display-name-input;
+        auth-error: root.auth-error;
+        auth-busy: root.auth-busy;
+        connect-status: root.connect-status;
+        app-version-line: root.app-version-line;
+        switch-mode(mode) => { root.auth-switch-mode(mode); }
+        submit => { root.auth-submit(); }
+        username-edited(text) => { root.auth-username-changed(text); }
+        password-edited(text) => { root.auth-password-changed(text); }
+        display-name-edited(text) => { root.auth-display-name-changed(text); }
+    }
+
+    // ==================== Profile screen ====================
+    in property <bool> profile_loading: false;
+    in property <string> profile_error_text;
+    in property <string> profile_user_id;
+    in property <string> profile_username;
+    in property <string> profile_display_name;
+    in property <string> profile_initial;
+    in property <color> profile_avatar_color: Theme.accent;
+    in property <image> profile_photo;
+    in property <bool> profile_online: false;
+    in property <string> profile_status_message;
+    in property <string> profile_bio;
+    in property <bool> profile_is_staff: false;
+    in property <bool> profile_show_support_dm: false;
+    in property <bool> profile_is_friend: false;
+    in property <bool> profile_favorite: false;
+    in property <string> profile_relation;
+    in property <string> profile_request_id;
+    in property <bool> profile_friend_request_busy: false;
+    in property <bool> profile_can_moderate: false;
+    in property <bool> profile_is_blocked: false;
+    in property <bool> profile_confirm_block: false;
+    in property <string> profile_mutual_servers_line;
+    in property <bool> profile_has_role_info: false;
+    in property <string> profile_role_section_title;
+    in property <bool> profile_role_is_owner: false;
+    in property <[RoleTagRow]> profile_role_badges: [];
+
+    callback profile_back;
+    callback profile_support_dm(string);
+    callback profile_message_friend(string);
+    callback profile_toggle_favorite(string);
+    callback profile_respond_request(string);
+    callback profile_send_friend_request(string);
+    callback profile_unblock(string);
+    callback profile_confirm_block_click(string);
+    callback profile_block(string);
+    callback profile_cancel_block;
+
+    if root.current-screen == Screen.Profile: ProfileScreen {
+        width: size_ref.width;
+        height: size_ref.height;
+        loading: root.profile_loading;
+        error: root.profile_error_text;
+        user_id: root.profile_user_id;
+        username: root.profile_username;
+        display_name: root.profile_display_name;
+        initial: root.profile_initial;
+        avatar_color: root.profile_avatar_color;
+        photo: root.profile_photo;
+        online: root.profile_online;
+        status_message: root.profile_status_message;
+        bio: root.profile_bio;
+        is_staff: root.profile_is_staff;
+        show_support_dm: root.profile_show_support_dm;
+        is_friend: root.profile_is_friend;
+        favorite: root.profile_favorite;
+        relation: root.profile_relation;
+        request_id: root.profile_request_id;
+        friend_request_busy: root.profile_friend_request_busy;
+        can_moderate: root.profile_can_moderate;
+        is_blocked: root.profile_is_blocked;
+        confirm_block: root.profile_confirm_block;
+        mutual_servers_line: root.profile_mutual_servers_line;
+        has_role_info: root.profile_has_role_info;
+        role_section_title: root.profile_role_section_title;
+        role_is_owner: root.profile_role_is_owner;
+        role_badges: root.profile_role_badges;
+        back => { root.profile_back(); }
+        support_dm(id) => { root.profile_support_dm(id); }
+        message_friend(id) => { root.profile_message_friend(id); }
+        toggle_favorite(id) => { root.profile_toggle_favorite(id); }
+        respond_request(id) => { root.profile_respond_request(id); }
+        send_friend_request(u) => { root.profile_send_friend_request(u); }
+        unblock(id) => { root.profile_unblock(id); }
+        confirm_block_click(id) => { root.profile_confirm_block_click(id); }
+        block(id) => { root.profile_block(id); }
+        cancel_block => { root.profile_cancel_block(); }
+    }
+
+    // ==================== Settings screen ====================
+    in property <SettingsCategory> settings_category: SettingsCategory.Account;
+    in property <string> settings_avatar_initial;
+    in property <color> settings_avatar_color: Theme.accent;
+    in property <image> settings_avatar_photo;
+    in property <bool> settings_has_photo: false;
+    in property <bool> settings_avatar_upload_busy: false;
+    in-out property <string> settings_display_name_input;
+    in-out property <string> settings_status_input;
+    in-out property <string> settings_bio_input;
+    in property <int> settings_selected_avatar_index: -1;
+    in property <string> settings_profile_status;
+    in-out property <string> settings_current_password_input;
+    in-out property <string> settings_new_password_input;
+    in-out property <string> settings_confirm_password_input;
+    in property <string> settings_password_status;
+    in property <string> settings_my_badge_text;
+    in property <color> settings_my_badge_bg;
+    in property <color> settings_my_badge_fg;
+    in property <bool> settings_store_chat_history: true;
+    in property <bool> settings_hide_online_status: false;
+    in property <bool> settings_friends_only_dms: false;
+    in property <bool> settings_discoverable: true;
+    in property <string> settings_friend_request_privacy_label;
+    in property <string> settings_presence_status_label;
+    in property <bool> settings_is_staff: false;
+    in-out property <string> settings_new_bot_name_input;
+    in property <string> settings_bot_token_reveal;
+    in property <[BotRow]> settings_my_bots: [];
+    in-out property <string> settings_bot_invite_username_input;
+    in property <string> settings_bot_status;
+    in property <[DeviceRow]> settings_input_devices: [];
+    in property <[DeviceRow]> settings_output_devices: [];
+    in property <float> settings_noise_gate: 0;
+    in property <string> settings_noise_gate_label;
+    in property <string> settings_version_line;
+    in property <string> settings_vault_hint;
+    in property <string> settings_update_check_status;
+    in property <string> settings_ping_status;
+
+    callback settings_close;
+    callback settings_category_changed(SettingsCategory);
+    callback settings_pick_avatar;
+    callback settings_remove_avatar;
+    callback settings_display_name_changed(string);
+    callback settings_status_changed(string);
+    callback settings_bio_changed(string);
+    callback settings_avatar_color_selected(string);
+    callback settings_save_profile;
+    callback settings_current_password_changed(string);
+    callback settings_new_password_changed(string);
+    callback settings_confirm_password_changed(string);
+    callback settings_change_password;
+    callback settings_log_out;
+    callback settings_toggle_store_history;
+    callback settings_toggle_hide_online;
+    callback settings_toggle_friends_only_dms;
+    callback settings_toggle_discoverable;
+    callback settings_cycle_friend_request_privacy;
+    callback settings_cycle_presence;
+    callback settings_sign_out_others;
+    callback settings_new_bot_name_changed(string);
+    callback settings_create_bot;
+    callback settings_refresh_bots;
+    callback settings_copy_token(string);
+    callback settings_dismiss_token;
+    callback settings_regenerate_bot_token(string);
+    callback settings_delete_bot(string);
+    callback settings_bot_invite_username_changed(string);
+    callback settings_invite_bot;
+    callback settings_input_device_selected(string);
+    callback settings_output_device_selected(string);
+    callback settings_noise_gate_changed(float);
+    callback settings_check_for_update;
+    callback settings_measure_ping;
+
+    if root.current-screen == Screen.Settings: SettingsScreen {
+        width: size_ref.width;
+        height: size_ref.height;
+        category: root.settings_category;
+        avatar_initial: root.settings_avatar_initial;
+        avatar_color: root.settings_avatar_color;
+        avatar_photo: root.settings_avatar_photo;
+        has_photo: root.settings_has_photo;
+        avatar_upload_busy: root.settings_avatar_upload_busy;
+        display_name_input <=> root.settings_display_name_input;
+        status_input <=> root.settings_status_input;
+        bio_input <=> root.settings_bio_input;
+        selected_avatar_index: root.settings_selected_avatar_index;
+        profile_status: root.settings_profile_status;
+        current_password_input <=> root.settings_current_password_input;
+        new_password_input <=> root.settings_new_password_input;
+        confirm_password_input <=> root.settings_confirm_password_input;
+        password_status: root.settings_password_status;
+        my_badge_text: root.settings_my_badge_text;
+        my_badge_bg: root.settings_my_badge_bg;
+        my_badge_fg: root.settings_my_badge_fg;
+        store_chat_history: root.settings_store_chat_history;
+        hide_online_status: root.settings_hide_online_status;
+        friends_only_dms: root.settings_friends_only_dms;
+        discoverable: root.settings_discoverable;
+        friend_request_privacy_label: root.settings_friend_request_privacy_label;
+        presence_status_label: root.settings_presence_status_label;
+        is_staff: root.settings_is_staff;
+        new_bot_name_input <=> root.settings_new_bot_name_input;
+        bot_token_reveal: root.settings_bot_token_reveal;
+        my_bots: root.settings_my_bots;
+        bot_invite_username_input <=> root.settings_bot_invite_username_input;
+        bot_status: root.settings_bot_status;
+        input_devices: root.settings_input_devices;
+        output_devices: root.settings_output_devices;
+        noise_gate: root.settings_noise_gate;
+        noise_gate_label: root.settings_noise_gate_label;
+        version_line: root.settings_version_line;
+        vault_hint: root.settings_vault_hint;
+        update_check_status: root.settings_update_check_status;
+        ping_status: root.settings_ping_status;
+
+        close => { root.settings_close(); }
+        category_changed(cat) => { root.settings_category_changed(cat); }
+        pick_avatar => { root.settings_pick_avatar(); }
+        remove_avatar => { root.settings_remove_avatar(); }
+        display_name_changed(t) => { root.settings_display_name_changed(t); }
+        status_changed(t) => { root.settings_status_changed(t); }
+        bio_changed(t) => { root.settings_bio_changed(t); }
+        avatar_color_selected(c) => { root.settings_avatar_color_selected(c); }
+        save_profile => { root.settings_save_profile(); }
+        current_password_changed(t) => { root.settings_current_password_changed(t); }
+        new_password_changed(t) => { root.settings_new_password_changed(t); }
+        confirm_password_changed(t) => { root.settings_confirm_password_changed(t); }
+        change_password => { root.settings_change_password(); }
+        log_out => { root.settings_log_out(); }
+        toggle_store_history => { root.settings_toggle_store_history(); }
+        toggle_hide_online => { root.settings_toggle_hide_online(); }
+        toggle_friends_only_dms => { root.settings_toggle_friends_only_dms(); }
+        toggle_discoverable => { root.settings_toggle_discoverable(); }
+        cycle_friend_request_privacy => { root.settings_cycle_friend_request_privacy(); }
+        cycle_presence => { root.settings_cycle_presence(); }
+        sign_out_others => { root.settings_sign_out_others(); }
+        new_bot_name_changed(t) => { root.settings_new_bot_name_changed(t); }
+        create_bot => { root.settings_create_bot(); }
+        refresh_bots => { root.settings_refresh_bots(); }
+        copy_token(t) => { root.settings_copy_token(t); }
+        dismiss_token => { root.settings_dismiss_token(); }
+        regenerate_bot_token(id) => { root.settings_regenerate_bot_token(id); }
+        delete_bot(id) => { root.settings_delete_bot(id); }
+        bot_invite_username_changed(t) => { root.settings_bot_invite_username_changed(t); }
+        invite_bot => { root.settings_invite_bot(); }
+        input_device_selected(d) => { root.settings_input_device_selected(d); }
+        output_device_selected(d) => { root.settings_output_device_selected(d); }
+        noise_gate_changed(v) => { root.settings_noise_gate_changed(v); }
+        check_for_update => { root.settings_check_for_update(); }
+        measure_ping => { root.settings_measure_ping(); }
+    }
+
+    // ==================== Server settings screen ====================
+    in property <ServerSettingsCategory> ss_category: ServerSettingsCategory.Overview;
+    in property <string> ss_server_name;
+    in property <string> ss_server_initial;
+    in property <image> ss_server_icon;
+    in property <string> ss_header_meta;
+    in property <bool> ss_is_owner: false;
+    in property <bool> ss_is_platform_admin: false;
+    in property <bool> ss_server_icon_busy: false;
+    in-out property <string> ss_rename_server_input;
+    in property <string> ss_server_status;
+    in property <bool> ss_server_status_danger: false;
+    in-out property <string> ss_custom_slug_input;
+    in property <string> ss_custom_slug_display;
+    in property <bool> ss_can_manage_channels: false;
+    in-out property <string> ss_new_channel_name_input;
+    in property <bool> ss_new_channel_is_voice: false;
+    in property <[SSChannelRow]> ss_channels: [];
+    in property <bool> ss_can_delete_channel: false;
+    in-out property <string> ss_rename_channel_input;
+    in property <bool> ss_can_manage_roles: false;
+    in property <bool> ss_can_kick: false;
+    in property <[SSMemberRow]> ss_members: [];
+    in property <[SSRoleRow]> ss_roles: [];
+    in-out property <string> ss_new_role_name_input;
+    in property <string> ss_editing_role_id;
+    in-out property <string> ss_role_name_edit_input;
+    in property <string> ss_role_edit_color;
+    in property <[SSPermRow]> ss_role_permissions: [];
+    in property <bool> ss_editing_role_is_default: false;
+    in property <bool> ss_confirm_delete_role: false;
+    in property <string> ss_invite_code;
+    in property <bool> ss_confirm_delete_server: false;
+
+    callback ss_back;
+    callback ss_category_changed(ServerSettingsCategory);
+    callback ss_pick_icon;
+    callback ss_remove_icon;
+    callback ss_rename_server_input_changed(string);
+    callback ss_rename_server;
+    callback ss_custom_slug_changed(string);
+    callback ss_save_custom_slug;
+    callback ss_clear_custom_slug;
+    callback ss_new_channel_name_changed(string);
+    callback ss_toggle_new_channel_voice;
+    callback ss_create_channel;
+    callback ss_start_rename_channel(string, string);
+    callback ss_rename_channel_input_changed(string);
+    callback ss_save_rename_channel;
+    callback ss_cancel_rename_channel;
+    callback ss_delete_channel(string);
+    callback ss_toggle_member_picker(string);
+    callback ss_toggle_member_role(string, string);
+    callback ss_kick_member(string);
+    callback ss_open_profile(string);
+    callback ss_new_role_name_changed(string);
+    callback ss_create_role;
+    callback ss_select_role_for_edit(string);
+    callback ss_close_role_editor;
+    callback ss_role_name_edit_changed(string);
+    callback ss_save_role_name;
+    callback ss_set_role_color(string, string);
+    callback ss_toggle_role_permission(string, int);
+    callback ss_confirm_delete_role_click(string);
+    callback ss_cancel_delete_role;
+    callback ss_delete_role(string);
+    callback ss_copy_invite_code(string);
+    callback ss_copy_invite_link(string);
+    callback ss_regenerate_invite_code;
+    callback ss_toggle_confirm_delete_server;
+    callback ss_delete_server;
+
+    if root.current-screen == Screen.ServerSettings: ServerSettingsScreen {
+        width: size_ref.width;
+        height: size_ref.height;
+        category: root.ss_category;
+        server_name: root.ss_server_name;
+        server_initial: root.ss_server_initial;
+        server_icon: root.ss_server_icon;
+        header_meta: root.ss_header_meta;
+        is_owner: root.ss_is_owner;
+        is_platform_admin: root.ss_is_platform_admin;
+        server_icon_busy: root.ss_server_icon_busy;
+        rename_server_input <=> root.ss_rename_server_input;
+        server_status: root.ss_server_status;
+        server_status_danger: root.ss_server_status_danger;
+        custom_slug_input <=> root.ss_custom_slug_input;
+        custom_slug_display: root.ss_custom_slug_display;
+        can_manage_channels: root.ss_can_manage_channels;
+        new_channel_name_input <=> root.ss_new_channel_name_input;
+        new_channel_is_voice: root.ss_new_channel_is_voice;
+        channels: root.ss_channels;
+        can_delete_channel: root.ss_can_delete_channel;
+        rename_channel_input <=> root.ss_rename_channel_input;
+        can_manage_roles: root.ss_can_manage_roles;
+        can_kick: root.ss_can_kick;
+        members: root.ss_members;
+        roles: root.ss_roles;
+        new_role_name_input <=> root.ss_new_role_name_input;
+        editing_role_id: root.ss_editing_role_id;
+        role_name_edit_input <=> root.ss_role_name_edit_input;
+        role_edit_color: root.ss_role_edit_color;
+        role_permissions: root.ss_role_permissions;
+        editing_role_is_default: root.ss_editing_role_is_default;
+        confirm_delete_role: root.ss_confirm_delete_role;
+        invite_code: root.ss_invite_code;
+        confirm_delete_server: root.ss_confirm_delete_server;
+
+        back => { root.ss_back(); }
+        category_changed(cat) => { root.ss_category_changed(cat); }
+        pick_icon => { root.ss_pick_icon(); }
+        remove_icon => { root.ss_remove_icon(); }
+        rename_server_input_changed(t) => { root.ss_rename_server_input_changed(t); }
+        rename_server => { root.ss_rename_server(); }
+        custom_slug_changed(t) => { root.ss_custom_slug_changed(t); }
+        save_custom_slug => { root.ss_save_custom_slug(); }
+        clear_custom_slug => { root.ss_clear_custom_slug(); }
+        new_channel_name_changed(t) => { root.ss_new_channel_name_changed(t); }
+        toggle_new_channel_voice => { root.ss_toggle_new_channel_voice(); }
+        create_channel => { root.ss_create_channel(); }
+        start_rename_channel(id, name) => { root.ss_start_rename_channel(id, name); }
+        rename_channel_input_changed(t) => { root.ss_rename_channel_input_changed(t); }
+        save_rename_channel => { root.ss_save_rename_channel(); }
+        cancel_rename_channel => { root.ss_cancel_rename_channel(); }
+        delete_channel(id) => { root.ss_delete_channel(id); }
+        toggle_member_picker(id) => { root.ss_toggle_member_picker(id); }
+        toggle_member_role(uid, rid) => { root.ss_toggle_member_role(uid, rid); }
+        kick_member(id) => { root.ss_kick_member(id); }
+        open_profile(id) => { root.ss_open_profile(id); }
+        new_role_name_changed(t) => { root.ss_new_role_name_changed(t); }
+        create_role => { root.ss_create_role(); }
+        select_role_for_edit(id) => { root.ss_select_role_for_edit(id); }
+        close_role_editor => { root.ss_close_role_editor(); }
+        role_name_edit_changed(t) => { root.ss_role_name_edit_changed(t); }
+        save_role_name => { root.ss_save_role_name(); }
+        set_role_color(id, hex) => { root.ss_set_role_color(id, hex); }
+        toggle_role_permission(id, bit) => { root.ss_toggle_role_permission(id, bit); }
+        confirm_delete_role_click(id) => { root.ss_confirm_delete_role_click(id); }
+        cancel_delete_role => { root.ss_cancel_delete_role(); }
+        delete_role(id) => { root.ss_delete_role(id); }
+        copy_invite_code(code) => { root.ss_copy_invite_code(code); }
+        copy_invite_link(code) => { root.ss_copy_invite_link(code); }
+        regenerate_invite_code => { root.ss_regenerate_invite_code(); }
+        toggle_confirm_delete_server => { root.ss_toggle_confirm_delete_server(); }
+        delete_server => { root.ss_delete_server(); }
+    }
+
+    // ==================== Chat screen ====================
+    // See rail.slint / sidebar.slint / chat_area.slint / members.slint /
+    // call_banner.slint -- port of src/view/chat.rs (2698 lines in iced).
+    // Composed directly here (no extra chat.slint wrapper) to avoid a
+    // second full layer of property/callback forwarding.
+
+    // ---- Rail ----
+    in property <bool> chat_home_active: false;
+    in property <int> chat_unread_count: 0;
+    in property <[ServerRow]> chat_servers: [];
+    in property <bool> chat_add_menu_open: false;
+    in property <int> chat_friends_online: 0;
+    in property <bool> chat_friends_active: false;
+    in property <int> chat_incoming_count: 0;
+    in property <bool> chat_requests_active: false;
+    in property <bool> chat_show_admin_tab: false;
+    in property <bool> chat_admin_active: false;
+
+    callback chat_go_home;
+    callback chat_select_server(string);
+    callback chat_toggle_add_menu;
+    callback chat_open_friends;
+    callback chat_open_requests;
+    callback chat_open_admin;
+
+    // ---- Sidebar ----
+    in property <SidebarTab> chat_tab: SidebarTab.Chats;
+    in property <string> chat_tab_title: "Direct";
+    in property <bool> chat_selected_server: false;
+    in property <length> chat_sidebar_width: 320px;
+    in-out property <string> chat_new_server_name;
+    in-out property <string> chat_join_server_code;
+    in property <string> chat_server_status;
+    in property <bool> chat_new_group_open: false;
+    in-out property <string> chat_new_group_name;
+    in property <[GroupCandidateRow]> chat_group_candidates: [];
+    in property <string> chat_group_create_status;
+    in property <[ConversationRow]> chat_conversations: [];
+    in property <string> chat_friends_summary;
+    in-out property <string> chat_add_friend_input;
+    in-out property <string> chat_add_friend_note;
+    in property <string> chat_add_friend_status;
+    in property <int> chat_friends_filter: 0;
+    in property <[PeopleHitRow]> chat_people_hits: [];
+    in property <[SuggestionRow]> chat_suggestions: [];
+    in-out property <string> chat_friends_filter_input;
+    in property <[FriendRow]> chat_friends: [];
+    in property <[BlockedRow]> chat_blocked: [];
+    in property <string> chat_confirm_block_user_id;
+    in property <bool> chat_friend_request_busy: false;
+    in property <[IncomingRequestRow]> chat_incoming_requests: [];
+    in property <[OutgoingRequestRow]> chat_outgoing_requests: [];
+    in property <string> chat_server_name;
+    in property <string> chat_server_meta;
+    in property <bool> chat_can_manage_server: false;
+    in property <string> chat_invite_code;
+    in property <bool> chat_can_manage_channels: false;
+    in property <bool> chat_new_channel_open: false;
+    in-out property <string> chat_new_channel_name;
+    in property <bool> chat_new_channel_is_voice: false;
+    in property <[ChannelRow]> chat_text_channels: [];
+    in property <[ChannelRow]> chat_voice_channels: [];
+    in-out property <string> chat_admin_search;
+    in property <string> chat_admin_status;
+    in property <[AdminUserRow]> chat_admin_users: [];
+    in property <bool> chat_is_admin: false;
+    in property <string> chat_my_display_name;
+    in property <string> chat_my_initial;
+    in property <color> chat_my_avatar_color: Theme.accent;
+    in property <image> chat_my_photo;
+    in property <string> chat_my_badge_text;
+    in property <color> chat_my_badge_bg;
+    in property <color> chat_my_badge_fg;
+
+    callback chat_new_server_name_changed(string);
+    callback chat_create_server;
+    callback chat_join_server_code_changed(string);
+    callback chat_join_server;
+    callback chat_toggle_group_panel;
+    callback chat_group_name_changed(string);
+    callback chat_toggle_group_member(string);
+    callback chat_create_group;
+    callback chat_open_conversation(string);
+    callback chat_add_friend_input_changed(string);
+    callback chat_add_friend_note_changed(string);
+    callback chat_send_friend_request;
+    callback chat_set_friends_filter(int);
+    callback chat_friends_filter_input_changed(string);
+    callback chat_open_profile(string);
+    callback chat_send_friend_request_to(string);
+    callback chat_message_friend(string);
+    callback chat_toggle_favorite(string);
+    callback chat_remove_friend(string);
+    callback chat_confirm_block(string);
+    callback chat_cancel_block;
+    callback chat_block_user(string);
+    callback chat_unblock_user(string);
+    callback chat_respond_request(string, string, bool);
+    callback chat_accept_all;
+    callback chat_decline_all;
+    callback chat_cancel_outgoing(string);
+    callback chat_toggle_server_settings;
+    callback chat_copy_invite_link(string);
+    callback chat_toggle_new_channel;
+    callback chat_new_channel_name_changed(string);
+    callback chat_create_channel;
+    callback chat_toggle_new_channel_voice;
+    callback chat_open_channel(string);
+    callback chat_admin_search_changed(string);
+    callback chat_admin_set_role(string, string);
+    callback chat_admin_set_banned(string, bool);
+    callback chat_open_settings;
+    callback chat_sidebar_resize_started;
+    callback chat_sidebar_resize_moved(length);
+    callback chat_sidebar_resize_ended;
+
+    // ---- Chat area ----
+    in property <bool> chat_has_conversation: false;
+    in property <string> chat_peer_title;
+    in property <string> chat_peer_initial;
+    in property <color> chat_peer_avatar_color: Theme.accent;
+    in property <image> chat_peer_photo;
+    in property <bool> chat_peer_online: false;
+    in property <bool> chat_is_channel_icon: false;
+    in property <bool> chat_is_direct: false;
+    in property <bool> chat_peer_connected: false;
+    in property <string> chat_connection_label;
+    in property <string> chat_sas_label;
+    in property <bool> chat_show_call_button: false;
+    in property <bool> chat_is_server_channel: false;
+    in property <bool> chat_store_enabled: true;
+    in property <bool> chat_store_allowed: true;
+    in property <bool> chat_clear_chat_busy: false;
+    in property <bool> chat_clear_chat_confirm: false;
+    in property <bool> chat_can_voice: false;
+    in property <bool> chat_in_voice: false;
+    in property <string> chat_room_voice_status;
+    in property <string> chat_voice_users_label;
+    in property <[ChatMessageRow]> chat_messages: [];
+    in property <[string]> chat_quick_emojis: [];
+    in property <bool> chat_is_editing: false;
+    in property <string> chat_input_placeholder;
+    in property <string> chat_send_label: "Send";
+    in property <bool> chat_crypto_ready: true;
+    in-out property <string> chat_message_input;
+    in property <bool> chat_has_pending_attachment: false;
+    in property <image> chat_pending_attachment_preview;
+    in property <bool> chat_has_pending_reply: false;
+    in property <string> chat_pending_reply_line;
+    in property <string> chat_typing_line;
+    in property <string> chat_error_line;
+    in property <string> chat_warning_line;
+
+    callback chat_start_call;
+    callback chat_toggle_store;
+    callback chat_toggle_clear_confirm;
+    callback chat_confirm_clear;
+    callback chat_join_voice;
+    callback chat_leave_voice;
+    callback chat_message_input_edited(string);
+    callback chat_send;
+    callback chat_pick_attachment;
+    callback chat_remove_attachment;
+    callback chat_cancel_edit;
+    callback chat_cancel_reply;
+    callback chat_react(string, string);
+    callback chat_reply(string, string, string);
+    callback chat_copy(string);
+    callback chat_edit(string, string, bool);
+    callback chat_delete(string);
+    callback chat_purge(string);
+    callback chat_open_attachment(string);
+
+    // ---- Members drawer ----
+    in property <bool> chat_members_collapsed: true;
+    in property <length> chat_members_width: 220px;
+    in property <int> chat_members_total: 0;
+    in property <int> chat_members_online: 0;
+    in property <[MemberRow]> chat_members_online_list: [];
+    in property <[MemberRow]> chat_members_offline_list: [];
+    in property <[MemberRow]> chat_members_bot_list: [];
+
+    callback chat_toggle_members;
+    callback chat_members_resize_started;
+    callback chat_members_resize_moved(length);
+    callback chat_members_resize_ended;
+
+    // ---- Call banner ----
+    in property <bool> chat_call_visible: false;
+    in property <bool> chat_call_ringing: false;
+    in property <bool> chat_call_incoming: false;
+    in property <bool> chat_call_active: false;
+    in property <string> chat_call_label;
+    in property <bool> chat_call_muted: false;
+    in property <bool> chat_call_all_muted: false;
+    in property <bool> chat_is_sharing: false;
+    in property <bool> chat_share_picker_open: false;
+    in property <[ShareTargetRow]> chat_share_targets: [];
+    in property <bool> chat_has_remote_frame: false;
+    in property <image> chat_remote_frame;
+    in property <string> chat_remote_frame_title;
+    in property <bool> chat_share_expanded: false;
+
+    callback chat_call_accept;
+    callback chat_call_decline;
+    callback chat_call_hang_up;
+    callback chat_call_toggle_mute;
+    callback chat_call_toggle_mute_all;
+    callback chat_toggle_share_picker;
+    callback chat_stop_share;
+    callback chat_start_share(string);
+    callback chat_toggle_share_size;
+
+    if root.current-screen == Screen.Chat: Rectangle {
+        // Window has several mutually-exclusive top-level screen children
+        // plus the always-present `escape_scope` FocusScope below, so the
+        // "lone unsized child fills its parent" default doesn't reliably
+        // kick in -- each screen must bind explicitly to the window's own
+        // size (see the same pattern on Auth/Profile/Settings/ServerSettings
+        // above) or it renders at its content's natural size instead of
+        // filling the actual window.
+        width: size_ref.width;
+        height: size_ref.height;
+        ChatLayout := VerticalLayout {
+            CallBanner {
+            visible_: root.chat_call_visible;
+            is_ringing: root.chat_call_ringing;
+            is_incoming: root.chat_call_incoming;
+            is_active: root.chat_call_active;
+            label: root.chat_call_label;
+            muted: root.chat_call_muted;
+            all_muted: root.chat_call_all_muted;
+            is_sharing: root.chat_is_sharing;
+            share_picker_open: root.chat_share_picker_open;
+            share_targets: root.chat_share_targets;
+            has_remote_frame: root.chat_has_remote_frame;
+            remote_frame: root.chat_remote_frame;
+            remote_frame_title: root.chat_remote_frame_title;
+            share_expanded: root.chat_share_expanded;
+            accept => { root.chat_call_accept(); }
+            decline => { root.chat_call_decline(); }
+            hang_up => { root.chat_call_hang_up(); }
+            toggle_mute => { root.chat_call_toggle_mute(); }
+            toggle_mute_all => { root.chat_call_toggle_mute_all(); }
+            toggle_share_picker => { root.chat_toggle_share_picker(); }
+            stop_share => { root.chat_stop_share(); }
+            start_share(id) => { root.chat_start_share(id); }
+            toggle_share_size => { root.chat_toggle_share_size(); }
+        }
+
+        HorizontalLayout {
+            vertical-stretch: 1;
+
+            ServerRail {
+                home_active: root.chat_home_active;
+                unread_count: root.chat_unread_count;
+                servers: root.chat_servers;
+                add_menu_open: root.chat_add_menu_open;
+                friends_online: root.chat_friends_online;
+                friends_active: root.chat_friends_active;
+                incoming_count: root.chat_incoming_count;
+                requests_active: root.chat_requests_active;
+                show_admin: root.chat_show_admin_tab;
+                admin_active: root.chat_admin_active;
+                go_home => { root.chat_go_home(); }
+                select_server(id) => { root.chat_select_server(id); }
+                toggle_add_menu => { root.chat_toggle_add_menu(); }
+                open_friends => { root.chat_open_friends(); }
+                open_requests => { root.chat_open_requests(); }
+                open_admin => { root.chat_open_admin(); }
+            }
+
+            Sidebar {
+                tab: root.chat_tab;
+                tab_title: root.chat_tab_title;
+                selected_server: root.chat_selected_server;
+                panel_width: root.chat_sidebar_width;
+                add_menu_open: root.chat_add_menu_open;
+                new_server_name <=> root.chat_new_server_name;
+                join_server_code <=> root.chat_join_server_code;
+                server_status: root.chat_server_status;
+                new_group_open: root.chat_new_group_open;
+                new_group_name <=> root.chat_new_group_name;
+                group_candidates: root.chat_group_candidates;
+                group_create_status: root.chat_group_create_status;
+                conversations: root.chat_conversations;
+                friends_summary: root.chat_friends_summary;
+                add_friend_input <=> root.chat_add_friend_input;
+                add_friend_note <=> root.chat_add_friend_note;
+                add_friend_status: root.chat_add_friend_status;
+                friends_filter: root.chat_friends_filter;
+                people_hits: root.chat_people_hits;
+                suggestions: root.chat_suggestions;
+                friends_filter_input <=> root.chat_friends_filter_input;
+                friends: root.chat_friends;
+                blocked: root.chat_blocked;
+                confirm_block_user_id: root.chat_confirm_block_user_id;
+                friend_request_busy: root.chat_friend_request_busy;
+                incoming_requests: root.chat_incoming_requests;
+                outgoing_requests: root.chat_outgoing_requests;
+                server_name: root.chat_server_name;
+                server_meta: root.chat_server_meta;
+                can_manage_server: root.chat_can_manage_server;
+                invite_code: root.chat_invite_code;
+                can_manage_channels: root.chat_can_manage_channels;
+                new_channel_open: root.chat_new_channel_open;
+                new_channel_name <=> root.chat_new_channel_name;
+                new_channel_is_voice: root.chat_new_channel_is_voice;
+                text_channels: root.chat_text_channels;
+                voice_channels: root.chat_voice_channels;
+                admin_search <=> root.chat_admin_search;
+                admin_status: root.chat_admin_status;
+                admin_users: root.chat_admin_users;
+                is_admin: root.chat_is_admin;
+                my_display_name: root.chat_my_display_name;
+                my_initial: root.chat_my_initial;
+                my_avatar_color: root.chat_my_avatar_color;
+                my_photo: root.chat_my_photo;
+                my_badge_text: root.chat_my_badge_text;
+                my_badge_bg: root.chat_my_badge_bg;
+                my_badge_fg: root.chat_my_badge_fg;
+
+                toggle_add_menu => { root.chat_toggle_add_menu(); }
+                new_server_name_changed(t) => { root.chat_new_server_name_changed(t); }
+                create_server => { root.chat_create_server(); }
+                join_server_code_changed(t) => { root.chat_join_server_code_changed(t); }
+                join_server => { root.chat_join_server(); }
+                toggle_group_panel => { root.chat_toggle_group_panel(); }
+                group_name_changed(t) => { root.chat_group_name_changed(t); }
+                toggle_group_member(id) => { root.chat_toggle_group_member(id); }
+                create_group => { root.chat_create_group(); }
+                open_conversation(id) => { root.chat_open_conversation(id); }
+                add_friend_input_changed(t) => { root.chat_add_friend_input_changed(t); }
+                add_friend_note_changed(t) => { root.chat_add_friend_note_changed(t); }
+                send_friend_request => { root.chat_send_friend_request(); }
+                set_friends_filter(i) => { root.chat_set_friends_filter(i); }
+                friends_filter_input_changed(t) => { root.chat_friends_filter_input_changed(t); }
+                open_profile(id) => { root.chat_open_profile(id); }
+                send_friend_request_to(u) => { root.chat_send_friend_request_to(u); }
+                message_friend(id) => { root.chat_message_friend(id); }
+                toggle_favorite(id) => { root.chat_toggle_favorite(id); }
+                remove_friend(id) => { root.chat_remove_friend(id); }
+                confirm_block(id) => { root.chat_confirm_block(id); }
+                cancel_block => { root.chat_cancel_block(); }
+                block_user(id) => { root.chat_block_user(id); }
+                unblock_user(id) => { root.chat_unblock_user(id); }
+                respond_request(rid, uid, ok) => { root.chat_respond_request(rid, uid, ok); }
+                accept_all => { root.chat_accept_all(); }
+                decline_all => { root.chat_decline_all(); }
+                cancel_outgoing(rid) => { root.chat_cancel_outgoing(rid); }
+                toggle_server_settings => { root.chat_toggle_server_settings(); }
+                copy_invite_link(code) => { root.chat_copy_invite_link(code); }
+                toggle_new_channel => { root.chat_toggle_new_channel(); }
+                new_channel_name_changed(t) => { root.chat_new_channel_name_changed(t); }
+                create_channel => { root.chat_create_channel(); }
+                toggle_new_channel_voice => { root.chat_toggle_new_channel_voice(); }
+                open_channel(id) => { root.chat_open_channel(id); }
+                admin_search_changed(t) => { root.chat_admin_search_changed(t); }
+                admin_set_role(id, role) => { root.chat_admin_set_role(id, role); }
+                admin_set_banned(id, b) => { root.chat_admin_set_banned(id, b); }
+                open_settings => { root.chat_open_settings(); }
+                resize_started => { root.chat_sidebar_resize_started(); }
+                resize_moved(x) => { root.chat_sidebar_resize_moved(x); }
+                resize_ended => { root.chat_sidebar_resize_ended(); }
+            }
+
+            ChatArea {
+                horizontal-stretch: 1;
+                vertical-stretch: 1;
+                has_conversation: root.chat_has_conversation;
+                peer_title: root.chat_peer_title;
+                peer_initial: root.chat_peer_initial;
+                peer_avatar_color: root.chat_peer_avatar_color;
+                peer_photo: root.chat_peer_photo;
+                peer_online: root.chat_peer_online;
+                is_channel_icon: root.chat_is_channel_icon;
+                is_direct: root.chat_is_direct;
+                peer_connected: root.chat_peer_connected;
+                connection_label: root.chat_connection_label;
+                sas_label: root.chat_sas_label;
+                show_call_button: root.chat_show_call_button;
+                is_server_channel: root.chat_is_server_channel;
+                store_enabled: root.chat_store_enabled;
+                store_allowed: root.chat_store_allowed;
+                clear_chat_busy: root.chat_clear_chat_busy;
+                clear_chat_confirm: root.chat_clear_chat_confirm;
+                can_voice: root.chat_can_voice;
+                in_voice: root.chat_in_voice;
+                room_voice_status: root.chat_room_voice_status;
+                voice_users_label: root.chat_voice_users_label;
+                messages: root.chat_messages;
+                quick_emojis: root.chat_quick_emojis;
+                is_editing: root.chat_is_editing;
+                input_placeholder: root.chat_input_placeholder;
+                send_label: root.chat_send_label;
+                crypto_ready: root.chat_crypto_ready;
+                message_input <=> root.chat_message_input;
+                has_pending_attachment: root.chat_has_pending_attachment;
+                pending_attachment_preview: root.chat_pending_attachment_preview;
+                has_pending_reply: root.chat_has_pending_reply;
+                pending_reply_line: root.chat_pending_reply_line;
+                typing_line: root.chat_typing_line;
+                chat_error: root.chat_error_line;
+                warning_line: root.chat_warning_line;
+
+                start_call => { root.chat_start_call(); }
+                toggle_store => { root.chat_toggle_store(); }
+                toggle_clear_confirm => { root.chat_toggle_clear_confirm(); }
+                confirm_clear => { root.chat_confirm_clear(); }
+                join_voice => { root.chat_join_voice(); }
+                leave_voice => { root.chat_leave_voice(); }
+                message_input_edited(t) => { root.chat_message_input_edited(t); }
+                send => { root.chat_send(); }
+                pick_attachment => { root.chat_pick_attachment(); }
+                remove_attachment => { root.chat_remove_attachment(); }
+                cancel_edit => { root.chat_cancel_edit(); }
+                cancel_reply => { root.chat_cancel_reply(); }
+                react(id, emoji) => { root.chat_react(id, emoji); }
+                reply(id, author, snippet) => { root.chat_reply(id, author, snippet); }
+                copy(text) => { root.chat_copy(text); }
+                edit(id, body, enc) => { root.chat_edit(id, body, enc); }
+                delete(id) => { root.chat_delete(id); }
+                purge(id) => { root.chat_purge(id); }
+                open_attachment(url) => { root.chat_open_attachment(url); }
+            }
+
+            if root.chat_selected_server: MembersDrawer {
+                collapsed: root.chat_members_collapsed;
+                panel_width: root.chat_members_width;
+                total_count: root.chat_members_total;
+                online_count: root.chat_members_online;
+                online_members: root.chat_members_online_list;
+                offline_members: root.chat_members_offline_list;
+                bot_members: root.chat_members_bot_list;
+                toggle => { root.chat_toggle_members(); }
+                open_profile(id) => { root.chat_open_profile(id); }
+                resize_started => { root.chat_members_resize_started(); }
+                resize_moved(x) => { root.chat_members_resize_moved(x); }
+                resize_ended => { root.chat_members_resize_ended(); }
+            }
+        }
+    }
+}
+
+    // Global Escape key (closes the attachment lightbox, cancels confirms,
+    // etc. -- see Message::EscapePressed in update.rs). A transparent
+    // overlay FocusScope: doesn't block clicks (no TouchArea of its own),
+    // just listens for Escape when nothing more specific has focus.
+    callback escape_pressed;
+    escape_scope := FocusScope {
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.escape_pressed();
+                accept
+            } else {
+                reject
+            }
+        }
+    }
+}

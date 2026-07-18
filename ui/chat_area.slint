@@ -1,0 +1,447 @@
+// Header + message history + composer -- the right-hand chat pane. Port of
+// the `Some(_)` / `None` branches of `chat_panel` in src/view/chat.rs.
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Avatar, SecondaryButton, PrimaryButton, DangerButton } from "widgets.slint";
+import { ChatMessageRow } from "chat_types.slint";
+import { MessageRow } from "message_row.slint";
+
+component HeaderChip inherits Rectangle {
+    in property <string> text;
+    in property <bool> warn: false;
+    height: 22px;
+    width: label.preferred-width + 20px;
+    background: root.warn ? #d1bc4d1a : Theme.accent-soft;
+    border-width: 1px;
+    border-color: root.warn ? #d1bc4d59 : Theme.border-strong;
+    label := Text {
+        text: root.text;
+        font-size: 11px;
+        font-family: Theme.font-medium;
+        color: root.warn ? Theme.warning : Theme.online;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component HeaderButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> accent: false;
+    callback clicked;
+    height: 30px;
+    width: label.preferred-width + 20px;
+    background: root.accent ? Theme.accent-dim : (touch.has-hover ? Theme.bg-hover : Theme.bg-secondary);
+    border-width: 1px;
+    border-color: root.accent ? Theme.accent : Theme.border;
+    touch := TouchArea { clicked => { root.clicked(); } }
+    label := Text {
+        text: root.text;
+        font-size: 12px;
+        color: root.accent ? Theme.text-on-accent : Theme.text-primary;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component ChatArea inherits Rectangle {
+    in property <bool> has_conversation: false;
+
+    in property <string> peer_title;
+    in property <string> peer_initial;
+    in property <color> peer_avatar_color: Theme.accent;
+    in property <image> peer_photo;
+    in property <bool> peer_online: false;
+    in property <bool> is_channel_icon: false;
+
+    in property <bool> is_direct: false;
+    in property <bool> peer_connected: false;
+    in property <string> connection_label;
+    in property <string> sas_label;
+    in property <bool> show_call_button: false;
+    in property <bool> is_server_channel: false;
+    in property <bool> store_enabled: true;
+    in property <bool> store_allowed: true;
+    in property <bool> clear_chat_busy: false;
+    in property <bool> clear_chat_confirm: false;
+    in property <bool> can_voice: false;
+    in property <bool> in_voice: false;
+    in property <string> room_voice_status;
+    in property <string> voice_users_label;
+
+    in property <[ChatMessageRow]> messages: [];
+    in property <[string]> quick_emojis: [];
+
+    in property <bool> is_editing: false;
+    in property <string> input_placeholder;
+    in property <string> send_label;
+    in property <bool> crypto_ready: true;
+    in-out property <string> message_input;
+    in property <bool> has_pending_attachment: false;
+    in property <image> pending_attachment_preview;
+    in property <bool> has_pending_reply: false;
+    in property <string> pending_reply_line;
+    in property <string> typing_line;
+    in property <string> chat_error;
+    in property <string> warning_line;
+
+    callback start_call;
+    callback toggle_store;
+    callback toggle_clear_confirm;
+    callback confirm_clear;
+    callback join_voice;
+    callback leave_voice;
+
+    callback message_input_edited(string);
+    callback send;
+    callback pick_attachment;
+    callback remove_attachment;
+    callback cancel_edit;
+    callback cancel_reply;
+
+    callback react(string, string);
+    callback reply(string, string, string);
+    callback copy(string);
+    callback edit(string, string, bool);
+    callback delete(string);
+    callback purge(string);
+    callback open_attachment(string);
+
+    background: Theme.bg-primary;
+
+    // Welcome/empty state. Deliberately NOT a fill-parent VerticalLayout
+    // with `alignment: center`: a layout that fills its parent propagates
+    // its size constraints upward, and this content's bounded maximum
+    // height (~sum of the fixed-size children) was clamping the entire
+    // window's scene -- every screen rendered at ~390px tall with the rest
+    // of the OS window black. An absolutely-positioned (explicit x/y/size)
+    // layout contributes no constraints to the parent, so the Rectangle
+    // stays unconstrained and simply centers the content box.
+    if !root.has_conversation: Rectangle {
+        welcome_content := VerticalLayout {
+            x: (parent.width - self.preferred-width) / 2;
+            y: (parent.height - self.preferred-height) / 2;
+            width: self.preferred-width;
+            height: self.preferred-height;
+            spacing: 10px;
+            HorizontalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 72px;
+                    height: 72px;
+                    background: Theme.accent;
+                    border-width: 1px;
+                    border-color: Theme.accent;
+                    drop-shadow-offset-x: Theme.shadow-offset;
+                    drop-shadow-offset-y: Theme.shadow-offset;
+                    drop-shadow-color: Theme.shadow-color;
+                    Text {
+                        text: ">_";
+                        font-size: 26px;
+                        color: #050d05;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            Text {
+                text: "Welcome to Talkyss";
+                font-size: 28px;
+                color: Theme.text-primary;
+                horizontal-alignment: center;
+            }
+            Text {
+                text: "Pick a chat on the left, or add a friend to get started.";
+                font-size: 14px;
+                color: Theme.text-muted;
+                horizontal-alignment: center;
+            }
+            HorizontalLayout {
+                alignment: center;
+                Rectangle {
+                    background: Theme.bg-secondary;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    height: 32px;
+                    width: hint.preferred-width + 28px;
+                    hint := Text {
+                        text: "[DM] chats · [Fr] friends · [+] servers";
+                        font-size: 12px;
+                        font-family: Theme.font-medium;
+                        color: Theme.text-muted;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+
+    if root.has_conversation: VerticalLayout {
+        // ---- Header ----
+        Rectangle {
+            height: 62px;
+            background: Theme.bg-secondary;
+            border-width: 1px;
+            border-color: Theme.border;
+            HorizontalLayout {
+                padding: 18px;
+                spacing: 12px;
+                // No `alignment: start` -- same story as the composer row
+                // and the rail (see their comments): it disabled the
+                // trailing spacer's `horizontal-stretch: 1` below, so the
+                // Call/Store/Clear buttons weren't actually pinned to the
+                // right edge -- their position was just whatever came after
+                // the preceding elements' own widths. Since `connection_label`
+                // changes text (and therefore width) throughout a peerseal
+                // handshake, the buttons visibly shifted under the mouse
+                // every time it updated, flickering hover state.
+                if !root.is_channel_icon: Avatar {
+                    initial: root.peer_initial;
+                    avatar-color: root.peer_avatar_color;
+                    photo-source: root.peer_photo;
+                    show-presence: true;
+                    online: root.peer_online;
+                    vertical-stretch: 0;
+                }
+                if root.is_channel_icon: Text {
+                    text: "#";
+                    font-size: 18px;
+                    color: Theme.text-muted;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.peer_title;
+                    font-size: 17px;
+                    color: Theme.text-primary;
+                    vertical-alignment: center;
+                }
+                if root.is_direct: HeaderChip { text: root.connection_label; warn: !root.peer_connected; }
+                if root.is_direct && root.sas_label != "": Text {
+                    text: "SAS " + root.sas_label;
+                    font-size: 11px;
+                    color: Theme.text-muted;
+                    vertical-alignment: center;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                if root.show_call_button: HeaderButton { text: "Call"; accent: true; clicked => { root.start_call(); } }
+                if !root.is_server_channel: HeaderButton {
+                    text: root.store_enabled ? "Store: ON" : "Store: OFF";
+                    accent: root.store_enabled;
+                    clicked => { root.toggle_store(); }
+                }
+                if !root.is_server_channel && !root.store_allowed: Text {
+                    text: "ephemeral";
+                    font-size: 10px;
+                    color: Theme.warning;
+                    vertical-alignment: center;
+                }
+                if !root.is_server_channel && root.clear_chat_busy: Text {
+                    text: "Clearing…";
+                    font-size: 12px;
+                    color: Theme.text-muted;
+                    vertical-alignment: center;
+                }
+                if !root.is_server_channel && !root.clear_chat_busy && root.clear_chat_confirm: Text {
+                    text: "Wipe?";
+                    font-size: 11px;
+                    color: Theme.warning;
+                    vertical-alignment: center;
+                }
+                if !root.is_server_channel && !root.clear_chat_busy && root.clear_chat_confirm: HeaderButton {
+                    text: "Yes"; clicked => { root.confirm_clear(); }
+                }
+                if !root.is_server_channel && !root.clear_chat_busy && root.clear_chat_confirm: HeaderButton {
+                    text: "No"; clicked => { root.toggle_clear_confirm(); }
+                }
+                if !root.is_server_channel && !root.clear_chat_busy && !root.clear_chat_confirm: HeaderButton {
+                    text: "Clear"; clicked => { root.toggle_clear_confirm(); }
+                }
+                if root.can_voice: HeaderButton {
+                    text: root.in_voice ? "Leave voice" : "Join voice";
+                    accent: true;
+                    clicked => { root.in_voice ? root.leave_voice() : root.join_voice(); }
+                }
+                if root.can_voice && root.room_voice_status != "": Text {
+                    text: root.room_voice_status;
+                    font-size: 11px;
+                    color: Theme.text-muted;
+                    vertical-alignment: center;
+                }
+                if root.can_voice && root.in_voice && root.voice_users_label != "": Text {
+                    text: "· " + root.voice_users_label;
+                    font-size: 11px;
+                    color: Theme.text-muted;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // ---- Message list ----
+        Rectangle {
+            vertical-stretch: 1;
+            background: Theme.bg-primary;
+            list := ListView {
+                for m in root.messages: MessageRow {
+                    msg: m;
+                    quick_emojis: root.quick_emojis;
+                    react(id, emoji) => { root.react(id, emoji); }
+                    reply(id, author, snippet) => { root.reply(id, author, snippet); }
+                    copy(text) => { root.copy(text); }
+                    edit(id, body, enc) => { root.edit(id, body, enc); }
+                    delete(id) => { root.delete(id); }
+                    purge(id) => { root.purge(id); }
+                    open_attachment(url) => { root.open_attachment(url); }
+                }
+            }
+        }
+
+        // ---- Composer ----
+        Rectangle {
+            background: Theme.bg-secondary;
+            border-width: 1px;
+            border-color: Theme.border;
+            VerticalLayout {
+                padding: 14px;
+                spacing: 8px;
+
+                if root.typing_line != "": Text {
+                    text: "▌ " + root.typing_line;
+                    font-size: 11px;
+                    font-family: Theme.font-medium;
+                    color: Theme.accent;
+                }
+
+                if root.has_pending_reply: Rectangle {
+                    background: Theme.bg-tertiary;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    height: 36px;
+                    HorizontalLayout {
+                        padding: 10px;
+                        spacing: 10px;
+                        Text {
+                            text: root.pending_reply_line;
+                            font-size: 12px;
+                            color: Theme.text-primary;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        HeaderButton { text: "Cancel"; clicked => { root.cancel_reply(); } }
+                    }
+                }
+
+                if root.has_pending_attachment: Rectangle {
+                    background: Theme.bg-tertiary;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    height: 60px;
+                    HorizontalLayout {
+                        padding: 8px;
+                        spacing: 12px;
+                        Rectangle {
+                            width: 44px;
+                            background: Theme.bg-secondary;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            Image { source: root.pending_attachment_preview; width: 44px; height: 44px; image-fit: ImageFit.cover; }
+                        }
+                        Text {
+                            text: "Image attached";
+                            font-size: 12px;
+                            color: Theme.text-muted;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        HeaderButton { text: "Remove"; clicked => { root.remove_attachment(); } }
+                    }
+                }
+
+                if root.chat_error != "": Rectangle {
+                    background: Theme.danger-soft;
+                    border-width: 1px;
+                    border-color: Theme.danger;
+                    height: 34px;
+                    Text {
+                        x: 10px;
+                        text: root.chat_error;
+                        font-size: 12px;
+                        color: Theme.danger;
+                        vertical-alignment: center;
+                    }
+                }
+                if root.chat_error == "" && root.warning_line != "": Rectangle {
+                    background: #d1bc4d1a;
+                    border-width: 1px;
+                    border-color: #d1bc4d59;
+                    height: 34px;
+                    Text {
+                        x: 10px;
+                        text: root.warning_line;
+                        font-size: 12px;
+                        color: Theme.warning;
+                        vertical-alignment: center;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    // No `alignment` here (default `stretch`). The input
+                    // box below is the only flexible item (horizontal
+                    // stretch: 1) and its own TextInput child is bound to
+                    // `parent.width - 24px` -- i.e. the input box's width
+                    // must come from the layout handing it real leftover
+                    // space. `alignment: center` (like the same anti-pattern
+                    // fixed in message_row.slint) disables stretch-based
+                    // sizing entirely, so the box fell back to its own
+                    // preferred width, which is itself derived from its
+                    // child's `parent.width`-relative binding -- a genuine
+                    // circular size dependency that overflowed the stack on
+                    // *every* chat screen (this composer renders regardless
+                    // of message count, unlike the message list).
+                    if !root.is_editing && root.crypto_ready: HeaderButton { text: "+"; clicked => { root.pick_attachment(); } }
+                    Text {
+                        text: ">";
+                        font-size: 16px;
+                        font-family: Theme.font-medium;
+                        color: Theme.accent;
+                        vertical-alignment: center;
+                        horizontal-stretch: 0;
+                    }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 40px;
+                        background: Theme.bg-tertiary;
+                        border-width: 1px;
+                        border-color: composer_input.has-focus ? Theme.accent : Theme.border;
+                        composer_input := TextInput {
+                            x: 12px;
+                            width: parent.width - 24px;
+                            height: parent.height;
+                            vertical-alignment: center;
+                            text <=> root.message_input;
+                            color: Theme.text-primary;
+                            font-size: 14px;
+                            edited => { root.message_input_edited(self.text); }
+                            accepted => { if (root.crypto_ready) { root.send(); } }
+                        }
+                        if root.message_input == "": Text {
+                            x: 12px;
+                            text: root.input_placeholder;
+                            color: Theme.text-muted;
+                            font-size: 14px;
+                            vertical-alignment: center;
+                            height: parent.height;
+                        }
+                    }
+                    PrimaryButton {
+                        text: root.send_label;
+                        enabled: root.crypto_ready;
+                        width: 90px;
+                        clicked => { root.send(); }
+                    }
+                    if root.is_editing: SecondaryButton { text: "Cancel"; width: 80px; clicked => { root.cancel_edit(); } }
+                }
+            }
+        }
+    }
+}

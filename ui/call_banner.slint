@@ -1,0 +1,125 @@
+// Top-of-window call bar: ringing / active states, share picker, remote
+// screenshare frame. Port of `call_banner_view` in src/view/chat.rs.
+import { Theme } from "theme.slint";
+import { ShareTargetRow } from "chat_types.slint";
+
+component BannerButton inherits Rectangle {
+    in property <string> text;
+    in property <color> accent_color: Theme.accent-dim;
+    in property <bool> filled: false;
+    callback clicked;
+    height: 32px;
+    width: label.preferred-width + 24px;
+    background: root.filled ? root.accent_color : (touch.has-hover ? Theme.bg-hover : Theme.bg-secondary);
+    border-width: 1px;
+    border-color: root.filled ? root.accent_color : Theme.border;
+    touch := TouchArea { clicked => { root.clicked(); } }
+    label := Text {
+        text: root.text;
+        font-size: 13px;
+        color: root.filled ? white : Theme.text-primary;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component CallBanner inherits Rectangle {
+    in property <bool> visible_: false;
+    in property <bool> is_ringing: false;
+    in property <bool> is_incoming: false;
+    in property <bool> is_active: false;
+    in property <string> label;
+    in property <bool> muted: false;
+    in property <bool> all_muted: false;
+    in property <bool> is_sharing: false;
+    in property <bool> share_picker_open: false;
+    in property <[ShareTargetRow]> share_targets: [];
+    in property <bool> has_remote_frame: false;
+    in property <image> remote_frame;
+    in property <string> remote_frame_title;
+    in property <bool> share_expanded: false;
+
+    callback accept;
+    callback decline;
+    callback hang_up;
+    callback toggle_mute;
+    callback toggle_mute_all;
+    callback toggle_share_picker;
+    callback stop_share;
+    callback start_share(string);
+    callback toggle_share_size;
+
+    height: root.visible_ ? content.preferred-height : 0px;
+    clip: true;
+    background: Theme.bg-secondary;
+
+    content := VerticalLayout {
+        Rectangle {
+            height: 56px;
+            background: root.is_ringing ? #d1bc4d1a : Theme.bg-secondary;
+            border-width: 1px;
+            border-color: root.is_ringing ? #d1bc4d59 : Theme.border;
+            HorizontalLayout {
+                padding: 14px;
+                spacing: 12px;
+                Text {
+                    text: root.label;
+                    font-size: 13px;
+                    color: Theme.text-primary;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                if root.is_ringing && root.is_incoming: BannerButton { text: "Accept"; filled: true; accent_color: Theme.accent-dim; clicked => { root.accept(); } }
+                if root.is_ringing && root.is_incoming: BannerButton { text: "Decline"; filled: true; accent_color: Theme.danger; clicked => { root.decline(); } }
+                if root.is_ringing && !root.is_incoming: BannerButton { text: "Cancel"; clicked => { root.hang_up(); } }
+                if root.is_active: BannerButton { text: root.muted ? "Unmute" : "Mute"; clicked => { root.toggle_mute(); } }
+                if root.is_active: BannerButton { text: root.all_muted ? "Unmute all" : "Mute all"; clicked => { root.toggle_mute_all(); } }
+                if root.is_active: BannerButton {
+                    text: root.is_sharing ? "Stop sharing" : "Share screen";
+                    clicked => { root.is_sharing ? root.stop_share() : root.toggle_share_picker(); }
+                }
+                if root.is_active: BannerButton { text: "Hang up"; filled: true; accent_color: Theme.danger; clicked => { root.hang_up(); } }
+            }
+        }
+
+        if root.is_active && root.share_picker_open: Rectangle {
+            height: 40px;
+            background: Theme.bg-primary;
+            HorizontalLayout {
+                padding: 8px;
+                spacing: 10px;
+                Text { text: "Share:"; font-size: 12px; color: Theme.text-muted; vertical-alignment: center; }
+                if root.share_targets.length == 0: Text { text: "Loading sources..."; font-size: 12px; color: Theme.text-muted; vertical-alignment: center; }
+                for t in root.share_targets: Rectangle {
+                    width: t-label.preferred-width + 4px;
+                    t-label := Text {
+                        text: t.label;
+                        font-size: 12px;
+                        color: t-touch.has-hover ? Theme.accent : Theme.text-primary;
+                        vertical-alignment: center;
+                    }
+                    t-touch := TouchArea { clicked => { root.start_share(t.id); } }
+                }
+            }
+        }
+
+        if root.has_remote_frame: Rectangle {
+            background: Theme.bg-primary;
+            height: root.share_expanded ? 700px : 300px;
+            VerticalLayout {
+                padding: 8px;
+                spacing: 6px;
+                HorizontalLayout {
+                    Text { text: root.remote_frame_title; font-size: 12px; color: Theme.text-muted; vertical-alignment: center; horizontal-stretch: 1; }
+                    BannerButton { text: root.share_expanded ? "Shrink" : "Enlarge"; clicked => { root.toggle_share_size(); } }
+                }
+                Image {
+                    source: root.remote_frame;
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+                    image-fit: ImageFit.contain;
+                }
+            }
+        }
+    }
+}

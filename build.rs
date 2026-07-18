@@ -44,6 +44,8 @@ fn main() {
     println!("cargo:rerun-if-changed=.env.local");
     println!("cargo:rerun-if-changed=.env");
 
+    slint_build::compile("ui/main.slint").expect("failed to compile ui/main.slint");
+
     println!("cargo:rustc-env=CONVEX_URL={}", env_value("CONVEX_URL"));
     println!("cargo:rustc-env=TURN_URL={}", env_value("TURN_URL"));
     println!("cargo:rustc-env=TURN_USERNAME={}", env_value("TURN_USERNAME"));

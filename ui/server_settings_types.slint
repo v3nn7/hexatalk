@@ -1,0 +1,42 @@
+// View-model structs for the per-server Settings screen -- mirrors
+// src/view/server_settings.rs.
+
+export struct SSChannelRow {
+    conversation_id: string,
+    name: string,
+    is_voice: bool,
+    is_renaming: bool,
+}
+
+export struct SSAssignableRole {
+    role_id: string,
+    name: string,
+    assigned: bool,
+}
+
+export struct SSMemberRow {
+    user_id: string,
+    display_name: string,
+    username: string,
+    initial: string,
+    avatar_color: color,
+    photo: image,
+    photo_url: string,
+    is_owner: bool,
+    role_label: string,
+    picker_open: bool,
+    assignable_roles: [SSAssignableRole],
+}
+
+export struct SSRoleRow {
+    role_id: string,
+    name: string,
+    color: color,
+    is_editing: bool,
+}
+
+export struct SSPermRow {
+    bit: int,
+    label: string,
+    enabled: bool,
+}

@@ -491,8 +491,19 @@ async fn connected_loop(
     cmd_rx: &mut mpsc::UnboundedReceiver<PeerCmd>,
     event_tx: &futures_mpsc::Sender<PeerEvent>,
 ) {
+    // Application-level keepalive: idle WSS relays (and NATs) drop silent
+    // connections. A Ping every 25 s keeps the secure channel warm; the peer
+    // auto-answers with Pong (see reprotocol node.rs recv_app).
+    let mut keepalive = tokio::time::interval(Duration::from_secs(25));
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
+            _ = keepalive.tick() => {
+                if let Err(e) = session.send_app(AppMessage::Ping(Vec::new())).await {
+                    let _ = emit(event_tx, PeerEvent::Error(format!("keepalive: {e}"))).await;
+                    break;
+                }
+            }
             cmd = cmd_rx.recv() => {
                 match cmd {
                     None | Some(PeerCmd::Shutdown) => break,

@@ -179,6 +179,15 @@ export const markRead = mutation({
       )
       .unique();
     if (membership) {
+      // Idempotency guard: skip the write when there is nothing new to
+      // read. An unconditional patch re-fires listMyConversations watches
+      // and can put clients into a markRead -> watch -> markRead loop.
+      const conversation = await ctx.db.get("conversations", args.conversationId);
+      const lastMessageAt = conversation?.lastMessageAt ?? 0;
+      const lastReadAt = membership.lastReadAt ?? 0;
+      if (lastReadAt >= lastMessageAt) {
+        return null;
+      }
       await ctx.db.patch("conversationMembers", membership._id, {
         lastReadAt: Date.now(),
       });

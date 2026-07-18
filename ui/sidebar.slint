@@ -1,0 +1,512 @@
+// Middle panel: tab header, the 5 tab bodies (Chats/Friends/Requests/
+// Servers/Admin), and the account footer. Port of the `channel_list`
+// section of src/view/chat.rs.
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Avatar, SecondaryButton, PrimaryButton, DangerButton, TextInputField, ResizeHandle } from "widgets.slint";
+import {
+    ConversationRow, FriendRow, IncomingRequestRow, OutgoingRequestRow,
+    PeopleHitRow, SuggestionRow, BlockedRow, ServerRow, ChannelRow, AdminUserRow,
+    GroupCandidateRow,
+} from "chat_types.slint";
+
+export enum SidebarTab { Chats, Friends, Requests, Servers, Admin }
+
+component SmallButton inherits Rectangle {
+    in property <string> text;
+    in property <color> fg: Theme.text-primary;
+    in property <color> bg: Theme.bg-secondary;
+    in property <color> border_c: Theme.border;
+    callback clicked;
+    height: 26px;
+    width: label.preferred-width + 16px;
+    background: root.bg;
+    border-width: 1px;
+    border-color: root.border_c;
+    touch := TouchArea { clicked => { root.clicked(); } }
+    label := Text { text: root.text; font-size: 11px; color: root.fg; horizontal-alignment: center; vertical-alignment: center; }
+}
+
+component PersonCard inherits Rectangle {
+    background: Theme.bg-secondary;
+    border-width: 1px;
+    border-color: Theme.border;
+    VerticalLayout { padding: 10px; spacing: 8px; @children }
+}
+
+export component Sidebar inherits Rectangle {
+    in property <SidebarTab> tab: SidebarTab.Chats;
+    in property <string> tab_title: "Direct";
+    in property <bool> selected_server: false;
+
+    in property <length> panel_width: 320px;
+
+    // Add-server mini menu
+    in property <bool> add_menu_open: false;
+    in-out property <string> new_server_name;
+    in-out property <string> join_server_code;
+    in property <string> server_status;
+
+    // Chats tab
+    in property <bool> new_group_open: false;
+    in-out property <string> new_group_name;
+    in property <[GroupCandidateRow]> group_candidates: [];
+    in property <string> group_create_status;
+    in property <[ConversationRow]> conversations: [];
+
+    // Friends tab
+    in property <string> friends_summary;
+    in-out property <string> add_friend_input;
+    in-out property <string> add_friend_note;
+    in property <string> add_friend_status;
+    in property <int> friends_filter: 0; // 0=All 1=Online 2=Favorites
+    in property <[PeopleHitRow]> people_hits: [];
+    in property <[SuggestionRow]> suggestions: [];
+    in-out property <string> friends_filter_input;
+    in property <[FriendRow]> friends: [];
+    in property <[BlockedRow]> blocked: [];
+    in property <string> confirm_block_user_id;
+    in property <bool> friend_request_busy: false;
+
+    // Requests tab
+    in property <[IncomingRequestRow]> incoming_requests: [];
+    in property <[OutgoingRequestRow]> outgoing_requests: [];
+
+    // Servers tab
+    in property <string> server_name;
+    in property <string> server_meta;
+    in property <bool> can_manage_server: false;
+    in property <string> invite_code;
+    in property <bool> can_manage_channels: false;
+    in property <bool> new_channel_open: false;
+    in-out property <string> new_channel_name;
+    in property <bool> new_channel_is_voice: false;
+    in property <[ChannelRow]> text_channels: [];
+    in property <[ChannelRow]> voice_channels: [];
+
+    // Admin tab
+    in-out property <string> admin_search;
+    in property <string> admin_status;
+    in property <[AdminUserRow]> admin_users: [];
+    in property <bool> is_admin: false;
+
+    // Account footer
+    in property <string> my_display_name;
+    in property <string> my_initial;
+    in property <color> my_avatar_color: Theme.accent;
+    in property <image> my_photo;
+    in property <string> my_badge_text;
+    in property <color> my_badge_bg;
+    in property <color> my_badge_fg;
+
+    callback toggle_add_menu;
+    callback new_server_name_changed(string);
+    callback create_server;
+    callback join_server_code_changed(string);
+    callback join_server;
+
+    callback toggle_group_panel;
+    callback group_name_changed(string);
+    callback toggle_group_member(string);
+    callback create_group;
+    callback open_conversation(string);
+
+    callback add_friend_input_changed(string);
+    callback add_friend_note_changed(string);
+    callback send_friend_request;
+    callback set_friends_filter(int);
+    callback friends_filter_input_changed(string);
+    callback open_profile(string);
+    callback send_friend_request_to(string);
+    callback message_friend(string);
+    callback toggle_favorite(string);
+    callback remove_friend(string);
+    callback confirm_block(string);
+    callback cancel_block;
+    callback block_user(string);
+    callback unblock_user(string);
+    callback respond_request(string, string, bool);
+    callback accept_all;
+    callback decline_all;
+    callback cancel_outgoing(string);
+
+    callback select_server;
+    callback toggle_server_settings;
+    callback copy_invite_link(string);
+    callback toggle_new_channel;
+    callback new_channel_name_changed(string);
+    callback create_channel;
+    callback toggle_new_channel_voice;
+    callback open_channel(string);
+
+    callback admin_search_changed(string);
+    callback admin_set_role(string, string);
+    callback admin_set_banned(string, bool);
+
+    callback open_settings;
+
+    callback resize_started;
+    callback resize_moved(length);
+    callback resize_ended;
+
+    width: root.panel_width + 4px;
+    background: transparent;
+
+    HorizontalLayout {
+        Rectangle {
+            width: root.panel_width;
+            background: Theme.bg-secondary;
+            border-width: 1px;
+            border-color: Theme.border;
+
+            VerticalLayout {
+                // ---- Header ----
+                Rectangle {
+                    height: 56px;
+                    VerticalLayout {
+                        padding: 14px;
+                        spacing: 2px;
+                        alignment: center;
+                        Text { text: root.tab_title.to-uppercase(); font-size: 10px; font-family: Theme.font-medium; color: Theme.text-muted; }
+                        Text { text: root.tab_title; font-size: 16px; color: Theme.text-primary; }
+                    }
+                }
+
+                if root.add_menu_open: PersonCard {
+                    Text { text: "ADD SERVER"; font-size: 10px; font-family: Theme.font-medium; color: Theme.accent; }
+                    TextInputField { placeholder: "Name"; value <=> root.new_server_name; edited(t) => { root.new_server_name_changed(t); } submitted => { root.create_server(); } }
+                    PrimaryButton { text: "Create"; clicked => { root.create_server(); } }
+                    Rectangle { height: 1px; background: Theme.border; }
+                    TextInputField { placeholder: "Invite code or link"; value <=> root.join_server_code; edited(t) => { root.join_server_code_changed(t); } submitted => { root.join_server(); } }
+                    SecondaryButton { text: "Join"; clicked => { root.join_server(); } }
+                    SmallButton { text: "Close"; clicked => { root.toggle_add_menu(); } }
+                    if root.server_status != "": Text { text: root.server_status; font-size: 11px; color: Theme.text-muted; }
+                }
+
+                // ---- Tab body ----
+                Rectangle {
+                    vertical-stretch: 1;
+
+                    if root.tab == SidebarTab.Chats: VerticalLayout {
+                        padding: 12px;
+                        spacing: 8px;
+                        SmallButton { text: root.new_group_open ? "Cancel" : "+ New group"; clicked => { root.toggle_group_panel(); } }
+                        if root.new_group_open: PersonCard {
+                            TextInputField { placeholder: "Group name"; value <=> root.new_group_name; edited(t) => { root.group_name_changed(t); } }
+                            for f in root.group_candidates: HorizontalLayout {
+                                spacing: 6px;
+                                Rectangle {
+                                    width: 16px; height: 16px;
+                                    background: f.selected ? Theme.accent : transparent;
+                                    border-width: 1px;
+                                    border-color: Theme.border-strong;
+                                    TouchArea { clicked => { root.toggle_group_member(f.user_id); } }
+                                }
+                                Text { text: f.label; font-size: 12px; color: Theme.text-primary; vertical-alignment: center; }
+                            }
+                            PrimaryButton { text: "Create group"; clicked => { root.create_group(); } }
+                            if root.group_create_status != "": Text { text: root.group_create_status; font-size: 11px; color: Theme.text-muted; }
+                        }
+                        if root.conversations.length == 0: Text { text: "No chats yet. Message a friend to start."; font-size: 13px; color: Theme.text-muted; wrap: word-wrap; }
+                        list_convos := ListView {
+                            for c in root.conversations: Rectangle {
+                                height: 40px;
+                                background: c.active ? Theme.accent-soft : (ct.has-hover ? Theme.bg-hover : transparent);
+                                border-width: 1px;
+                                border-color: c.active ? Theme.accent : transparent;
+                                ct := TouchArea { clicked => { root.open_conversation(c.id); } }
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    spacing: 10px;
+                                    alignment: start;
+                                    if c.unread && !c.active: Rectangle { width: 8px; height: 8px; background: Theme.accent; vertical-stretch: 0; }
+                                    Text { text: c.title; font-size: 14px; color: Theme.text-primary; vertical-alignment: center; }
+                                }
+                            }
+                        }
+                    }
+
+                    if root.tab == SidebarTab.Friends: Flickable {
+                        viewport-height: friends_col.preferred-height;
+                        friends_col := VerticalLayout {
+                            width: parent.width;
+                            padding: 10px;
+                            spacing: 10px;
+                            Text { text: root.friends_summary; font-size: 12px; color: Theme.text-muted; }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                TextInputField { placeholder: "Search people or @username"; value <=> root.add_friend_input; edited(t) => { root.add_friend_input_changed(t); } submitted => { root.send_friend_request(); } }
+                                PrimaryButton { text: "Add"; width: 70px; clicked => { root.send_friend_request(); } }
+                            }
+                            TextInputField { placeholder: "Optional note (max 200)"; value <=> root.add_friend_note; edited(t) => { root.add_friend_note_changed(t); } submitted => { root.send_friend_request(); } }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                SmallButton { text: "All"; bg: root.friends_filter == 0 ? Theme.accent-soft : Theme.bg-secondary; clicked => { root.set_friends_filter(0); } }
+                                SmallButton { text: "Online"; bg: root.friends_filter == 1 ? Theme.accent-soft : Theme.bg-secondary; clicked => { root.set_friends_filter(1); } }
+                                SmallButton { text: "★ Fav"; bg: root.friends_filter == 2 ? Theme.accent-soft : Theme.bg-secondary; clicked => { root.set_friends_filter(2); } }
+                            }
+                            if root.add_friend_status != "": Text { text: root.add_friend_status; font-size: 12px; color: Theme.text-muted; }
+
+                            if root.people_hits.length > 0: Text { text: "Search results"; font-size: 12px; color: Theme.text-muted; }
+                            for hit in root.people_hits: PersonCard {
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    Avatar { initial: hit.initial; avatar-color: hit.avatar_color; photo-source: hit.photo; show-presence: true; online: hit.online; }
+                                    VerticalLayout {
+                                        spacing: 2px;
+                                        Text { text: hit.display_name; font-size: 14px; color: Theme.text-primary; }
+                                        Text { text: hit.meta; font-size: 11px; color: Theme.text-muted; }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    if hit.relation == "friends": PrimaryButton { text: "Message"; width: 80px; clicked => { root.message_friend(hit.user_id); } }
+                                    if hit.relation == "incoming": SmallButton { text: "Accept"; bg: Theme.success; fg: white; clicked => { root.respond_request(hit.incoming_request_id, hit.user_id, true); } }
+                                    if hit.relation == "outgoing": Text { text: "Pending…"; font-size: 11px; color: Theme.text-muted; vertical-alignment: center; }
+                                    if hit.relation != "friends" && hit.relation != "incoming" && hit.relation != "outgoing": SmallButton {
+                                        text: root.friend_request_busy ? "Sending…" : "Add";
+                                        clicked => { root.send_friend_request_to(hit.username); }
+                                    }
+                                    SmallButton { text: "Profile"; clicked => { root.open_profile(hit.user_id); } }
+                                    if root.confirm_block_user_id == hit.user_id: SmallButton { text: "Yes"; bg: Theme.danger; fg: white; clicked => { root.block_user(hit.user_id); } }
+                                    if root.confirm_block_user_id == hit.user_id: SmallButton { text: "Cancel"; clicked => { root.cancel_block(); } }
+                                    if root.confirm_block_user_id != hit.user_id: SmallButton { text: "Block"; bg: Theme.danger-soft; fg: Theme.danger; clicked => { root.confirm_block(hit.user_id); } }
+                                }
+                            }
+
+                            if root.people_hits.length == 0 && root.suggestions.length > 0: Text { text: "Suggested from servers"; font-size: 12px; color: Theme.text-muted; }
+                            for s in root.suggestions: PersonCard {
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    Avatar { initial: s.initial; avatar-color: s.avatar_color; photo-source: s.photo; show-presence: true; online: s.online; }
+                                    VerticalLayout {
+                                        spacing: 2px;
+                                        horizontal-stretch: 1;
+                                        Text { text: s.display_name; font-size: 13px; color: Theme.text-primary; }
+                                        Text { text: s.meta; font-size: 11px; color: Theme.text-muted; }
+                                    }
+                                    SmallButton { text: "Add"; clicked => { root.add_friend_input_changed(s.username); } }
+                                    SmallButton { text: "Profile"; clicked => { root.open_profile(s.user_id); } }
+                                }
+                            }
+
+                            if root.friends.length == 0: Text { text: "No friends yet. Search above or accept invites."; font-size: 13px; color: Theme.text-muted; wrap: word-wrap; }
+                            for friend in root.friends: PersonCard {
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    Avatar { initial: friend.initial; avatar-color: friend.avatar_color; photo-source: friend.photo; show-presence: true; online: friend.online; }
+                                    VerticalLayout {
+                                        spacing: 2px;
+                                        Text { text: friend.label; font-size: 14px; color: Theme.text-primary; }
+                                        Text { text: friend.subtitle; font-size: 11px; color: Theme.text-muted; }
+                                        Text { text: friend.meta; font-size: 10px; color: Theme.text-muted; }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    SmallButton { text: friend.favorite ? "★" : "☆"; clicked => { root.toggle_favorite(friend.user_id); } }
+                                    SmallButton { text: "Message"; bg: Theme.accent-dim; fg: white; clicked => { root.message_friend(friend.user_id); } }
+                                    SmallButton { text: "Profile"; clicked => { root.open_profile(friend.user_id); } }
+                                    SmallButton { text: "Remove"; clicked => { root.remove_friend(friend.user_id); } }
+                                    if root.confirm_block_user_id == friend.user_id: SmallButton { text: "Yes"; bg: Theme.danger; fg: white; clicked => { root.block_user(friend.user_id); } }
+                                    if root.confirm_block_user_id == friend.user_id: SmallButton { text: "Cancel"; clicked => { root.cancel_block(); } }
+                                    if root.confirm_block_user_id != friend.user_id: SmallButton { text: "Block"; bg: Theme.danger-soft; fg: Theme.danger; clicked => { root.confirm_block(friend.user_id); } }
+                                }
+                            }
+
+                            if root.blocked.length > 0: Text { text: "Blocked"; font-size: 12px; color: Theme.text-muted; }
+                            for b in root.blocked: PersonCard {
+                                HorizontalLayout {
+                                    Text { text: b.display_name; font-size: 13px; color: Theme.text-primary; vertical-alignment: center; horizontal-stretch: 1; }
+                                    SmallButton { text: "Unblock"; clicked => { root.unblock_user(b.user_id); } }
+                                }
+                            }
+                        }
+                    }
+
+                    if root.tab == SidebarTab.Requests: Flickable {
+                        viewport-height: requests_col.preferred-height;
+                        requests_col := VerticalLayout {
+                            width: parent.width;
+                            padding: 10px;
+                            spacing: 10px;
+                            HorizontalLayout {
+                                Text { text: "Incoming"; font-size: 12px; color: Theme.text-muted; vertical-alignment: center; horizontal-stretch: 1; }
+                                if root.incoming_requests.length > 0: SmallButton { text: "Accept all"; bg: Theme.success; fg: white; clicked => { root.accept_all(); } }
+                                if root.incoming_requests.length > 0: SmallButton { text: "Decline all"; clicked => { root.decline_all(); } }
+                            }
+                            if root.incoming_requests.length == 0: Text { text: "No pending invites."; font-size: 13px; color: Theme.text-muted; }
+                            for req in root.incoming_requests: PersonCard {
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    Avatar { initial: req.initial; avatar-color: req.avatar_color; photo-source: req.photo; show-presence: true; online: req.online; }
+                                    VerticalLayout {
+                                        spacing: 2px;
+                                        Text { text: req.from_display_name; font-size: 14px; color: Theme.text-primary; }
+                                        Text { text: req.sub; font-size: 11px; color: Theme.text-muted; }
+                                    }
+                                }
+                                if req.note != "": Rectangle {
+                                    background: Theme.bg-tertiary;
+                                    border-width: 1px;
+                                    border-color: Theme.border;
+                                    Text { x: 10px; y: 8px; text: req.note; font-size: 12px; color: Theme.text-primary; wrap: word-wrap; }
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    SmallButton { text: "Accept"; bg: Theme.success; fg: white; clicked => { root.respond_request(req.request_id, req.from_user_id, true); } }
+                                    SmallButton { text: "Decline"; clicked => { root.respond_request(req.request_id, req.from_user_id, false); } }
+                                    SmallButton { text: "Profile"; clicked => { root.open_profile(req.from_user_id); } }
+                                    if root.confirm_block_user_id == req.from_user_id: SmallButton { text: "Yes"; bg: Theme.danger; fg: white; clicked => { root.block_user(req.from_user_id); } }
+                                    if root.confirm_block_user_id == req.from_user_id: SmallButton { text: "Cancel"; clicked => { root.cancel_block(); } }
+                                    if root.confirm_block_user_id != req.from_user_id: SmallButton { text: "Block"; bg: Theme.danger-soft; fg: Theme.danger; clicked => { root.confirm_block(req.from_user_id); } }
+                                }
+                            }
+
+                            Text { text: "Outgoing"; font-size: 12px; color: Theme.text-muted; }
+                            if root.outgoing_requests.length == 0: Text { text: "No outgoing requests."; font-size: 13px; color: Theme.text-muted; }
+                            for req in root.outgoing_requests: PersonCard {
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    Avatar { initial: req.initial; avatar-color: req.avatar_color; photo-source: req.photo; }
+                                    VerticalLayout {
+                                        spacing: 2px;
+                                        Text { text: req.to_display_name; font-size: 14px; color: Theme.text-primary; }
+                                        Text { text: "@" + req.to_username; font-size: 11px; color: Theme.text-muted; }
+                                        Text { text: req.sent_label; font-size: 11px; color: Theme.text-muted; }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    SmallButton { text: "Cancel"; bg: Theme.danger-soft; fg: Theme.danger; clicked => { root.cancel_outgoing(req.request_id); } }
+                                    SmallButton { text: "Profile"; clicked => { root.open_profile(req.to_user_id); } }
+                                }
+                            }
+                        }
+                    }
+
+                    if root.tab == SidebarTab.Servers && root.selected_server: VerticalLayout {
+                        padding: 12px;
+                        spacing: 6px;
+                        Text { text: root.server_name; font-size: 16px; color: Theme.text-primary; }
+                        Text { text: root.server_meta; font-size: 11px; color: Theme.text-muted; }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            if root.can_manage_server: SmallButton { text: "Settings"; clicked => { root.toggle_server_settings(); } }
+                            if root.invite_code != "": SmallButton { text: "Copy invite link"; clicked => { root.copy_invite_link(root.invite_code); } }
+                        }
+                        if root.can_manage_channels: SmallButton { text: root.new_channel_open ? "Cancel" : "+ New channel"; clicked => { root.toggle_new_channel(); } }
+                        if root.can_manage_channels && root.new_channel_open: VerticalLayout {
+                            spacing: 8px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                TextInputField { placeholder: "channel-name"; value <=> root.new_channel_name; edited(t) => { root.new_channel_name_changed(t); } submitted => { root.create_channel(); } }
+                                PrimaryButton { text: "Create"; width: 70px; clicked => { root.create_channel(); } }
+                            }
+                            SmallButton { text: root.new_channel_is_voice ? "Type: Voice" : "Type: Text"; clicked => { root.toggle_new_channel_voice(); } }
+                        }
+                        if root.server_status != "": Text { text: root.server_status; font-size: 11px; color: Theme.text-muted; }
+                        list_channels := Flickable {
+                            vertical-stretch: 1;
+                            viewport-height: channels_col.preferred-height;
+                            channels_col := VerticalLayout {
+                            width: parent.width;
+                            if root.text_channels.length > 0: Text { text: "TEXT CHANNELS"; font-size: 10px; font-family: Theme.font-medium; color: Theme.text-muted; }
+                            for ch in root.text_channels: Rectangle {
+                                height: 32px;
+                                background: ch.active ? Theme.accent-soft : (cht.has-hover ? Theme.bg-hover : transparent);
+                                cht := TouchArea { clicked => { root.open_channel(ch.conversation_id); } }
+                                Text { x: 12px; text: ch.label; font-size: 13px; font-family: Theme.font-medium; color: Theme.text-primary; vertical-alignment: center; }
+                            }
+                            if root.voice_channels.length > 0: Text { text: "VOICE CHANNELS"; font-size: 10px; font-family: Theme.font-medium; color: Theme.text-muted; }
+                            for ch in root.voice_channels: Rectangle {
+                                height: 32px;
+                                background: ch.active ? Theme.accent-soft : (chv.has-hover ? Theme.bg-hover : transparent);
+                                chv := TouchArea { clicked => { root.open_channel(ch.conversation_id); } }
+                                Text { x: 12px; text: ch.label; font-size: 14px; color: Theme.text-primary; vertical-alignment: center; }
+                            }
+                            }
+                        }
+                    }
+                    if root.tab == SidebarTab.Servers && !root.selected_server: VerticalLayout {
+                        padding: 16px;
+                        spacing: 6px;
+                        Text { text: "Pick a server on the left rail."; font-size: 13px; color: Theme.text-muted; }
+                        Text { text: "Or press + to create / join."; font-size: 12px; color: Theme.text-muted; }
+                        // Stretchy spacer: keeps this all-fixed column
+                        // height-unbounded so it can't clamp the window
+                        // scene (see ResizeHandle in widgets.slint).
+                        Rectangle {}
+                    }
+
+                    if root.tab == SidebarTab.Admin: VerticalLayout {
+                        padding: 12px;
+                        spacing: 10px;
+                        TextInputField { placeholder: "Search users..."; value <=> root.admin_search; edited(t) => { root.admin_search_changed(t); } }
+                        if root.admin_status != "": Text { text: root.admin_status; font-size: 11px; color: Theme.text-muted; }
+                        if root.admin_users.length == 0: Text { text: "No users found."; font-size: 13px; color: Theme.text-muted; }
+                        list_admin := ListView {
+                            vertical-stretch: 1;
+                            for u in root.admin_users: PersonCard {
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Text { text: "\{u.display_name} (@\{u.username})"; font-size: 13px; color: Theme.text-primary; horizontal-stretch: 1; }
+                                    if u.badge_text != "": Rectangle {
+                                        background: u.badge_bg;
+                                        height: 16px;
+                                        width: admin-badge.preferred-width + 8px;
+                                        admin-badge := Text { text: u.badge_text; font-size: 9px; color: u.badge_fg; horizontal-alignment: center; vertical-alignment: center; }
+                                    }
+                                }
+                                Text { text: u.status_line; font-size: 11px; color: Theme.text-muted; }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    if root.is_admin && !u.role_locked: SmallButton { text: "User"; clicked => { root.admin_set_role(u.user_id, "user"); } }
+                                    if root.is_admin && !u.role_locked: SmallButton { text: "Mod"; clicked => { root.admin_set_role(u.user_id, "moderator"); } }
+                                    if root.is_admin && !u.role_locked: SmallButton { text: "Admin"; bg: Theme.accent-soft; clicked => { root.admin_set_role(u.user_id, "admin"); } }
+                                    if !u.role_locked: SmallButton { text: u.banned ? "Unban" : "Ban"; bg: Theme.danger-soft; fg: Theme.danger; clicked => { root.admin_set_banned(u.user_id, !u.banned); } }
+                                    if u.role_locked: Text { text: "rank locked"; font-size: 10px; color: Theme.warning; vertical-alignment: center; }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ---- Account footer ----
+                Rectangle {
+                    height: 64px;
+                    background: Theme.bg-tertiary;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    HorizontalLayout {
+                        padding: 12px;
+                        spacing: 10px;
+                        Avatar { initial: root.my_initial; avatar-color: root.my_avatar_color; photo-source: root.my_photo; show-presence: true; online: true; }
+                        VerticalLayout {
+                            spacing: 2px;
+                            horizontal-stretch: 1;
+                            HorizontalLayout {
+                                spacing: 6px;
+                                Text { text: root.my_display_name; font-size: 13px; color: Theme.text-primary; vertical-alignment: center; }
+                                if root.my_badge_text != "": Rectangle {
+                                    background: root.my_badge_bg;
+                                    height: 14px;
+                                    width: my-badge-label.preferred-width + 8px;
+                                    my-badge-label := Text { text: root.my_badge_text; font-size: 9px; color: root.my_badge_fg; horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                            }
+                            Text { text: "Online"; font-size: 10px; color: Theme.online; }
+                        }
+                        SmallButton { text: "Settings"; clicked => { root.open_settings(); } }
+                    }
+                }
+            }
+        }
+
+        ResizeHandle {
+            drag-started => { root.resize_started(); }
+            drag-moved(x) => { root.resize_moved(x); }
+            drag-ended => { root.resize_ended(); }
+        }
+    }
+}

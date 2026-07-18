@@ -1,0 +1,178 @@
+// Login / register screen -- port of src/view/auth.rs.
+import { Theme } from "theme.slint";
+import { TextInputField, FieldLabel, PrimaryButton, LinkButton } from "widgets.slint";
+
+export enum AuthMode { Login, Register }
+
+export component AuthScreen inherits Rectangle {
+    in property <AuthMode> auth-mode: AuthMode.Login;
+    in-out property <string> username-input;
+    in-out property <string> password-input;
+    in-out property <string> display-name-input;
+    in property <string> auth-error;
+    in property <bool> auth-busy;
+    in property <string> connect-status;
+    in property <string> app-version-line;
+
+    callback switch-mode(AuthMode);
+    callback submit;
+    callback username-edited(string);
+    callback password-edited(string);
+    callback display-name-edited(string);
+
+    background: Theme.bg-primary;
+
+    HorizontalLayout {
+        alignment: center;
+        VerticalLayout {
+        alignment: center;
+
+        card := Rectangle {
+            width: 360px;
+            background: Theme.bg-secondary;
+            border-width: 1px;
+            border-color: Theme.border;
+            drop-shadow-offset-x: Theme.shadow-offset;
+            drop-shadow-offset-y: Theme.shadow-offset;
+            drop-shadow-color: Theme.shadow-color;
+
+            VerticalLayout {
+                padding: 36px;
+                spacing: 10px;
+                alignment: start;
+
+                VerticalLayout {
+                    spacing: 12px;
+                    alignment: center;
+                    Rectangle {
+                        width: 48px;
+                        height: 48px;
+                        horizontal-stretch: 0;
+                        background: Theme.accent;
+                        border-width: 1px;
+                        border-color: Theme.accent;
+                        drop-shadow-offset-x: Theme.shadow-offset;
+                        drop-shadow-offset-y: Theme.shadow-offset;
+                        drop-shadow-color: Theme.shadow-color;
+                        Text {
+                            text: "T";
+                            font-size: 22px;
+                            font-family: Theme.font-medium;
+                            color: #050d05;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Text {
+                        text: "Talkyss";
+                        font-size: 28px;
+                        font-family: Theme.font-medium;
+                        color: Theme.text-primary;
+                        horizontal-alignment: center;
+                    }
+                }
+
+                Text {
+                    text: root.auth-mode == AuthMode.Login ? "Welcome back" : "Create an account";
+                    font-size: 20px;
+                    color: Theme.text-primary;
+                }
+                Text {
+                    text: root.auth-mode == AuthMode.Login
+                        ? "Sign in to continue your conversations."
+                        : "Join Talkyss — private chats, servers, and calls.";
+                    font-size: 13px;
+                    color: Theme.text-muted;
+                    wrap: word-wrap;
+                }
+
+                FieldLabel { text: "Username"; }
+                TextInputField {
+                    placeholder: "Username";
+                    value <=> root.username-input;
+                    enabled: !root.auth-busy;
+                    edited(text) => { root.username-edited(text); }
+                    submitted => { root.submit(); }
+                }
+
+                if root.auth-mode == AuthMode.Register: FieldLabel { text: "Display name"; }
+                if root.auth-mode == AuthMode.Register: TextInputField {
+                    placeholder: "Display name (optional)";
+                    value <=> root.display-name-input;
+                    enabled: !root.auth-busy;
+                    edited(text) => { root.display-name-edited(text); }
+                }
+
+                FieldLabel { text: "Password"; }
+                TextInputField {
+                    placeholder: "Password";
+                    is-password: true;
+                    value <=> root.password-input;
+                    enabled: !root.auth-busy;
+                    edited(text) => { root.password-edited(text); }
+                    submitted => { root.submit(); }
+                }
+
+                if root.auth-error != "": Rectangle {
+                    background: Theme.danger-soft;
+                    border-width: 1px;
+                    border-color: Theme.danger;
+                    height: error-text.preferred-height + 24px;
+                    error-text := Text {
+                        x: 12px;
+                        width: parent.width - 24px;
+                        y: 12px;
+                        text: root.auth-error;
+                        font-size: 13px;
+                        color: Theme.danger;
+                        wrap: word-wrap;
+                    }
+                }
+
+                Rectangle { height: 6px; }
+                PrimaryButton {
+                    text: root.auth-busy
+                        ? "Please wait..."
+                        : (root.auth-mode == AuthMode.Login ? "Log in" : "Create account");
+                    enabled: !root.auth-busy;
+                    busy: root.auth-busy;
+                    clicked => { root.submit(); }
+                }
+
+                Rectangle { height: 4px; }
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 6px;
+                    Text {
+                        text: root.auth-mode == AuthMode.Login ? "Need an account?" : "Already have an account?";
+                        font-size: 12px;
+                        color: Theme.text-muted;
+                        vertical-alignment: center;
+                    }
+                    LinkButton {
+                        text: root.auth-mode == AuthMode.Login ? "Sign up" : "Log in";
+                        clicked => {
+                            root.switch-mode(root.auth-mode == AuthMode.Login ? AuthMode.Register : AuthMode.Login);
+                        }
+                    }
+                }
+
+                Text {
+                    text: root.connect-status;
+                    font-size: 10px;
+                    font-family: Theme.font-medium;
+                    color: Theme.text-muted;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: root.app-version-line;
+                    font-size: 10px;
+                    font-family: Theme.font-medium;
+                    color: Theme.text-muted;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+        }
+    }
+}

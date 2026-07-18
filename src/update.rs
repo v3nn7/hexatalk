@@ -10,9 +10,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use convex::{FunctionResult, Value};
-use iced::widget::image;
-use iced::Task;
 use maplit::btreemap;
+
+use crate::rt::{Task, WindowAction};
+use crate::rt::write_clipboard_text;
 
 use crate::*;
 
@@ -280,32 +281,33 @@ impl App {
                 self.ping_status = Some("Ping failed".to_string());
                 Task::none()
             }
-            Message::WindowCloseRequested(id) => {
+            Message::WindowCloseRequested => {
                 if self.tray_ready {
-                    iced::window::change_mode(id, iced::window::Mode::Hidden)
+                    self.pending_window_action = Some(WindowAction::HideToTray);
+                    // Hidden window cannot be focused -- without this,
+                    // DM notifications stay suppressed while in tray.
+                    self.window_focused = false;
                 } else {
                     // No tray to hide into and no way back — quit for real
                     // instead of trapping the user with an invisible process.
                     if let Some(path) = &self.pending_update_path {
                         stage_exe_swap(path);
                     }
-                    iced::exit()
+                    self.pending_window_action = Some(WindowAction::Exit);
                 }
+                Task::none()
             }
             Message::TrayEvent(tray::TrayEvent::Show) => {
-                iced::window::get_latest().then(|maybe_id| match maybe_id {
-                    Some(id) => Task::batch([
-                        iced::window::change_mode(id, iced::window::Mode::Windowed),
-                        iced::window::gain_focus(id),
-                    ]),
-                    None => Task::none(),
-                })
+                self.pending_window_action = Some(WindowAction::ShowAndFocus);
+                self.window_focused = true;
+                Task::none()
             }
             Message::TrayEvent(tray::TrayEvent::Quit) => {
                 if let Some(path) = &self.pending_update_path {
                     stage_exe_swap(path);
                 }
-                iced::exit()
+                self.pending_window_action = Some(WindowAction::Exit);
+                Task::none()
             }
             Message::TrayEvent(tray::TrayEvent::Ready) => {
                 self.tray_ready = true;
@@ -316,12 +318,8 @@ impl App {
                 self.show_toast(format!("Tray icon unavailable ({reason}) — closing will quit"));
                 Task::none()
             }
-            Message::WindowFocusChanged(event) => {
-                match event {
-                    iced::window::Event::Focused => self.window_focused = true,
-                    iced::window::Event::Unfocused => self.window_focused = false,
-                    _ => {}
-                }
+            Message::WindowFocusChanged(focused) => {
+                self.window_focused = focused;
                 Task::none()
             }
 
@@ -664,9 +662,31 @@ impl App {
                     play_beep(BEEP_MESSAGE);
                     notify_desktop("Talkyss", &format!("New message · {title}"));
                 }
-                // Keep the open chat marked read as new traffic arrives.
+                // Keep the open chat marked read as new traffic arrives --
+                // but only when there is something genuinely unread. An
+                // unconditional markRead writes lastReadAt on the server,
+                // which re-fires this same watch and loops forever.
                 if let Some(active_id) = self.active_conversation.clone() {
-                    return mark_read_task(&self.client, &self.session, active_id);
+                    let active_row = self
+                        .conversations
+                        .iter()
+                        .find(|c| c.conversation_id == active_id);
+                    let needs_mark = active_row
+                        .map(|c| {
+                            let already_marked = self
+                                .last_marked_read_at
+                                .get(&c.conversation_id)
+                                .copied()
+                                .unwrap_or(0.0);
+                            c.unread && c.last_message_at > already_marked
+                        })
+                        .unwrap_or(false);
+                    if needs_mark {
+                        let marked_at =
+                            active_row.map(|c| c.last_message_at).unwrap_or(0.0);
+                        self.last_marked_read_at.insert(active_id.clone(), marked_at);
+                        return mark_read_task(&self.client, &self.session, active_id);
+                    }
                 }
                 Task::none()
             }
@@ -1162,7 +1182,10 @@ impl App {
             }
             Message::UnblockFinished => Task::none(),
 
-            Message::OpenConversationWithFriend(friend) => {
+            Message::OpenConversationWithFriend(user_id) => {
+                let Some(friend) = self.friends.iter().find(|f| f.user_id == user_id).cloned() else {
+                    return Task::none();
+                };
                 let Some(client) = self.client.clone() else {
                     return Task::none();
                 };
@@ -1197,7 +1220,15 @@ impl App {
                     },
                 )
             }
-            Message::OpenConversationDirect(summary) => {
+            Message::OpenConversationDirect(conversation_id) => {
+                let Some(summary) = self
+                    .conversations
+                    .iter()
+                    .find(|c| c.conversation_id == conversation_id)
+                    .cloned()
+                else {
+                    return Task::none();
+                };
                 let stop = self.stop_typing_task();
                 self.active_conversation = Some(summary.conversation_id.clone());
                 self.active_conversation_kind = Some(summary.kind.clone());
@@ -1460,7 +1491,10 @@ impl App {
                 self.server_add_menu_open = !self.server_add_menu_open;
                 Task::none()
             }
-            Message::SelectServer(server) => {
+            Message::SelectServer(server_id) => {
+                let Some(server) = self.servers.iter().find(|s| s.server_id == server_id).cloned() else {
+                    return Task::none();
+                };
                 self.server_add_menu_open = false;
                 self.rename_server_input = server.name.clone();
                 self.custom_slug_input = server.custom_slug.clone();
@@ -1752,17 +1786,27 @@ impl App {
             }
             Message::CopyInviteCode(code) => {
                 self.show_toast("Invite code copied");
-                iced::clipboard::write(code)
+                write_clipboard_text(code);
+                Task::none()
             }
             Message::CopyInviteLink(code) => {
                 self.show_toast("Invite link copied");
-                iced::clipboard::write(build_invite_link(&code))
+                write_clipboard_text(build_invite_link(&code));
+                Task::none()
             }
             Message::ChannelsUpdated(channels) => {
                 self.channels = channels;
                 Task::none()
             }
-            Message::OpenChannel(channel) => {
+            Message::OpenChannel(conversation_id) => {
+                let Some(channel) = self
+                    .channels
+                    .iter()
+                    .find(|c| c.conversation_id == conversation_id)
+                    .cloned()
+                else {
+                    return Task::none();
+                };
                 let stop = self.stop_typing_task();
                 self.active_conversation = Some(channel.conversation_id.clone());
                 self.active_conversation_kind = Some(if channel.channel_type == "voice" {
@@ -2229,11 +2273,9 @@ impl App {
                 Task::none()
             }
             Message::AttachmentFilePicked(AttachmentPick::Ready(bytes, content_type)) => {
-                let preview = image::Handle::from_bytes(bytes.clone());
                 self.pending_attachment = Some(PendingAttachment {
                     bytes,
                     content_type,
-                    preview,
                 });
                 self.chat_error = None;
                 Task::none()
@@ -2719,7 +2761,8 @@ impl App {
             Message::PurgeFinished(Ok(())) => Task::none(),
             Message::CopyMessage(text) => {
                 self.show_toast("Copied to clipboard");
-                iced::clipboard::write(text)
+                write_clipboard_text(text);
+                Task::none()
             }
             Message::ToggleReaction(message_id, emoji) => {
                 let Some(client) = self.client.clone() else {
@@ -2992,6 +3035,10 @@ impl App {
 
             Message::NewChannelIsVoice(v) => {
                 self.new_channel_is_voice = v;
+                Task::none()
+            }
+            Message::ToggleNewChannelIsVoice => {
+                self.new_channel_is_voice = !self.new_channel_is_voice;
                 Task::none()
             }
             Message::JoinVoiceChannel => {
@@ -4032,7 +4079,8 @@ impl App {
                 Task::none()
             }
             Message::CallActionFinished(Err(err)) => {
-                self.call_status_text = Some(err);
+                self.call_status_text = Some(err.clone());
+                self.chat_error = Some(err);
                 Task::none()
             }
             Message::CallActionFinished(Ok(())) => Task::none(),
@@ -4054,6 +4102,11 @@ impl App {
                     }
                     call::CallEvent::Failed(msg) => {
                         self.call_status_text = Some(format!("Call failed: {msg}"));
+                        // The call banner only renders when my_call.is_some(),
+                        // which is false for a caller whose startCall never went
+                        // through -- surface the failure in the chat area too,
+                        // or clicking Call looks completely dead.
+                        self.chat_error = Some(format!("Call failed: {msg}"));
                         self.call_role = None;
                         self.call_engine_key = None;
                         self.clear_share_ui();
@@ -4081,7 +4134,7 @@ impl App {
                         }
                     }
                     call::CallEvent::ScreenFrame(bytes) => {
-                        self.remote_share_frame = Some(image::Handle::from_bytes(bytes));
+                        self.remote_share_frame = Some(Arc::from(bytes));
                     }
                     call::CallEvent::ScreenShareStopped => {
                         self.remote_share_frame = None;
@@ -4113,7 +4166,10 @@ impl App {
                 self.share_targets = targets;
                 Task::none()
             }
-            Message::StartShare(target) => {
+            Message::StartShare(encoded) => {
+                let Some(target) = crate::viewmodel::decode_share_target(&encoded) else {
+                    return Task::none();
+                };
                 self.share_picker_open = false;
                 if let Some(tx) = &self.share_control_tx {
                     let _ = tx.send(call::ShareCommand::Start(target));
@@ -4411,7 +4467,7 @@ impl App {
             }
 
             Message::AvatarImageLoaded(url, Ok(bytes)) => {
-                self.avatar_image_cache.insert(url, image::Handle::from_bytes(bytes));
+                self.avatar_image_cache.insert(url, Arc::from(bytes));
                 Task::none()
             }
             Message::AvatarImageLoaded(_, Err(_)) => Task::none(),

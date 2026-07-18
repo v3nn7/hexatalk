@@ -1,0 +1,145 @@
+// Right-hand server members drawer -- port of `view_members_drawer` /
+// `member_row_ui` in src/view/chat.rs.
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Avatar, ResizeHandle } from "widgets.slint";
+import { MemberRow } from "chat_types.slint";
+
+component MemberEntry inherits Rectangle {
+    in property <MemberRow> m;
+    callback open_profile(string);
+    height: content.preferred-height + 8px;
+    background: touch.has-hover ? Theme.bg-hover : transparent;
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.open_profile(m.user_id); }
+    }
+    content := HorizontalLayout {
+        padding: 4px;
+        spacing: 8px;
+        alignment: start;
+        Avatar {
+            size: 30px;
+            initial: m.initial;
+            avatar-color: m.avatar_color;
+            photo-source: m.photo;
+            show-presence: true;
+            online: m.online;
+            vertical-stretch: 0;
+        }
+        VerticalLayout {
+            spacing: 1px;
+            alignment: center;
+            HorizontalLayout {
+                spacing: 4px;
+                alignment: start;
+                Text { text: m.display_name; font-size: 12px; color: Theme.text-primary; vertical-alignment: center; }
+                if m.badge_text != "": Rectangle {
+                    background: m.badge_bg;
+                    height: 14px;
+                    width: badge-label.preferred-width + 8px;
+                    badge-label := Text { text: m.badge_text; font-size: 9px; color: m.badge_fg; horizontal-alignment: center; vertical-alignment: center; }
+                }
+            }
+            if m.roles.length > 0: HorizontalLayout {
+                spacing: 3px;
+                alignment: start;
+                for tag in m.roles: Rectangle {
+                    background: tag.color;
+                    height: 14px;
+                    width: tag-label.preferred-width + 8px;
+                    tag-label := Text { text: tag.name; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                }
+            }
+        }
+    }
+}
+
+export component MembersDrawer inherits HorizontalLayout {
+    in property <bool> collapsed: true;
+    in property <length> panel_width: 220px;
+    in property <int> total_count: 0;
+    in property <int> online_count: 0;
+    in property <[MemberRow]> online_members: [];
+    in property <[MemberRow]> offline_members: [];
+    in property <[MemberRow]> bot_members: [];
+
+    callback toggle;
+    callback open_profile(string);
+    callback resize_started;
+    callback resize_moved(length);
+    callback resize_ended;
+
+    ResizeHandle {
+        drag-started => { root.resize_started(); }
+        drag-moved(x) => { root.resize_moved(x); }
+        drag-ended => { root.resize_ended(); }
+    }
+
+    if root.collapsed: Rectangle {
+        width: 28px;
+        background: Theme.bg-secondary;
+        border-width: 1px;
+        border-color: Theme.border;
+        VerticalLayout {
+            padding-top: 12px;
+            padding-bottom: 12px;
+            spacing: 12px;
+            // No `alignment: start`: it would disable the stretchy spacer
+            // below (pinning the member count right under the button
+            // instead of at the bottom) and cap the layout's max height,
+            // which clamps the whole window scene (see ResizeHandle).
+            collapse-btn := Rectangle {
+                height: 24px;
+                Text { text: "«"; font-size: 14px; color: Theme.text-primary; horizontal-alignment: center; }
+                TouchArea { clicked => { root.toggle(); } }
+            }
+            Rectangle { vertical-stretch: 1; }
+            Text {
+                text: root.total_count;
+                font-size: 9px;
+                color: Theme.text-muted;
+                horizontal-alignment: center;
+            }
+        }
+    }
+
+    if !root.collapsed: Rectangle {
+        width: root.panel_width;
+        background: Theme.bg-secondary;
+        border-width: 1px;
+        border-color: Theme.border;
+        VerticalLayout {
+            HorizontalLayout {
+                padding: 10px;
+                Text { text: "MEMBERS"; font-size: 11px; color: Theme.text-muted; vertical-alignment: center; horizontal-stretch: 1; }
+                Rectangle {
+                    width: 20px;
+                    height: 20px;
+                    Text { text: "›"; font-size: 14px; color: Theme.text-muted; horizontal-alignment: center; vertical-alignment: center; }
+                    TouchArea { clicked => { root.toggle(); } }
+                }
+            }
+            Text {
+                x: 10px;
+                text: "\{root.online_count} online · \{root.total_count} total";
+                font-size: 10px;
+                color: Theme.text-muted;
+            }
+            Rectangle { height: 6px; }
+            Flickable {
+                vertical-stretch: 1;
+                viewport-height: members_col.preferred-height;
+                members_col := VerticalLayout {
+                    width: parent.width;
+                    if root.online_members.length > 0: Text { text: "ONLINE — \{root.online_members.length}"; font-size: 10px; color: Theme.online; }
+                    for m in root.online_members: MemberEntry { m: m; open_profile(id) => { root.open_profile(id); } }
+                    if root.offline_members.length > 0: Text { text: "OFFLINE — \{root.offline_members.length}"; font-size: 10px; color: Theme.text-muted; }
+                    for m in root.offline_members: MemberEntry { m: m; open_profile(id) => { root.open_profile(id); } }
+                    if root.bot_members.length > 0: Text { text: "BOTS — \{root.bot_members.length}"; font-size: 10px; color: Theme.accent; }
+                    for m in root.bot_members: MemberEntry { m: m; open_profile(id) => { root.open_profile(id); } }
+                }
+            }
+        }
+    }
+}

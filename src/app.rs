@@ -11,9 +11,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use convex::{ConvexClient, FunctionResult, Value};
-use iced::widget::image;
-use iced::{Subscription, Task};
 use maplit::btreemap;
+use tokio::sync::mpsc::UnboundedSender;
+
+use crate::rt::{job, Job, Task, WindowAction};
 
 use crate::*;
 
@@ -163,6 +164,9 @@ pub(crate) struct App {
     pub(crate) clear_chat_busy: bool,
 
     pub(crate) seen_last_message_at: HashMap<String, f64>,
+    /// `last_message_at` value for which a markRead mutation was already sent,
+    /// per conversation. Prevents the markRead -> watch -> markRead loop.
+    pub(crate) last_marked_read_at: HashMap<String, f64>,
     pub(crate) conversations_loaded: bool,
     pub(crate) requests_loaded: bool,
 
@@ -182,7 +186,7 @@ pub(crate) struct App {
     pub(crate) share_picker_open: bool,
     pub(crate) share_targets: Vec<screenshare::ShareTarget>,
     pub(crate) is_sharing: bool,
-    pub(crate) remote_share_frame: Option<image::Handle>,
+    pub(crate) remote_share_frame: Option<Arc<[u8]>>,
     pub(crate) share_view_expanded: bool,
 
     pub(crate) viewing_profile: Option<ProfileView>,
@@ -202,7 +206,7 @@ pub(crate) struct App {
     pub(crate) settings_input_devices: Vec<String>,
     pub(crate) settings_output_devices: Vec<String>,
 
-    pub(crate) avatar_image_cache: HashMap<String, image::Handle>,
+    pub(crate) avatar_image_cache: HashMap<String, Arc<[u8]>>,
     pub(crate) avatar_upload_busy: bool,
 
     pub(crate) typing_names: Vec<String>,
@@ -223,6 +227,11 @@ pub(crate) struct App {
     /// whether an incoming live peer message needs a desktop
     /// notification/sound (no point if you're already looking at it).
     pub(crate) window_focused: bool,
+    /// Window-level side effect `update()` wants performed against the real
+    /// `AppWindow` handle (which it doesn't have access to) -- consumed by
+    /// the pump loop in `main.rs` right after the `update()` call. See
+    /// `crate::rt::WindowAction`.
+    pub(crate) pending_window_action: Option<WindowAction>,
 }
 
 impl App {
@@ -342,6 +351,7 @@ impl App {
                 clear_chat_confirm: false,
                 clear_chat_busy: false,
                 seen_last_message_at: HashMap::new(),
+                last_marked_read_at: HashMap::new(),
                 conversations_loaded: false,
                 requests_loaded: false,
                 my_call: None,
@@ -385,6 +395,7 @@ impl App {
                 ping_status: None,
                 tray_ready: false,
                 window_focused: true,
+                pending_window_action: None,
             },
             Task::batch([task, check_for_update_task()]),
         )
@@ -507,6 +518,7 @@ impl App {
         self.clear_chat_confirm = false;
         self.clear_chat_busy = false;
         self.seen_last_message_at.clear();
+        self.last_marked_read_at.clear();
         self.conversations_loaded = false;
         self.requests_loaded = false;
         self.my_call = None;
@@ -736,7 +748,14 @@ impl App {
                     .find(|c| c.kind == "direct" && c.peer_user_id.as_deref() == Some(peer_id.as_str()))
                     .map(|c| c.conversation_id.clone())
                 else {
-                    return Task::none();
+                    // Silently dropping this would strand the host worker in
+                    // `cmd_rx.recv()` forever, waiting for InvitePublished /
+                    // InvitePublishFailed that never comes. Report the failure
+                    // through the normal path so it can retry instead.
+                    return Task::done(Message::PeerInvitePublished(
+                        peer_id,
+                        Err("no direct conversation yet".to_string()),
+                    ));
                 };
                 self.peer_status.insert(peer_id.clone(), "Publishing invite…".into());
                 let mut client = client;
@@ -837,7 +856,7 @@ impl App {
                 self.peer_photo_seq += 1;
                 let url = history::media_url_tag(&msg_id);
                 self.avatar_image_cache
-                    .insert(url.clone(), image::Handle::from_bytes(bytes.clone()));
+                    .insert(url.clone(), Arc::from(bytes.clone()));
                 let author = self
                     .friends
                     .iter()
@@ -913,7 +932,7 @@ impl App {
         if let Some(bytes) = photo {
             let url = history::media_url_tag(&msg_id);
             self.avatar_image_cache
-                .insert(url.clone(), image::Handle::from_bytes(bytes));
+                .insert(url.clone(), Arc::from(bytes));
             attachment_url = url;
             let _ = content_type;
         }
@@ -1260,37 +1279,39 @@ async fn ensure_group_key_async(
 }
 
 impl App {
-    pub(crate) fn subscription(&self) -> Subscription<Message> {
+    /// The full set of desired background jobs for the current state --
+    /// former `Subscription`s, now plain `Job`s the pump loop in `main.rs`
+    /// reconciles against a `rt::SubscriptionRegistry` after every
+    /// `update()` call (same dedup-by-id semantics `Subscription::run_with_id`
+    /// had). `tx` is where every job sends its resulting `Message`s.
+    pub(crate) fn subscription(&self, tx: UnboundedSender<Message>) -> Vec<Job> {
         // Always on, even before login: the tray icon needs to exist so the
-        // close button can minimize to it instead of quitting outright, and
-        // closing the window has to do *something* sensible even from the
-        // login screen.
-        let mut subs = vec![
-            iced::window::close_requests().map(Message::WindowCloseRequested),
-            tray_subscription(),
-            iced::window::events().map(|(_id, event)| Message::WindowFocusChanged(event)),
-        ];
+        // close button can minimize to it instead of quitting outright.
+        let mut subs = vec![tray_subscription(tx.clone())];
 
         let (Some(client), Some(session)) = (self.client.clone(), self.session.clone()) else {
-            return Subscription::batch(subs);
+            return subs;
         };
 
         subs.extend([
-            friends_subscription(client.clone(), session.token.clone()),
-            requests_subscription(client.clone(), session.token.clone()),
-            outgoing_requests_subscription(client.clone(), session.token.clone()),
-            social_stats_subscription(client.clone(), session.token.clone()),
-            suggestions_subscription(client.clone(), session.token.clone()),
-            blocked_subscription(client.clone(), session.token.clone()),
-            conversations_subscription(client.clone(), session.token.clone()),
-            servers_subscription(client.clone(), session.token.clone()),
-            my_call_subscription(client.clone(), session.token.clone()),
-            iced::time::every(Duration::from_secs(5)).map(|_| Message::Tick),
-            iced::keyboard::on_key_press(handle_key_press),
+            friends_subscription(client.clone(), session.token.clone(), tx.clone()),
+            requests_subscription(client.clone(), session.token.clone(), tx.clone()),
+            outgoing_requests_subscription(client.clone(), session.token.clone(), tx.clone()),
+            social_stats_subscription(client.clone(), session.token.clone(), tx.clone()),
+            suggestions_subscription(client.clone(), session.token.clone(), tx.clone()),
+            blocked_subscription(client.clone(), session.token.clone(), tx.clone()),
+            conversations_subscription(client.clone(), session.token.clone(), tx.clone()),
+            servers_subscription(client.clone(), session.token.clone(), tx.clone()),
+            my_call_subscription(client.clone(), session.token.clone(), tx.clone()),
+            tick_job(tx.clone()),
         ]);
 
         if session.is_admin || session.is_moderator {
-            subs.push(admin_users_subscription(client.clone(), session.token.clone()));
+            subs.push(admin_users_subscription(
+                client.clone(),
+                session.token.clone(),
+                tx.clone(),
+            ));
         }
 
         if let Some(server) = &self.selected_server {
@@ -1298,23 +1319,27 @@ impl App {
                 client.clone(),
                 session.token.clone(),
                 server.server_id.clone(),
+                tx.clone(),
             ));
             // Always keep member roster live while a server is open.
             subs.push(members_subscription(
                 client.clone(),
                 session.token.clone(),
                 server.server_id.clone(),
+                tx.clone(),
             ));
             subs.push(roles_subscription(
                 client.clone(),
                 session.token.clone(),
                 server.server_id.clone(),
+                tx.clone(),
             ));
             if self.server_settings_open {
                 subs.push(my_perms_subscription(
                     client.clone(),
                     session.token.clone(),
                     server.server_id.clone(),
+                    tx.clone(),
                 ));
             }
         }
@@ -1337,6 +1362,7 @@ impl App {
                 client.clone(),
                 session.token.clone(),
                 conversation_id.clone(),
+                tx.clone(),
             ));
         }
 
@@ -1353,18 +1379,13 @@ impl App {
                 Arc::clone(&self.call_muted),
                 Arc::clone(&self.call_output_muted),
                 Arc::clone(&self.noise_gate),
+                tx.clone(),
             ));
         }
 
         // Smooth members drawer open/close.
         if (self.members_panel_width - self.members_panel_target).abs() > 0.6 {
-            subs.push(
-                iced::time::every(Duration::from_millis(16)).map(|_| Message::AnimateMembersPanel),
-            );
-        }
-
-        if self.resizing_panel.is_some() {
-            subs.push(iced::event::listen_with(panel_resize_event));
+            subs.push(animate_members_panel_job(tx.clone()));
         }
 
         if let Some(conversation_id) = &self.active_conversation {
@@ -1372,11 +1393,13 @@ impl App {
                 client.clone(),
                 session.token.clone(),
                 conversation_id.clone(),
+                tx.clone(),
             ));
             subs.push(typing_subscription(
                 client.clone(),
                 session.token.clone(),
                 conversation_id.clone(),
+                tx.clone(),
             ));
         }
 
@@ -1404,6 +1427,7 @@ impl App {
                 session.user_id.clone(),
                 friend.user_id.clone(),
                 conversation_id.clone(),
+                tx.clone(),
             ));
             // Guest always watches Convex for host invites.
             if !peer::is_peerseal_host(&session.user_id, &friend.user_id) {
@@ -1412,6 +1436,7 @@ impl App {
                     session.token.clone(),
                     friend.user_id.clone(),
                     conversation_id,
+                    tx.clone(),
                 ));
             }
         }
@@ -1431,6 +1456,7 @@ impl App {
                         session.user_id.clone(),
                         peer_id.clone(),
                         conversation_id.clone(),
+                        tx.clone(),
                     ));
                     if !peer::is_peerseal_host(&session.user_id, peer_id) {
                         subs.push(peer_invite_subscription(
@@ -1438,6 +1464,7 @@ impl App {
                             session.token.clone(),
                             peer_id.clone(),
                             conversation_id.clone(),
+                            tx.clone(),
                         ));
                     }
                 }
@@ -1451,9 +1478,7 @@ impl App {
             .map(|c| c.status == "ringing" && !c.is_caller)
             .unwrap_or(false)
         {
-            subs.push(
-                iced::time::every(Duration::from_millis(2000)).map(|_| Message::RingTick),
-            );
+            subs.push(ring_tick_job(tx.clone()));
         }
 
         if let (Some(role), Some(key)) = (&self.call_role, &self.call_engine_key) {
@@ -1468,9 +1493,50 @@ impl App {
                 Arc::clone(&self.call_output_muted),
                 Arc::clone(&self.noise_gate),
                 Arc::clone(&self.share_control_slot),
+                tx.clone(),
             ));
         }
 
-        Subscription::batch(subs)
+        subs
     }
+}
+
+/// Periodic 5s tick -- ping measurement / housekeeping (`Message::Tick`).
+fn tick_job(tx: UnboundedSender<Message>) -> Job {
+    job("tick", async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            if tx.send(Message::Tick).is_err() {
+                break;
+            }
+        }
+    })
+}
+
+/// 2s ring cadence while an incoming call is waiting to be answered.
+fn ring_tick_job(tx: UnboundedSender<Message>) -> Job {
+    job("ring-tick", async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(2000));
+        loop {
+            interval.tick().await;
+            if tx.send(Message::RingTick).is_err() {
+                break;
+            }
+        }
+    })
+}
+
+/// ~60fps drive for the members-drawer open/close animation, only running
+/// while `members_panel_width` hasn't settled on `members_panel_target`.
+fn animate_members_panel_job(tx: UnboundedSender<Message>) -> Job {
+    job("animate-members-panel", async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(16));
+        loop {
+            interval.tick().await;
+            if tx.send(Message::AnimateMembersPanel).is_err() {
+                break;
+            }
+        }
+    })
 }

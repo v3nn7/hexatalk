@@ -1,0 +1,177 @@
+// Plain view-model structs for the chat screen. Mirrors src/types.rs
+// domain rows, but pre-flattened to what Slint delegates need to render
+// directly (display strings, colors, booleans already computed in Rust --
+// see src/viewmodel.rs) rather than raw domain data.
+
+export struct ReactionRow {
+    emoji: string,
+    count: int,
+    reacted_by_me: bool,
+}
+
+export struct RoleTagRow {
+    name: string,
+    color: color,
+}
+
+export struct ChatMessageRow {
+    id: string,
+    author_id: string,
+    author_name: string,
+    author_initial: string,
+    author_avatar_color: color,
+    author_photo: image,
+    author_photo_url: string,
+    is_bot: bool,
+    mine: bool,
+    encrypted: bool,
+    is_call_log: bool,
+    grouped: bool,
+    meta: string,
+    reply_line: string,
+    body: string,
+    body_danger: bool,
+    has_attachment: bool,
+    attachment_loading: bool,
+    attachment: image,
+    attachment_url: string,
+    reactions: [ReactionRow],
+    can_edit: bool,
+    can_delete: bool,
+    can_purge: bool,
+    can_react: bool,
+}
+
+export struct ConversationRow {
+    id: string,
+    title: string,
+    unread: bool,
+    active: bool,
+}
+
+export struct FriendRow {
+    user_id: string,
+    label: string,
+    subtitle: string,
+    meta: string,
+    initial: string,
+    avatar_color: color,
+    photo: image,
+    photo_url: string,
+    online: bool,
+    favorite: bool,
+}
+
+export struct IncomingRequestRow {
+    request_id: string,
+    from_user_id: string,
+    from_display_name: string,
+    sub: string,
+    note: string,
+    status_message: string,
+    initial: string,
+    avatar_color: color,
+    photo: image,
+    photo_url: string,
+    online: bool,
+}
+
+export struct OutgoingRequestRow {
+    request_id: string,
+    to_user_id: string,
+    to_display_name: string,
+    to_username: string,
+    sent_label: string,
+    note: string,
+    initial: string,
+    avatar_color: color,
+    photo: image,
+    photo_url: string,
+}
+
+export struct PeopleHitRow {
+    user_id: string,
+    username: string,
+    display_name: string,
+    meta: string,
+    initial: string,
+    avatar_color: color,
+    photo: image,
+    photo_url: string,
+    online: bool,
+    relation: string,
+    incoming_request_id: string,
+    is_staff: bool,
+}
+
+export struct SuggestionRow {
+    user_id: string,
+    username: string,
+    display_name: string,
+    meta: string,
+    initial: string,
+    avatar_color: color,
+    photo: image,
+    photo_url: string,
+    online: bool,
+}
+
+export struct GroupCandidateRow {
+    user_id: string,
+    label: string,
+    selected: bool,
+}
+
+export struct BlockedRow {
+    user_id: string,
+    display_name: string,
+}
+
+export struct ServerRow {
+    server_id: string,
+    name: string,
+    initial: string,
+    icon: image,
+    icon_url: string,
+    active: bool,
+}
+
+export struct ChannelRow {
+    conversation_id: string,
+    label: string,
+    is_voice: bool,
+    active: bool,
+}
+
+export struct AdminUserRow {
+    user_id: string,
+    username: string,
+    display_name: string,
+    role: string,
+    banned: bool,
+    role_locked: bool,
+    status_line: string,
+    badge_text: string,
+    badge_bg: color,
+    badge_fg: color,
+}
+
+export struct MemberRow {
+    user_id: string,
+    display_name: string,
+    initial: string,
+    avatar_color: color,
+    photo: image,
+    photo_url: string,
+    online: bool,
+    is_bot: bool,
+    badge_text: string,
+    badge_bg: color,
+    badge_fg: color,
+    roles: [RoleTagRow],
+}
+
+export struct ShareTargetRow {
+    id: string,
+    label: string,
+}
