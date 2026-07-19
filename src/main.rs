@@ -5,6 +5,7 @@
 mod crypto;
 mod media;
 mod net;
+mod obf;
 mod state;
 mod tray;
 mod ui;
@@ -33,6 +34,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use slint::ComponentHandle;
 use slint::Model;
+use slint::winit_030::{WinitWindowAccessor, winit};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 // Generated Slint bindings, kept in their own module (not glob-exported at
@@ -61,6 +63,8 @@ const QUICK_REACT_EMOJIS: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢",
 
 /// Control payload sent over the live peerseal channel so the remote side
 /// also wipes its local encrypted vault for this DM. Never shown in the UI.
+/// NOTE: wire-protocol constant — must stay byte-identical across client
+/// versions, so it keeps the pre-rebrand name on purpose.
 const PEER_CLEAR_HISTORY_CTRL: &str = "\u{001e}TALKYSS_CLEAR_HISTORY\u{001e}";
 
 /// Defensive cap on how many background peerseal sessions run at once (one
@@ -70,7 +74,26 @@ const MAX_BACKGROUND_PEER_SESSIONS: usize = 25;
 
 // ---------- Entry point ----------
 
+/// One-time rebrand migration: move the per-user data dir
+/// `%APPDATA%/Talkyss` to `%APPDATA%/HexaTalk` when only the legacy one
+/// exists, so the session token, E2EE identity keys, ratchet state and the
+/// encrypted history vault all survive the rename. Runs before anything
+/// reads the new dir.
+fn migrate_legacy_data_dir() {
+    let Ok(base) = env::var("APPDATA") else {
+        return;
+    };
+    let base = std::path::Path::new(&base);
+    let legacy = base.join("Talkyss");
+    let current = base.join("HexaTalk");
+    if legacy.is_dir() && !current.exists() {
+        let _ = std::fs::rename(&legacy, &current);
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    migrate_legacy_data_dir();
+
     dotenvy::from_filename(".env.local").ok();
     dotenvy::dotenv().ok();
 
@@ -80,13 +103,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Prefer a real .env.local/.env next to the exe or in the working
     // directory (handy for pointing a dev build at a different deployment
     // without rebuilding); otherwise fall back to the URL `build.rs` baked
-    // into the binary at compile time, so a standalone .exe copied
-    // somewhere with no .env file still knows where to connect.
-    const BAKED_IN_CONVEX_URL: &str = env!("CONVEX_URL");
+    // (obfuscated, see src/obf.rs) into the binary at compile time, so a
+    // standalone .exe copied somewhere with no .env file still knows where
+    // to connect.
     let deployment_url = env::var("CONVEX_URL")
         .ok()
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| BAKED_IN_CONVEX_URL.to_string());
+        .unwrap_or_else(|| obf::convex_url().to_string());
 
     if deployment_url.is_empty() {
         eprintln!("Missing CONVEX_URL in .env.local. Run `npx convex dev` and rebuild.");
@@ -209,8 +232,14 @@ struct UiSnapshot {
     username_input: String,
     password_input: String,
     display_name_input: String,
+    email_input: String,
     auth_error: String,
     auth_busy: bool,
+    email_verify_input: String,
+    email_verify_code_input: String,
+    email_verify_code_sent: bool,
+    email_verify_error: String,
+    email_verify_busy: bool,
     connect_status: String,
     app_version_line: String,
     image_cache: std::collections::HashMap<String, std::sync::Arc<[u8]>>,
@@ -337,6 +366,9 @@ struct ChatRaw {
     admin_status: Option<String>,
     admin_users: Vec<AdminUserRow>,
     admin_stats: Option<crate::state::types::AdminStats>,
+    admin_reports: Vec<crate::state::types::MessageReport>,
+    admin_reports_status: Option<String>,
+    reporting_message_id: Option<String>,
     active_conversation: Option<String>,
     active_conversation_kind: Option<String>,
     active_conversation_peer_id: Option<String>,
@@ -387,6 +419,8 @@ impl UiSnapshot {
     fn from_app(app: &App) -> Self {
         let screen = if app.session.is_none() {
             slint_ui::Screen::Auth
+        } else if app.session.as_ref().is_some_and(|s| !s.email_verified) {
+            slint_ui::Screen::EmailVerify
         } else if app.viewing_profile.is_some() || app.profile_error.is_some() {
             slint_ui::Screen::Profile
         } else if app.settings_open {
@@ -528,6 +562,9 @@ impl UiSnapshot {
             admin_status: app.admin_status.clone(),
             admin_users: app.admin_users.clone(),
             admin_stats: app.admin_stats.clone(),
+            admin_reports: app.admin_reports.clone(),
+            admin_reports_status: app.admin_reports_status.clone(),
+            reporting_message_id: app.reporting_message_id.clone(),
             active_conversation: app.active_conversation.clone(),
             active_conversation_kind: app.active_conversation_kind.clone(),
             active_conversation_peer_id: app.active_conversation_peer_id.clone(),
@@ -581,8 +618,14 @@ impl UiSnapshot {
             image_cache: app.avatar_image_cache.clone(),
             password_input: app.password_input.clone(),
             display_name_input: app.display_name_input.clone(),
+            email_input: app.email_input.clone(),
             auth_error: app.auth_error.clone().unwrap_or_default(),
             auth_busy: app.auth_busy,
+            email_verify_input: app.email_verify_input.clone(),
+            email_verify_code_input: app.email_verify_code_input.clone(),
+            email_verify_code_sent: app.email_verify_code_sent,
+            email_verify_error: app.email_verify_error.clone().unwrap_or_default(),
+            email_verify_busy: app.email_verify_busy,
             connect_status: app.connect_status.clone(),
             app_version_line: format!("v{CURRENT_APP_VERSION} · E2EE · P2P CALLS"),
             chat,
@@ -605,8 +648,14 @@ impl UiSnapshot {
         ui.set_username_input(self.username_input.clone().into());
         ui.set_password_input(self.password_input.clone().into());
         ui.set_display_name_input(self.display_name_input.clone().into());
+        ui.set_email_input(self.email_input.clone().into());
         ui.set_auth_error(self.auth_error.clone().into());
         ui.set_auth_busy(self.auth_busy);
+        ui.set_email_verify_input(self.email_verify_input.clone().into());
+        ui.set_email_verify_code_input(self.email_verify_code_input.clone().into());
+        ui.set_email_verify_code_sent(self.email_verify_code_sent);
+        ui.set_email_verify_error(self.email_verify_error.clone().into());
+        ui.set_email_verify_busy(self.email_verify_busy);
         ui.set_connect_status(self.connect_status.clone().into());
         ui.set_app_version_line(self.app_version_line.clone().into());
         ui.set_command_palette_open(self.command_palette_open);
@@ -1007,7 +1056,7 @@ fn apply_settings(
         }
         .into(),
     );
-    ui.set_settings_version_line(format!("Talkyss v{CURRENT_APP_VERSION}").into());
+    ui.set_settings_version_line(format!("HexaTalk v{CURRENT_APP_VERSION}").into());
     ui.set_settings_vault_hint(history::vault_root_display(&session.user_id).into());
     ui.set_settings_update_check_status(s.update_check_status.clone().unwrap_or_default().into());
     ui.set_settings_update_ready(s.update_ready);
@@ -1156,6 +1205,8 @@ fn msg_row_eq(a: &slint_ui::ChatMessageRow, b: &slint_ui::ChatMessageRow) -> boo
         && a.can_delete == b.can_delete
         && a.can_purge == b.can_purge
         && a.can_react == b.can_react
+        && a.can_report == b.can_report
+        && a.reporting == b.reporting
         && a.mentions_me == b.mentions_me
         && a.mentions_everyone == b.mentions_everyone
         && a.ping_label == b.ping_label
@@ -1395,6 +1446,8 @@ fn apply_chat(
     ui.set_chat_admin_banned(stats.banned as i32);
     ui.set_chat_admin_bots(stats.bots as i32);
     ui.set_chat_admin_servers(stats.servers as i32);
+    ui.set_chat_admin_reports(viewmodel::report_rows(&c.admin_reports).as_slice().into());
+    ui.set_chat_admin_reports_status(c.admin_reports_status.clone().unwrap_or_default().into());
     ui.set_chat_is_admin(session.is_admin);
     ui.set_chat_my_display_name(session.display_name.clone().into());
     ui.set_chat_my_initial(viewmodel::initial(&session.display_name));
@@ -1562,6 +1615,7 @@ fn apply_chat(
             session.is_admin,
             &my_mention_names,
             everyone_allowed,
+            c.reporting_message_id.as_deref(),
         ),
         msg_row_eq,
         |rows| ui.set_chat_messages(rows.as_slice().into()),
@@ -1802,12 +1856,68 @@ fn apply_chat(
     }
 }
 
+// Window icon variants: the normal mark plus the "unread" one shown while
+// `App::has_unread_alerts()` holds. Both are decoded lazily on the Slint UI
+// thread (first access happens inside an `invoke_from_event_loop` closure)
+// and cached in a thread local; the winit icon handle is applied through
+// `WinitWindowAccessor` since `slint::Window` exposes no icon API.
+thread_local! {
+    static WINDOW_ICONS: Option<(winit::window::Icon, winit::window::Icon)> = {
+        let normal = decode_window_icon(include_bytes!("../assets/textures/hexatalkicon.png"));
+        let unread = decode_window_icon(include_bytes!("../assets/textures/hexatalkiconmessage.png"));
+        normal.zip(unread)
+    };
+}
+
+/// Decodes an embedded PNG for the window icon. Returns `None` on any
+/// failure so a bad asset degrades to the exe's embedded PE icon instead of
+/// panicking on the UI thread.
+fn decode_window_icon(png: &[u8]) -> Option<winit::window::Icon> {
+    let rgba = image::load_from_memory(png).ok()?.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    winit::window::Icon::from_rgba(rgba.into_raw(), width, height).ok()
+}
+
+/// Swaps the taskbar/window icon between the normal and "unread" variants.
+/// The last applied state is kept per-UI-thread so the window manager isn't
+/// asked to repaint the icon on every sync, only on actual transitions.
+/// Default (pre-first-alert) state stays the exe's embedded PE icon.
+fn apply_window_icon(ui: &slint_ui::AppWindow, has_alerts: bool) {
+    thread_local! {
+        static LAST_APPLIED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    if LAST_APPLIED.with(|last| last.get()) == has_alerts {
+        return;
+    }
+    WINDOW_ICONS.with(|icons| {
+        let Some((normal, unread)) = icons else {
+            // Decoding failed -- the exe's PE icon stays; don't retry.
+            LAST_APPLIED.with(|last| last.set(has_alerts));
+            return;
+        };
+        let icon = if has_alerts { unread } else { normal };
+        // `with_winit_window` yields `None` until the winit window exists
+        // (early syncs during startup) -- only record the state once the
+        // icon has actually been applied, so the next sync retries.
+        let applied = ui
+            .window()
+            .with_winit_window(|window| window.set_window_icon(Some(icon.clone())))
+            .is_some();
+        if applied {
+            LAST_APPLIED.with(|last| last.set(has_alerts));
+        }
+    });
+}
+
 fn sync_ui(app: &App, ui_weak: &slint::Weak<slint_ui::AppWindow>) {
     let snapshot = UiSnapshot::from_app(app);
+    let has_unread_alerts = app.has_unread_alerts();
+    tray::set_unread_alerts(has_unread_alerts);
     let ui_weak = ui_weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = ui_weak.upgrade() {
             snapshot.apply(&ui);
+            apply_window_icon(&ui, has_unread_alerts);
         }
     });
 }
@@ -1864,8 +1974,38 @@ fn wire_callbacks(ui: &slint_ui::AppWindow, tx: UnboundedSender<Message>) {
     });
 
     let t = tx.clone();
+    ui.on_auth_email_changed(move |text| {
+        let _ = t.send(Message::EmailInputChanged(text.to_string()));
+    });
+
+    let t = tx.clone();
     ui.on_auth_submit(move || {
         let _ = t.send(Message::SubmitAuth);
+    });
+
+    let t = tx.clone();
+    ui.on_email_verify_email_changed(move |text| {
+        let _ = t.send(Message::EmailVerifyInputChanged(text.to_string()));
+    });
+    let t = tx.clone();
+    ui.on_email_verify_send_code(move || {
+        let _ = t.send(Message::RequestEmailVerification);
+    });
+    let t = tx.clone();
+    ui.on_email_verify_code_changed(move |text| {
+        let _ = t.send(Message::EmailVerifyCodeInputChanged(text.to_string()));
+    });
+    let t = tx.clone();
+    ui.on_email_verify_submit_code(move || {
+        let _ = t.send(Message::SubmitEmailVerificationCode);
+    });
+    let t = tx.clone();
+    ui.on_email_verify_change_email(move || {
+        let _ = t.send(Message::ChangeEmailVerifyAddress);
+    });
+    let t = tx.clone();
+    ui.on_email_verify_log_out(move || {
+        let _ = t.send(Message::LogOut);
     });
 
     let t = tx.clone();
@@ -2077,6 +2217,12 @@ fn wire_chat_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Message>) 
         on_chat_admin_set_banned,
         |id: slint::SharedString, banned: bool| { Message::AdminSetBanned(id.to_string(), banned) }
     );
+    on2!(
+        on_chat_admin_resolve_report,
+        |id: slint::SharedString, status: slint::SharedString| {
+            Message::AdminResolveReport(id.to_string(), status.to_string())
+        }
+    );
 
     // ---- Sidebar: account footer + resize ----
     on0!(on_chat_open_settings, Message::OpenSettings);
@@ -2139,6 +2285,18 @@ fn wire_chat_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Message>) 
     });
     on1!(on_chat_open_attachment, |url: slint::SharedString| {
         Message::OpenAttachmentPreview(url.to_string())
+    });
+    on1!(on_chat_report, |id: slint::SharedString| {
+        Message::ArmReportMessage(id.to_string())
+    });
+    on3!(
+        on_chat_report_reason,
+        |id: slint::SharedString, body: slint::SharedString, reason: slint::SharedString| {
+            Message::SubmitMessageReport(id.to_string(), body.to_string(), reason.to_string())
+        }
+    );
+    on1!(on_chat_report_cancel, |_id: slint::SharedString| {
+        Message::CancelReportMessage
     });
     on2!(
         on_chat_voice_volume_changed,

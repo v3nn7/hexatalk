@@ -31,10 +31,22 @@ pub(crate) enum Message {
     UsernameInputChanged(String),
     PasswordInputChanged(String),
     DisplayNameInputChanged(String),
+    EmailInputChanged(String),
     SubmitAuth,
     AuthFinished(Result<Session, String>),
     RestoreFinished(Result<Session, String>),
     PublicKeyUploaded,
+
+    // ---- Email verification gate ----
+    EmailVerifyInputChanged(String),
+    EmailVerifyCodeInputChanged(String),
+    RequestEmailVerification,
+    RequestEmailVerificationFinished(Result<(), String>),
+    SubmitEmailVerificationCode,
+    VerifyEmailCodeFinished(Result<(), String>),
+    /// "Change email" link on the code step -- goes back to the email step
+    /// without a round trip (no code has been confirmed yet either way).
+    ChangeEmailVerifyAddress,
 
     /// peerseal live-channel events — background sessions run per online
     /// friend, so every message here is tagged with which friend (user_id)
@@ -83,6 +95,19 @@ pub(crate) enum Message {
     PinMessage(String),
     UnpinMessage(String),
     PinToggled(Result<(), String>),
+
+    /// Opens the reason picker under a message (message_id).
+    ArmReportMessage(String),
+    CancelReportMessage,
+    /// message_id, message body (client-supplied — may be E2EE plaintext
+    /// the server never sees otherwise), reason.
+    SubmitMessageReport(String, String, String),
+    MessageReportFinished(Result<(), String>),
+    LoadAdminReports,
+    AdminReportsUpdated(Result<Vec<crate::state::types::MessageReport>, String>),
+    /// report_id, resolution ("actioned" | "dismissed").
+    AdminResolveReport(String, String),
+    AdminResolveReportFinished(Result<(), String>),
 
     SidebarTabChanged(SidebarTab),
     MessageHovered(Option<String>),
@@ -152,7 +177,7 @@ pub(crate) enum Message {
     ClearCustomSlug,
     CustomSlugFinished(Result<String, String>),
     CopyInviteCode(String),
-    /// Same as `CopyInviteCode`, but copies the shareable `talkyss://invite/<code>`
+    /// Same as `CopyInviteCode`, but copies the shareable `hexatalk://invite/<code>`
     /// link instead of the bare code.
     CopyInviteLink(String),
     ChannelsUpdated(Vec<ChannelSummary>),
@@ -260,7 +285,7 @@ pub(crate) enum Message {
     LeaveVoiceChannel,
     VoiceUsersUpdated(Vec<VoiceUserRow>),
     /// Per-peer voice volume slider moved: (peer user_id, "*" for the 1:1
-    /// call remote, gain 0.0..=2.0).
+    /// call remote, gain 0.0..=5.0).
     VoiceVolumeChanged(String, f32),
     /// Ok(Some(channel_id)) = joined; Ok(None) = left.
     VoiceActionFinished(Result<Option<String>, String>),
@@ -321,7 +346,7 @@ pub(crate) enum Message {
     AdminSetBannedFinished(Result<(), String>),
     // ---- Admin panel: stats, filter, per-user detail, force-logout ----
     LoadAdminStats,
-    AdminStatsUpdated(Option<crate::state::types::AdminStats>),
+    AdminStatsUpdated(Result<crate::state::types::AdminStats, String>),
     /// 0 = All, 1 = Users, 2 = Staff, 3 = Banned (client-side filter).
     SetAdminFilter(i32),
     /// Toggle the expanded detail drawer for a user (empty/"same id" closes).
@@ -395,8 +420,6 @@ pub(crate) enum Message {
 
     TypingUpdated(Vec<String>),
     TypingPingFinished,
-
-    RingTick,
 
     LogOut,
     LoggedOut,

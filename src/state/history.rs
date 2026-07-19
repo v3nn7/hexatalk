@@ -1,7 +1,7 @@
 //! Local encrypted DM history (owner-only vault).
 //!
 //! Messages never leave the device as plaintext. Ciphertext files live under
-//! `%APPDATA%/Talkyss/vault/<owner_user_id>/` and are sealed with AES-256-GCM
+//! `%APPDATA%/HexaTalk/vault/<owner_user_id>/` and are sealed with AES-256-GCM
 //! using a key derived from the local **peerseal identity private key** via
 //! HKDF-SHA256. Anyone without that key file cannot decrypt history — not
 //! Convex, not another account on the same PC, not a stolen vault folder alone
@@ -19,6 +19,9 @@ use sha2::Sha256;
 
 const VAULT_VERSION: u8 = 1;
 const NONCE_LEN: usize = 12;
+// NOTE: this HKDF label is a cryptographic protocol constant — it derives the
+// vault key from the identity key. Renaming it with the HexaTalk rebrand
+// would make every existing vault undecryptable, so it keeps the old name.
 const HKDF_INFO: &[u8] = b"talkyss-local-history-vault-v1";
 const MAX_MESSAGES: usize = 5000;
 
@@ -57,13 +60,13 @@ where
     })
 }
 
-fn talkyss_dir() -> PathBuf {
+fn hexatalk_dir() -> PathBuf {
     let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(base).join("Talkyss")
+    PathBuf::from(base).join("HexaTalk")
 }
 
 fn vault_dir(owner_user_id: &str) -> PathBuf {
-    talkyss_dir().join("vault").join(owner_user_id)
+    hexatalk_dir().join("vault").join(owner_user_id)
 }
 
 fn chat_path(owner_user_id: &str, conversation_id: &str) -> PathBuf {
@@ -109,8 +112,11 @@ pub(crate) fn vault_key_from_identity_private(private_key_32: &[u8; 32]) -> [u8;
 
 /// Load peerseal private key bytes from the same file format as peerseal Identity.
 pub(crate) fn load_peerseal_private(owner_user_id: &str) -> Option<[u8; 32]> {
-    let path = talkyss_dir().join(format!("peerseal_{owner_user_id}.key"));
-    let text = std::fs::read_to_string(path).ok()?;
+    let path = hexatalk_dir().join(format!("peerseal_{owner_user_id}.key"));
+    // Goes through the DPAPI-aware reader (the key file is a TKDP1 blob on
+    // Windows; legacy plaintext still loads).
+    let bytes = crate::crypto::read_secret_file(&path)?;
+    let text = String::from_utf8(bytes).ok()?;
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
     let _pub_hex = lines.next()?;
     let priv_hex = lines.next()?;
@@ -270,8 +276,8 @@ pub(crate) fn wipe_all_vaults(owner_user_id: &str) {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-pub(crate) fn talkyss_root() -> PathBuf {
-    talkyss_dir()
+pub(crate) fn hexatalk_root() -> PathBuf {
+    hexatalk_dir()
 }
 
 /// Debug helper: fingerprint of vault key (not secret) for UI.
@@ -284,5 +290,5 @@ pub(crate) fn vault_key_fingerprint(vault_key: &[u8; 32]) -> String {
 /// Encode optional short note (unused helper for future export).
 #[allow(dead_code)]
 pub(crate) fn encode_export_marker(owner: &str) -> String {
-    BASE64_STANDARD.encode(format!("talkyss-vault:{owner}"))
+    BASE64_STANDARD.encode(format!("hexatalk-vault:{owner}"))
 }

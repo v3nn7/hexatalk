@@ -1,4 +1,4 @@
-//! System tray icon: keeps Talkyss reachable after the main window is
+//! System tray icon: keeps HexaTalk reachable after the main window is
 //! hidden, mirroring how Discord/Slack sit in the tray instead of fully
 //! quitting when the close button is clicked. `tray-icon` needs a live
 //! event loop on whichever thread owns the icon -- a Win32 message loop on
@@ -11,6 +11,8 @@
 //! Not implemented on macOS/other platforms yet -- `spawn` there is a no-op
 //! and the app just quits normally when the window is closed (see
 //! `exit_on_close_request` in main.rs).
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::mpsc::UnboundedSender;
 #[cfg(any(windows, target_os = "linux"))]
@@ -33,8 +35,55 @@ pub(crate) enum TrayEvent {
     Unavailable(String),
 }
 
-/// A sharp square glyph in muted emerald (#30, 0x72, 0x52). Generated at
-/// runtime instead of shipping an .ico asset -- good enough for a 32x32 mark.
+/// Unread-DM/mention flag mirrored from `App::has_unread_alerts()` by the
+/// UI-sync path (see `sync_ui` in main.rs). The tray thread polls it on its
+/// regular tick and swaps the icon on transitions, so the two threads only
+/// ever share this one atomic.
+static UNREAD_ALERTS: AtomicBool = AtomicBool::new(false);
+
+/// Publishes the current unread-alerts state to the tray thread. Cheap
+/// atomic store -- safe to call on every UI sync.
+pub(crate) fn set_unread_alerts(has_alerts: bool) {
+    UNREAD_ALERTS.store(has_alerts, Ordering::Relaxed);
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+const TRAY_ICON_SIZE: u32 = 32;
+
+/// Decodes an embedded PNG down to tray size. Returns `None` on any decode
+/// or bitmap error so the caller can fall back to the generated placeholder
+/// instead of failing the whole tray spawn.
+#[cfg(any(windows, target_os = "linux"))]
+fn decode_png_icon(png: &[u8]) -> Option<Icon> {
+    let decoded = image::load_from_memory(png).ok()?.to_rgba8();
+    let resized = image::imageops::resize(
+        &decoded,
+        TRAY_ICON_SIZE,
+        TRAY_ICON_SIZE,
+        image::imageops::FilterType::Lanczos3,
+    );
+    Icon::from_rgba(resized.into_raw(), TRAY_ICON_SIZE, TRAY_ICON_SIZE).ok()
+}
+
+/// Builds the `(normal, unread)` tray icons: the app mark and its red-dot
+/// variant. Either one that fails to decode falls back to the generated
+/// emerald square, so a bad asset can never make the tray unreachable.
+#[cfg(any(windows, target_os = "linux"))]
+fn build_icons() -> Result<(Icon, Icon), String> {
+    let normal = decode_png_icon(include_bytes!("../assets/textures/hexatalkicon.png"));
+    let unread = decode_png_icon(include_bytes!("../assets/textures/hexatalkiconmessage.png"));
+    if let (Some(n), Some(u)) = (&normal, &unread) {
+        return Ok((n.clone(), u.clone()));
+    }
+    let square = build_icon()?;
+    Ok((
+        normal.unwrap_or_else(|| square.clone()),
+        unread.unwrap_or(square),
+    ))
+}
+
+/// A sharp square glyph in muted emerald (#30, 0x72, 0x52). Kept as the
+/// fallback when an embedded icon asset fails to decode.
 #[cfg(any(windows, target_os = "linux"))]
 fn build_icon() -> Result<Icon, String> {
     const SIZE: u32 = 32;
@@ -57,10 +106,10 @@ fn build_icon() -> Result<Icon, String> {
     Icon::from_rgba(rgba, SIZE, SIZE).map_err(|err| format!("tray icon bitmap: {err}"))
 }
 
-/// Builds the "Show Talkyss" / "Quit" menu shared by both backends.
+/// Builds the "Show HexaTalk" / "Quit" menu shared by both backends.
 #[cfg(any(windows, target_os = "linux"))]
 fn build_menu() -> Result<Menu, String> {
-    let show_item = MenuItem::with_id("show", "Show Talkyss", true, None);
+    let show_item = MenuItem::with_id("show", "Show HexaTalk", true, None);
     let quit_item = MenuItem::with_id("quit", "Quit", true, None);
     let menu = Menu::new();
     menu.append(&show_item)
@@ -113,10 +162,10 @@ fn run_tray_thread(event_tx: UnboundedSender<TrayEvent>) {
             return;
         }
     };
-    let icon = match build_icon() {
-        Ok(icon) => {
-            eprintln!("[tray] icon bitmap built OK");
-            icon
+    let (icon_normal, icon_unread) = match build_icons() {
+        Ok(icons) => {
+            eprintln!("[tray] icon bitmaps built OK");
+            icons
         }
         Err(reason) => {
             eprintln!("[tray] icon bitmap build FAILED: {reason}");
@@ -126,11 +175,11 @@ fn run_tray_thread(event_tx: UnboundedSender<TrayEvent>) {
     };
 
     let tray_icon = TrayIconBuilder::new()
-        .with_tooltip("Talkyss")
-        .with_icon(icon)
+        .with_tooltip("HexaTalk")
+        .with_icon(icon_normal.clone())
         .with_menu(Box::new(menu))
         .build();
-    let _tray_icon = match tray_icon {
+    let tray_icon = match tray_icon {
         Ok(tray_icon) => {
             eprintln!("[tray] TrayIconBuilder::build() OK");
             tray_icon
@@ -152,6 +201,9 @@ fn run_tray_thread(event_tx: UnboundedSender<TrayEvent>) {
     let tray_rx = TrayIconEvent::receiver();
     let menu_rx = MenuEvent::receiver();
 
+    // What the tray currently shows -- swapped against UNREAD_ALERTS below.
+    let mut alerts_shown = false;
+
     // Required for the tray icon's hidden window to actually receive
     // its Shell_NotifyIcon callback messages; also doubles as our
     // polling cadence for the two event channels above.
@@ -164,6 +216,18 @@ fn run_tray_thread(event_tx: UnboundedSender<TrayEvent>) {
             while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
+            }
+
+            // Swap the icon on unread-state transitions. A failed set_icon
+            // is logged but still recorded, so one bad call doesn't spam
+            // the log every 50ms tick.
+            let want_alerts = UNREAD_ALERTS.load(Ordering::Relaxed);
+            if want_alerts != alerts_shown {
+                let icon = if want_alerts { &icon_unread } else { &icon_normal };
+                if let Err(err) = tray_icon.set_icon(Some(icon.clone())) {
+                    eprintln!("[tray] set_icon failed: {err}");
+                }
+                alerts_shown = want_alerts;
             }
 
             if let Ok(event) = tray_rx.try_recv() {
@@ -214,8 +278,8 @@ pub(crate) fn spawn(event_tx: UnboundedSender<TrayEvent>) {
                 return;
             }
         };
-        let icon = match build_icon() {
-            Ok(icon) => icon,
+        let (icon_normal, icon_unread) = match build_icons() {
+            Ok(icons) => icons,
             Err(reason) => {
                 let _ = event_tx.send(TrayEvent::Unavailable(reason));
                 return;
@@ -223,11 +287,11 @@ pub(crate) fn spawn(event_tx: UnboundedSender<TrayEvent>) {
         };
 
         let tray_icon = TrayIconBuilder::new()
-            .with_tooltip("Talkyss")
-            .with_icon(icon)
+            .with_tooltip("HexaTalk")
+            .with_icon(icon_normal.clone())
             .with_menu(Box::new(menu))
             .build();
-        let _tray_icon = match tray_icon {
+        let tray_icon = match tray_icon {
             Ok(tray_icon) => tray_icon,
             Err(err) => {
                 let _ = event_tx.send(TrayEvent::Unavailable(format!(
@@ -243,7 +307,19 @@ pub(crate) fn spawn(event_tx: UnboundedSender<TrayEvent>) {
         let tray_rx = TrayIconEvent::receiver();
         let menu_rx = MenuEvent::receiver();
 
+        // What the tray currently shows -- swapped against UNREAD_ALERTS.
+        let mut alerts_shown = false;
+
         glib::source::timeout_add_local(std::time::Duration::from_millis(50), move || {
+            let want_alerts = UNREAD_ALERTS.load(Ordering::Relaxed);
+            if want_alerts != alerts_shown {
+                let icon = if want_alerts { &icon_unread } else { &icon_normal };
+                if tray_icon.set_icon(Some(icon.clone())).is_err() {
+                    eprintln!("[tray] set_icon failed");
+                }
+                alerts_shown = want_alerts;
+            }
+
             if let Ok(event) = tray_rx.try_recv() {
                 if matches!(event, TrayIconEvent::DoubleClick { .. })
                     && event_tx.send(TrayEvent::Show).is_err()
@@ -268,9 +344,9 @@ pub(crate) fn spawn(event_tx: UnboundedSender<TrayEvent>) {
         });
 
         gtk::main();
-        // `_tray_icon` is dropped here, once `gtk::main()` returns -- keeps
-        // the icon alive for the whole time the loop (and thus the process)
-        // is running.
+        // The closure captures `tray_icon`, so it is dropped once the glib
+        // timeout source is destroyed on `gtk::main()` return -- keeps the
+        // icon alive for the whole time the loop (and process) is running.
     });
 }
 

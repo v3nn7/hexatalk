@@ -3,6 +3,22 @@ import { mutation, query, MutationCtx, QueryCtx } from "./_generated/server";
 import { currentUser, isBlockedEitherWay } from "./session";
 import { Doc, Id } from "./_generated/dataModel";
 
+async function requireMembership(
+  ctx: QueryCtx | MutationCtx,
+  conversationId: Id<"conversations">,
+  userId: Id<"users">,
+) {
+  const membership = await ctx.db
+    .query("conversationMembers")
+    .withIndex("by_conversation_and_user", (q) =>
+      q.eq("conversationId", conversationId).eq("userId", userId),
+    )
+    .unique();
+  if (!membership) {
+    throw new Error("You're not a member of this chat");
+  }
+}
+
 async function purgeIceCandidates(ctx: MutationCtx, callId: Id<"calls">) {
   const rows = await ctx.db
     .query("callIceCandidates")
@@ -83,6 +99,8 @@ export const startCall = mutation({
     if (await isBlockedEitherWay(ctx, me._id, args.calleeId)) {
       throw new Error("You can't call this user");
     }
+
+    await requireMembership(ctx, args.conversationId, me._id);
 
     const membership = await ctx.db
       .query("conversationMembers")

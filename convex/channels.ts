@@ -4,6 +4,7 @@ import { currentUser } from "./session";
 import { Id } from "./_generated/dataModel";
 import {
   ALL_PERMS,
+  DEFAULT_EVERYONE_PERMS,
   Perm,
   channelPermissions,
   requirePerm,
@@ -12,6 +13,31 @@ import {
 
 function slugify(raw: string): string {
   return raw.trim().toLowerCase().replace(/\s+/g, "-").slice(0, 60);
+}
+
+/** Permissions an @everyone overwrite may tune (member-facing defaults). */
+const EVERYONE_OVERWRITE_PERMS =
+  Perm.VIEW_CHANNELS | Perm.SEND_MESSAGES | Perm.CONNECT_VOICE | Perm.SPEAK;
+
+/** Id of the server's position-0 (@everyone) role, creating it when an old
+ * server predates default roles — mirrors ensureDefaultRole in roles.ts. */
+async function everyoneRoleId(
+  ctx: MutationCtx,
+  serverId: Id<"servers">,
+): Promise<Id<"serverRoles">> {
+  const roles = await ctx.db
+    .query("serverRoles")
+    .withIndex("by_server", (q) => q.eq("serverId", serverId))
+    .take(50);
+  const everyone = roles.find((r) => r.position === 0);
+  if (everyone) return everyone._id;
+  return await ctx.db.insert("serverRoles", {
+    serverId,
+    name: "everyone",
+    color: "#33FF66",
+    position: 0,
+    permissions: DEFAULT_EVERYONE_PERMS,
+  });
 }
 
 export const listCategories = query({
@@ -263,6 +289,24 @@ export const setOverwrite = mutation({
     if (allow === 0 && deny === 0) {
       if (existing) await ctx.db.delete("channelOverwrites", existing._id);
       return null;
+    }
+
+    // The overwrite target must belong to this server — otherwise junk
+    // overwrites for arbitrary role/user ids could be planted.
+    if (args.targetType === "role") {
+      const role = await ctx.db.get(
+        "serverRoles",
+        args.targetId as Id<"serverRoles">,
+      );
+      if (!role || role.serverId !== ch.serverId) {
+        throw new Error("Role not found on this server");
+      }
+    } else {
+      const target = await ctx.db.get("users", args.targetId as Id<"users">);
+      if (!target) {
+        throw new Error("User not found");
+      }
+      await requireServerMember(ctx, ch.serverId, target._id);
     }
 
     if (existing) {

@@ -19,6 +19,7 @@ export component PrimaryButton inherits Rectangle {
 
     touch := TouchArea {
         enabled: root.enabled && !root.busy;
+        mouse-cursor: MouseCursor.pointer;
         clicked => { root.clicked(); }
     }
 
@@ -48,6 +49,7 @@ export component SecondaryButton inherits Rectangle {
 
     touch := TouchArea {
         enabled: root.enabled;
+        mouse-cursor: MouseCursor.pointer;
         clicked => { root.clicked(); }
     }
 
@@ -76,6 +78,7 @@ export component DangerButton inherits Rectangle {
 
     touch := TouchArea {
         enabled: root.enabled;
+        mouse-cursor: MouseCursor.pointer;
         clicked => { root.clicked(); }
     }
 
@@ -94,7 +97,10 @@ export component LinkButton inherits Rectangle {
     callback clicked;
     background: transparent;
 
-    touch := TouchArea { clicked => { root.clicked(); } }
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
 
     Text {
         text: root.text;
@@ -120,10 +126,18 @@ export component TextInputField inherits Rectangle {
     callback edited(string);
     callback submitted;
 
+    // Moves keyboard focus into the inner TextInput (used to auto-focus the
+    // first field when a screen opens).
+    public function focus-input() {
+        inner.focus();
+    }
+
     height: 38px;
     background: inner.has-focus ? Theme.bg-elevated : Theme.bg-tertiary;
     border-width: 1px;
     border-color: inner.has-focus ? Theme.accent : Theme.border;
+    // Dim like the shared buttons do when disabled (e.g. while auth is busy).
+    opacity: root.enabled ? 1.0 : 0.5;
     animate background { duration: 120ms; }
     animate border-color { duration: 120ms; }
 

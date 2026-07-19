@@ -77,7 +77,7 @@ export const getOrCreateDirect = mutation({
 
 /**
  * Open a support DM without friendship.
- * Allowed when either side is Talkyss staff (moderator+).
+ * Allowed when either side is HexaTalk staff (moderator+).
  * Bypasses friends-only DMs so users can always reach staff.
  */
 export const openSupportDm = mutation({
@@ -100,7 +100,7 @@ export const openSupportDm = mutation({
     const meStaff = isStaff(me);
     const otherStaff = isStaff(other);
     if (!meStaff && !otherStaff) {
-      throw new Error("Support DMs require Talkyss staff on one side");
+      throw new Error("Support DMs require HexaTalk staff on one side");
     }
 
     // Real blocks still apply unless the other party is protected staff
@@ -121,7 +121,7 @@ export const createGroup = mutation({
   },
   handler: async (ctx, args) => {
     const me = await currentUser(ctx, args.sessionToken);
-    const name = args.name.trim();
+    const name = args.name.trim().slice(0, 100);
     if (name.length === 0) {
       throw new Error("Enter a group name");
     }
@@ -131,6 +131,9 @@ export const createGroup = mutation({
     );
     if (uniqueMemberIds.length === 0) {
       throw new Error("Select at least one friend");
+    }
+    if (uniqueMemberIds.length > 50) {
+      throw new Error("Too many members");
     }
 
     for (const memberId of uniqueMemberIds) {

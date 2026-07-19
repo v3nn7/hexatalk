@@ -184,7 +184,7 @@ export component ServerSettingsScreen inherits Rectangle {
                 VerticalLayout {
                     padding: 16px;
                     spacing: 2px;
-                    Text { text: "SERVER SETTINGS"; font-size: 11px; color: Theme.text-muted; }
+                    Text { text: "SERVER SETTINGS"; font-size: Theme.text-xs; font-family: Theme.font-medium; letter-spacing: 1px; color: Theme.text-muted; }
                     Rectangle { height: 6px; }
                     NavItem { label: "Overview"; hint: "Name, icon, vanity URL"; active: root.category == ServerSettingsCategory.Overview; clicked => { root.category_changed(ServerSettingsCategory.Overview); } }
                     NavItem { label: "Channels"; hint: "Order, perms, rename"; active: root.category == ServerSettingsCategory.Channels; clicked => { root.category_changed(ServerSettingsCategory.Channels); } }
@@ -223,7 +223,7 @@ export component ServerSettingsScreen inherits Rectangle {
                                 spacing: 6px;
                                 alignment: start;
                                 if root.is_owner: SecondaryButton { text: root.server_icon_busy ? "Uploading…" : "Upload icon"; enabled: !root.server_icon_busy; clicked => { root.pick_icon(); } }
-                                if root.is_owner && root.server_icon.width > 0: Text { text: "Remove icon"; font-size: 12px; color: Theme.accent; TouchArea { clicked => { root.remove_icon(); } } }
+                                if root.is_owner && root.server_icon.width > 0: Text { text: "Remove icon"; font-size: 12px; color: rm_icon_touch.has-hover ? Theme.accent-dim : Theme.accent; animate color { duration: 120ms; } rm_icon_touch := TouchArea { clicked => { root.remove_icon(); } } }
                                 if root.is_owner: Text { text: "PNG or JPG · under 2MB · square looks best"; font-size: 10px; color: Theme.text-muted; }
                                 if !root.is_owner: Text { text: "Only the server owner can change the icon."; font-size: 11px; color: Theme.text-muted; }
                             }
@@ -244,7 +244,7 @@ export component ServerSettingsScreen inherits Rectangle {
                         Text { text: "Platform admin only. Vanity path for this server."; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
                         HorizontalLayout {
                             spacing: 6px;
-                            Text { text: "talkyss.app/"; font-size: 13px; color: Theme.text-muted; vertical-alignment: center; }
+                            Text { text: "hexatalk.app/"; font-size: 13px; color: Theme.text-muted; vertical-alignment: center; }
                             TextInputField { placeholder: "slug"; value <=> root.custom_slug_input; edited(t) => { root.custom_slug_changed(t); } submitted => { root.save_custom_slug(); } }
                         }
                         HorizontalLayout {
@@ -256,7 +256,7 @@ export component ServerSettingsScreen inherits Rectangle {
                     if root.category == ServerSettingsCategory.Overview && !root.is_platform_admin && root.custom_slug_display != "": Card {
                         SectionTitle { text: "Custom URL"; }
                         Text { text: "/" + root.custom_slug_display; font-size: 16px; color: Theme.accent; }
-                        Text { text: "Set by Talkyss administration."; font-size: 11px; color: Theme.text-muted; }
+                        Text { text: "Set by HexaTalk administration."; font-size: 11px; color: Theme.text-muted; }
                     }
 
                     if root.category == ServerSettingsCategory.Channels: Card {

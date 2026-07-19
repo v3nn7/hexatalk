@@ -7,7 +7,7 @@ import { Avatar, SecondaryButton, PrimaryButton, DangerButton, TextInputField, R
 import {
     ConversationRow, FriendRow, IncomingRequestRow, OutgoingRequestRow,
     PeopleHitRow, SuggestionRow, BlockedRow, ServerRow, ChannelRow, AdminUserRow,
-    GroupCandidateRow,
+    GroupCandidateRow, ReportRow,
 } from "chat_types.slint";
 
 export enum SidebarTab { Chats, Friends, Requests, Servers, Admin }
@@ -124,6 +124,9 @@ export component Sidebar inherits Rectangle {
     in property <int> admin_staff: 0;
     in property <int> admin_bots: 0;
     in property <int> admin_servers: 0;
+    in property <[ReportRow]> admin_reports: [];
+    in property <string> admin_reports_status;
+    callback admin_resolve_report(string, string);
     // Account footer
     in property <string> my_display_name;
     in property <string> my_initial;
@@ -199,7 +202,7 @@ export component Sidebar inherits Rectangle {
                     height: 56px;
                     border-width: 0px;
                     VerticalLayout {
-                        padding: 14px;
+                        padding: 16px;
                         spacing: 2px;
                         alignment: center;
                         Text { text: root.tab_title.to-uppercase(); font-size: Theme.text-xs; font-family: Theme.font-medium; letter-spacing: 1px; color: Theme.text-muted; }
@@ -247,15 +250,19 @@ export component Sidebar inherits Rectangle {
                             if root.group_create_status != "": Text { text: root.group_create_status; font-size: 11px; color: Theme.text-muted; }
                         }
                         if root.conversations.length == 0: EmptyState { text: "No chats yet. Message a friend to start."; }
+                        if root.conversations.length > 0: Text { text: "DIRECT MESSAGES"; font-size: Theme.text-xs; font-family: Theme.font-medium; letter-spacing: 1px; color: Theme.text-muted; }
                         list_convos := ListView {
                             for c in root.conversations: Rectangle {
                                 height: 40px;
                                 background: c.active ? Theme.accent-soft : (ct.has-hover ? Theme.bg-hover : transparent);
                                 border-width: 1px;
-                                border-color: c.active ? Theme.border-strong : transparent;
+                                border-color: c.active ? Theme.border-strong : (ct.has-hover ? Theme.border-hairline : transparent);
                                 animate background { duration: 120ms; }
                                 animate border-color { duration: 120ms; }
-                                ct := TouchArea { clicked => { root.open_conversation(c.id); } }
+                                ct := TouchArea {
+                                    mouse-cursor: MouseCursor.pointer;
+                                    clicked => { root.open_conversation(c.id); }
+                                }
                                 // Active conversation spine (square).
                                 if c.active: Rectangle {
                                     x: 0;
@@ -264,28 +271,26 @@ export component Sidebar inherits Rectangle {
                                     height: parent.height;
                                     background: Theme.accent;
                                 }
-                                // Unread dot: positioned absolutely (like Avatar's
-                                // PresenceDot) so it's vertically centered on the
-                                // row instead of top-aligned inside the
-                                // HorizontalLayout, which read as a stray second
-                                // line above the title.
+                                // Unread pill: short accent stub on the left edge,
+                                // vertically centered -- mutually exclusive with the
+                                // full-height active spine above, so they never
+                                // overlap. Fixed title padding below keeps the title
+                                // from shifting when a chat is read.
                                 if c.unread && !c.active: Rectangle {
-                                    x: 12px;
+                                    x: 0;
                                     y: (parent.height - self.height) / 2;
-                                    width: 8px;
-                                    height: 8px;
+                                    width: 3px;
+                                    height: 16px;
                                     background: Theme.accent;
                                 }
                                 HorizontalLayout {
-                                    // Fixed regardless of unread state so the title
-                                    // doesn't shift horizontally when a chat is read.
-                                    padding-left: 30px;
+                                    padding-left: 14px;
                                     alignment: start;
                                     Text {
                                         text: c.title;
                                         font-size: Theme.text-md;
                                         font-family: c.unread && !c.active ? Theme.font-medium : Theme.font-body;
-                                        color: c.active || c.unread ? Theme.text-primary : Theme.text-muted;
+                                        color: c.active || c.unread || ct.has-hover ? Theme.text-primary : Theme.text-muted;
                                         vertical-alignment: center;
                                         animate color { duration: 120ms; }
                                     }
@@ -301,7 +306,7 @@ export component Sidebar inherits Rectangle {
                         viewport-height: friends_col.preferred-height;
                         friends_col := VerticalLayout {
                             width: parent.width;
-                            padding: 10px;
+                            padding: 12px;
                             spacing: 10px;
                             // Friends banner -- framed by the column padding,
                             // hard-edged to match the rest of the UI.
@@ -505,10 +510,17 @@ export component Sidebar inherits Rectangle {
                             if root.text_channels.length > 0: Text { text: "TEXT CHANNELS"; font-size: Theme.text-xs; font-family: Theme.font-medium; letter-spacing: 1px; color: Theme.text-muted; }
                             for ch in root.text_channels: Rectangle {
                                 height: 32px;
+                                // Muted channels dim like Discord; the active one
+                                // always stays full strength.
+                                opacity: ch.muted && !ch.active ? 0.55 : 1.0;
                                 // Announcements stay visually pinned/highlightable for everyone.
                                 background: ch.active ? Theme.accent-soft : (ch.is_announcement ? #d1bc4d14 : (cht.has-hover ? Theme.bg-hover : transparent));
                                 animate background { duration: 120ms; }
-                                cht := TouchArea { clicked => { root.open_channel(ch.conversation_id); } }
+                                animate opacity { duration: 120ms; }
+                                cht := TouchArea {
+                                    mouse-cursor: MouseCursor.pointer;
+                                    clicked => { root.open_channel(ch.conversation_id); }
+                                }
                                 if ch.active: Rectangle {
                                     x: 0;
                                     y: 0;
@@ -520,20 +532,26 @@ export component Sidebar inherits Rectangle {
                                     x: 12px;
                                     text: ch.label;
                                     font-size: 13px;
-                                    font-family: Theme.font-medium;
+                                    font-family: ch.active ? Theme.font-medium : Theme.font-body;
                                     color: ch.is_announcement
                                         ? (ch.active ? Theme.warning : #d1bc4dcc)
-                                        : (ch.active ? Theme.text-primary : (cht.has-hover ? Theme.text-primary : Theme.text-muted));
+                                        : (ch.active || cht.has-hover ? Theme.text-primary : Theme.text-muted);
                                     vertical-alignment: center;
                                     animate color { duration: 120ms; }
                                 }
                             }
+                            if root.voice_channels.length > 0: Rectangle { height: 8px; }
                             if root.voice_channels.length > 0: Text { text: "VOICE CHANNELS"; font-size: Theme.text-xs; font-family: Theme.font-medium; letter-spacing: 1px; color: Theme.text-muted; }
                             for ch in root.voice_channels: Rectangle {
                                 height: 32px;
+                                opacity: ch.muted && !ch.active ? 0.55 : 1.0;
                                 background: ch.active ? Theme.accent-soft : (chv.has-hover ? Theme.bg-hover : transparent);
                                 animate background { duration: 120ms; }
-                                chv := TouchArea { clicked => { root.open_channel(ch.conversation_id); } }
+                                animate opacity { duration: 120ms; }
+                                chv := TouchArea {
+                                    mouse-cursor: MouseCursor.pointer;
+                                    clicked => { root.open_channel(ch.conversation_id); }
+                                }
                                 if ch.active: Rectangle {
                                     x: 0;
                                     y: 0;
@@ -544,8 +562,9 @@ export component Sidebar inherits Rectangle {
                                 Text {
                                     x: 12px;
                                     text: ch.label;
-                                    font-size: Theme.text-md;
-                                    color: ch.active ? Theme.text-primary : (chv.has-hover ? Theme.text-primary : Theme.text-muted);
+                                    font-size: 13px;
+                                    font-family: ch.active ? Theme.font-medium : Theme.font-body;
+                                    color: ch.active || chv.has-hover ? Theme.text-primary : Theme.text-muted;
                                     vertical-alignment: center;
                                     animate color { duration: 120ms; }
                                 }
@@ -581,6 +600,35 @@ export component Sidebar inherits Rectangle {
                             StatsChip { label: "Banned"; value: root.admin_banned; }
                             StatsChip { label: "Bots"; value: root.admin_bots; }
                             StatsChip { label: "Servers"; value: root.admin_servers; }
+                        }
+                        if root.admin_reports_status != "": Text { text: root.admin_reports_status; font-size: 11px; color: Theme.text-muted; }
+                        if root.admin_reports.length > 0: Text { text: "Reports (\{root.admin_reports.length})"; font-size: 12px; font-family: Theme.font-medium; color: Theme.warning; }
+                        if root.admin_reports.length > 0: ListView {
+                            height: 180px;
+                            for r in root.admin_reports: Rectangle {
+                                background: Theme.bg-tertiary;
+                                border-width: 1px;
+                                border-color: Theme.border;
+                                height: report_col.preferred-height + 12px;
+                                report_col := VerticalLayout {
+                                    x: 6px;
+                                    width: parent.width - 12px;
+                                    y: 6px;
+                                    spacing: 3px;
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        Text { text: r.reason; font-size: 11px; color: Theme.warning; horizontal-stretch: 1; }
+                                        Text { text: r.age_label; font-size: 10px; color: Theme.text-muted; vertical-alignment: center; }
+                                    }
+                                    Text { text: "\{r.reporter_username} reported \{r.author_username} in \{r.conversation_label}"; font-size: 11px; color: Theme.text-muted; wrap: word-wrap; }
+                                    Text { text: r.message_body; font-size: 12px; color: Theme.text-primary; wrap: word-wrap; }
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        SmallButton { text: "Actioned"; bg: Theme.danger-soft; fg: Theme.danger; clicked => { root.admin_resolve_report(r.report_id, "actioned"); } }
+                                        SmallButton { text: "Dismiss"; clicked => { root.admin_resolve_report(r.report_id, "dismissed"); } }
+                                    }
+                                }
+                            }
                         }
                         TextInputField { placeholder: "Search users..."; value <=> root.admin_search; edited(t) => { root.admin_search_changed(t); } }
                         if root.admin_status != "": Text { text: root.admin_status; font-size: 11px; color: Theme.text-muted; }

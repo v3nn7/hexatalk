@@ -1,6 +1,6 @@
-# talkyss-relay
+# hexatalk-relay
 
-Samodzielny (standalone) serwer relay kompatybilny z protokołem **peerseal** używanym przez aplikację Talkyss. Jeden binarny plik, zero bazy danych, zero zależności systemowych. Relay widzi wyłącznie zaszyfrowany ciphertext (E2EE Noise) — nigdy nie loguje treści.
+Samodzielny (standalone) serwer relay kompatybilny z protokołem **peerseal** używanym przez aplikację HexaTalk. Jeden binarny plik, zero bazy danych, zero zależności systemowych. Relay widzi wyłącznie zaszyfrowany ciphertext (E2EE Noise) — nigdy nie loguje treści.
 
 ## Jak działa protokół
 
@@ -28,13 +28,13 @@ Dodatkowe endpointy HTTP:
 
 ## Budowanie na Windows
 
-W katalogu `server/talkyss-relay`:
+W katalogu `server/hexatalk-relay`:
 
 ```powershell
 cargo build --release
 ```
 
-Binarka: `target\release\talkyss-relay.exe`.
+Binarka: `target\release\hexatalk-relay.exe`.
 
 > Crate jest **celowo poza workspace'm** repo (ma własny pusty `[workspace]`), więc buduje się niezależnie.
 
@@ -49,12 +49,12 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 
 # skopiuj źródła z Windowsa (z katalogu repo)
-scp -r server/talkyss-relay user@IP_VPS:/opt/talkyss-relay-src
+scp -r server/hexatalk-relay user@IP_VPS:/opt/hexatalk-relay-src
 
 # na VPS
-cd /opt/talkyss-relay-src
+cd /opt/hexatalk-relay-src
 cargo build --release
-sudo install -m 0755 target/release/talkyss-relay /usr/local/bin/talkyss-relay
+sudo install -m 0755 target/release/hexatalk-relay /usr/local/bin/hexatalk-relay
 ```
 
 Alternatywnie — cross-kompilacja przez **WSL2** na tym samym Windowsie:
@@ -62,16 +62,16 @@ Alternatywnie — cross-kompilacja przez **WSL2** na tym samym Windowsie:
 ```bash
 # w WSL2
 rustup target add x86_64-unknown-linux-gnu
-cd /mnt/c/Users/ratko/Desktop/talkyss/server/talkyss-relay
+cd /mnt/c/Users/ratko/Desktop/talkyss/server/hexatalk-relay
 cargo build --release --target x86_64-unknown-linux-gnu
-# binarka: target/x86_64-unknown-linux-gnu/release/talkyss-relay
-scp target/x86_64-unknown-linux-gnu/release/talkyss-relay user@IP_VPS:/tmp/
+# binarka: target/x86_64-unknown-linux-gnu/release/hexatalk-relay
+scp target/x86_64-unknown-linux-gnu/release/hexatalk-relay user@IP_VPS:/tmp/
 ```
 
 ## Uruchomienie
 
 ```bash
-talkyss-relay --bind 0.0.0.0:9000 --token TWOJ_SEKRET
+hexatalk-relay --bind 0.0.0.0:9000 --token TWOJ_SEKRET
 ```
 
 Opcje:
@@ -87,19 +87,19 @@ Logi na stdout (systemd zbiera je przez journald); poziom przez `RUST_LOG=debug`
 
 ## systemd
 
-Plik `/etc/systemd/system/talkyss-relay.service`:
+Plik `/etc/systemd/system/hexatalk-relay.service`:
 
 ```ini
 [Unit]
-Description=Talkyss peerseal-compatible relay
+Description=HexaTalk peerseal-compatible relay
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=talkyss
-Group=talkyss
-ExecStart=/usr/local/bin/talkyss-relay --bind 0.0.0.0:9000 --token ZMNIEN_TEN_SEKRET
+User=hexatalk
+Group=hexatalk
+ExecStart=/usr/local/bin/hexatalk-relay --bind 0.0.0.0:9000 --token ZMNIEN_TEN_SEKRET
 Restart=always
 RestartSec=2
 Environment=RUST_LOG=info
@@ -114,11 +114,11 @@ WantedBy=multi-user.target
 Aktywacja:
 
 ```bash
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin talkyss
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin hexatalk
 sudo systemctl daemon-reload
-sudo systemctl enable --now talkyss-relay
-sudo systemctl status talkyss-relay
-journalctl -u talkyss-relay -f
+sudo systemctl enable --now hexatalk-relay
+sudo systemctl status hexatalk-relay
+journalctl -u hexatalk-relay -f
 ```
 
 ## Firewall
@@ -128,7 +128,7 @@ sudo ufw allow 9000/tcp
 sudo ufw status
 ```
 
-## Podpięcie aplikacji Talkyss pod ten serwer
+## Podpięcie aplikacji HexaTalk pod ten serwer
 
 Aplikacja czyta zmienną środowiskową **`PEERSEAL_RELAY`** (patrz `resolve_relay()` w `src/peer.rs`; wartość runtime nadpisuje tę wkompilowaną). Wartość przechodzi przez `normalize_relay_url()` w `crates/reprotocol/src/util.rs`, który działa tak:
 

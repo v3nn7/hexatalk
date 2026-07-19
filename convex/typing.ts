@@ -1,8 +1,25 @@
 import { v } from "convex/values";
-import { mutation, query } from "./_generated/server";
+import { mutation, query, MutationCtx, QueryCtx } from "./_generated/server";
 import { currentUser } from "./session";
+import { Id } from "./_generated/dataModel";
 
 const TYPING_TTL_MS = 6000;
+
+async function requireMembership(
+  ctx: QueryCtx | MutationCtx,
+  conversationId: Id<"conversations">,
+  userId: Id<"users">,
+) {
+  const membership = await ctx.db
+    .query("conversationMembers")
+    .withIndex("by_conversation_and_user", (q) =>
+      q.eq("conversationId", conversationId).eq("userId", userId),
+    )
+    .unique();
+  if (!membership) {
+    throw new Error("You're not a member of this chat");
+  }
+}
 
 export const setTyping = mutation({
   args: {
@@ -62,6 +79,7 @@ export const whoIsTyping = query({
   },
   handler: async (ctx, args) => {
     const me = await currentUser(ctx, args.sessionToken);
+    await requireMembership(ctx, args.conversationId, me._id);
     const now = Date.now();
 
     const rows = await ctx.db

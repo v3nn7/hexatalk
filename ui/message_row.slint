@@ -24,6 +24,9 @@ export component MessageRow inherits Rectangle {
     callback delete(string);
     callback purge(string);
     callback open_attachment(string);
+    callback report(string);
+    callback report_reason(string, string, string);
+    callback report_cancel(string);
 
     // Mention highlight: a warm (warning-tinted) wash + accent bar when the
     // message pings me; a much fainter wash without a bar for @everyone.
@@ -81,8 +84,8 @@ export component MessageRow inherits Rectangle {
     }
 
     if !msg.is_call_log: HorizontalLayout {
-        padding-left: 6px;
-        padding-right: 6px;
+        padding-left: 16px;
+        padding-right: 16px;
         // Grouped continuation rows sit tighter under their parent message;
         // a new author block gets more air above it.
         padding-top: msg.grouped ? 3px : 10px;
@@ -103,6 +106,21 @@ export component MessageRow inherits Rectangle {
                 initial: msg.author_initial;
                 avatar-color: msg.author_avatar_color;
                 photo-source: msg.author_photo;
+            }
+            // Grouped continuation rows show no avatar; instead a quiet
+            // timestamp fades into the gutter on hover, Discord-style.
+            if msg.grouped: Text {
+                y: 0;
+                width: parent.width;
+                height: 16px;
+                text: msg.meta;
+                font-size: Theme.text-xs;
+                color: Theme.text-muted;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                overflow: elide;
+                opacity: hover.has-hover ? 1 : 0;
+                animate opacity { duration: 120ms; }
             }
         }
 
@@ -228,7 +246,7 @@ export component MessageRow inherits Rectangle {
     // ended up outside the row, hover dropped, the bar vanished... a loop
     // that made reactions/reply impossible to click.
     action_bar := Rectangle {
-        visible: (hover.has-hover || bar_bg.has-hover) && (msg.can_edit || msg.can_delete || msg.can_purge || msg.can_react);
+        visible: msg.reporting || ((hover.has-hover || bar_bg.has-hover) && (msg.can_edit || msg.can_delete || msg.can_purge || msg.can_react || msg.can_report));
         x: parent.width - self.width - 8px;
         y: 4px;
         width: bar_col.preferred-width + 16px;
@@ -252,11 +270,18 @@ export component MessageRow inherits Rectangle {
                     clicked => { root.react(msg.id, e); }
                 }
             }
-            if msg.can_react && !msg.is_call_log: ActionLink { text: "Reply"; clicked => { root.reply(msg.id, msg.author_name, msg.body); } }
-            if msg.can_react && !msg.is_call_log: ActionLink { text: "Copy"; clicked => { root.copy(msg.body); } }
-            if msg.can_edit: ActionLink { text: "Edit"; clicked => { root.edit(msg.id, msg.body, msg.encrypted); } }
-            if msg.can_delete: ActionLink { text: "Delete"; clicked => { root.delete(msg.id); } }
-            if msg.can_purge: ActionLink { text: "Delete forever"; clicked => { root.purge(msg.id); } }
+            if msg.can_react && !msg.is_call_log && !msg.reporting: ActionLink { text: "Reply"; clicked => { root.reply(msg.id, msg.author_name, msg.body); } }
+            if msg.can_react && !msg.is_call_log && !msg.reporting: ActionLink { text: "Copy"; clicked => { root.copy(msg.body); } }
+            if msg.can_edit && !msg.reporting: ActionLink { text: "Edit"; clicked => { root.edit(msg.id, msg.body, msg.encrypted); } }
+            if msg.can_delete && !msg.reporting: ActionLink { text: "Delete"; clicked => { root.delete(msg.id); } }
+            if msg.can_purge && !msg.reporting: ActionLink { text: "Delete forever"; clicked => { root.purge(msg.id); } }
+            if msg.can_report && !msg.reporting: ActionLink { text: "Report"; clicked => { root.report(msg.id); } }
+            if msg.reporting: Text { text: "Report:"; font-size: Theme.text-xs; color: Theme.text-muted; vertical-alignment: center; }
+            if msg.reporting: ActionLink { text: "Spam"; clicked => { root.report_reason(msg.id, msg.body, "spam"); } }
+            if msg.reporting: ActionLink { text: "Harassment"; clicked => { root.report_reason(msg.id, msg.body, "harassment"); } }
+            if msg.reporting: ActionLink { text: "Illegal"; clicked => { root.report_reason(msg.id, msg.body, "illegal_content"); } }
+            if msg.reporting: ActionLink { text: "Other"; clicked => { root.report_reason(msg.id, msg.body, "other"); } }
+            if msg.reporting: ActionLink { text: "Cancel"; clicked => { root.report_cancel(msg.id); } }
         }
     }
 }

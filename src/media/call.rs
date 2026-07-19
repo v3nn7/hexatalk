@@ -13,7 +13,7 @@
 //! `Send` and cannot live inside an async task.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -48,18 +48,15 @@ use super::screenshare::{self, ShareTarget};
 
 /// Optional TURN relay, baked in via `build.rs` from `.env.local`/`.env`
 /// (`TURN_URL`/`TURN_USERNAME`/`TURN_CREDENTIAL`), overridable at runtime
-/// through the same-named environment variables. Absent by default -- the
-/// STUN-only ICE servers set up in `spawn_call_engine` handle direct P2P,
-/// which works for most network pairs, but two peers both behind symmetric
-/// NAT (or a similarly restrictive firewall) can only be bridged by a
-/// relay. Setting these three values (e.g. pointing at a self-hosted
-/// coturn instance) is the only step needed to add one -- no other code
-/// changes required.
+/// through the same-named environment variables. The STUN-only ICE servers
+/// set up alongside this handle direct P2P, which works for most network
+/// pairs, but two peers both behind symmetric NAT (or a similarly
+/// restrictive firewall) can only be bridged by a relay. When no relay is
+/// configured, this falls back to the free public Open Relay (by Metered)
+/// so those pairs can still connect; setting the three env values (e.g.
+/// pointing at a self-hosted coturn instance) overrides the fallback --
+/// no other code changes required.
 pub(super) fn turn_ice_server() -> Option<RTCIceServer> {
-    const BAKED_TURN_URL: &str = env!("TURN_URL");
-    const BAKED_TURN_USERNAME: &str = env!("TURN_USERNAME");
-    const BAKED_TURN_CREDENTIAL: &str = env!("TURN_CREDENTIAL");
-
     fn resolve(runtime_key: &str, baked: &str) -> String {
         std::env::var(runtime_key)
             .ok()
@@ -67,12 +64,24 @@ pub(super) fn turn_ice_server() -> Option<RTCIceServer> {
             .unwrap_or_else(|| baked.to_string())
     }
 
-    let url = resolve("TURN_URL", BAKED_TURN_URL);
+    let url = resolve("TURN_URL", crate::obf::turn_url());
     if url.is_empty() {
-        return None;
+        // No relay configured anywhere: use the free public Open Relay
+        // (by Metered) so peers behind hard NATs still have a way to
+        // bridge. Any relay set via the env vars above takes precedence
+        // over this built-in default.
+        return Some(RTCIceServer {
+            urls: vec![
+                "turn:openrelay.metered.ca:80".to_string(),
+                "turn:openrelay.metered.ca:443".to_string(),
+                "turn:openrelay.metered.ca:443?transport=tcp".to_string(),
+            ],
+            username: "openrelayproject".to_string(),
+            credential: "openrelayproject".to_string(),
+        });
     }
-    let username = resolve("TURN_USERNAME", BAKED_TURN_USERNAME);
-    let credential = resolve("TURN_CREDENTIAL", BAKED_TURN_CREDENTIAL);
+    let username = resolve("TURN_USERNAME", crate::obf::turn_username());
+    let credential = resolve("TURN_CREDENTIAL", crate::obf::turn_credential());
     if username.is_empty() || credential.is_empty() {
         return None;
     }
@@ -317,14 +326,21 @@ pub(crate) struct CallParams {
     pub(crate) share_rx: tokio::sync::mpsc::UnboundedReceiver<ShareCommand>,
 }
 
-/// Multiply decoded PCM samples by a per-peer volume gain (1.0 = unity),
-/// clamping back into the i16 range. No-op fast path at unity gain.
+/// Multiply decoded PCM samples by a per-peer volume gain (1.0 = unity).
+/// No-op fast path at unity gain. Gains above 1.0 run through the same
+/// soft-knee limiter as the playback path (`soft_limit`) instead of a hard
+/// i16 clamp, so boosting a quiet peer well past 100% compresses peaks
+/// gracefully rather than square-wave clipping.
 pub(super) fn apply_gain(samples: &mut [i16], gain: f32) {
     if gain == 1.0 {
         return;
     }
     for s in samples.iter_mut() {
-        *s = (*s as f32 * gain).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        let scaled = (*s as f32 / i16::MAX as f32) * gain;
+        let limited = soft_limit(scaled);
+        *s = (limited * i16::MAX as f32)
+            .round()
+            .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
     }
 }
 
@@ -665,7 +681,9 @@ const INPUT_PAD: f32 = 0.65;
 const ENCODE_LEVEL: f32 = 0.82;
 
 /// Playback volume trim so decoded full-scale audio is not ear-splitting.
-const PLAYBACK_GAIN: f32 = 0.72;
+/// Raised from the original 0.72 for a louder default -- `soft_limit` still
+/// runs after this multiply, so peaks round off instead of clipping.
+const PLAYBACK_GAIN: f32 = 0.95;
 
 /// Shared mic processing state used by every sample-format callback.
 struct CapturePipeline {
@@ -848,7 +866,7 @@ pub(super) fn spawn_capture_thread(
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     std::thread::spawn(move || {
         let err_fn = |err| {
-            eprintln!("Talkyss call: microphone stream error: {err}");
+            eprintln!("HexaTalk call: microphone stream error: {err}");
         };
         let stream = match sample_format {
             cpal::SampleFormat::F32 => {
@@ -1101,7 +1119,7 @@ pub(super) fn spawn_playback_thread(
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     std::thread::spawn(move || {
         let err_fn = |err| {
-            eprintln!("Talkyss call: speaker stream error: {err}");
+            eprintln!("HexaTalk call: speaker stream error: {err}");
         };
         let stream = match sample_format {
             cpal::SampleFormat::F32 => {
@@ -1338,7 +1356,7 @@ pub(crate) async fn run_call(params: CallParams, mut output: EventSender<CallEve
     } = params;
 
     let mut media_engine = MediaEngine::default();
-    // Only the Talkyss ADPCM codec is registered: the offer's audio m-line
+    // Only the HexaTalk ADPCM codec is registered: the offer's audio m-line
     // then contains nothing else, so a peer running an older (G.711-only)
     // build finds no common codec and the call fails at negotiation instead
     // of both sides playing garbage at each other.
@@ -1420,7 +1438,7 @@ pub(crate) async fn run_call(params: CallParams, mut output: EventSender<CallEve
             ..Default::default()
         },
         "audio".to_string(),
-        "talkyss".to_string(),
+        "hexatalk".to_string(),
     ));
     if pc
         .add_track(Arc::clone(&local_track) as Arc<dyn TrackLocal + Send + Sync>)
@@ -1545,8 +1563,16 @@ pub(crate) async fn run_call(params: CallParams, mut output: EventSender<CallEve
     // reading them once a call id has actually been sent through it.
     let (local_candidate_tx, mut local_candidate_rx) =
         tokio::sync::mpsc::unbounded_channel::<RTCIceCandidateInit>();
+    // ICE candidate counters, reported by the connect-timeout watchdog
+    // below: candidates gathered locally but none received from the peer
+    // points at a signaling failure, while candidates on both sides with
+    // no connection points at NAT traversal.
+    let local_candidate_count = Arc::new(AtomicUsize::new(0));
+    let remote_candidate_count = Arc::new(AtomicUsize::new(0));
+    let local_candidate_count_for_handler = Arc::clone(&local_candidate_count);
     pc.on_ice_candidate(Box::new(move |candidate: Option<RTCIceCandidate>| {
         if let Some(candidate) = candidate {
+            local_candidate_count_for_handler.fetch_add(1, Ordering::Relaxed);
             if let Ok(init) = candidate.to_json() {
                 let _ = local_candidate_tx.send(init);
             }
@@ -1583,7 +1609,9 @@ pub(crate) async fn run_call(params: CallParams, mut output: EventSender<CallEve
     // Tracked purely for diagnostics: if the connect-timeout watchdog below
     // fires, reporting the last ICE state distinguishes "stuck checking
     // candidate pairs" (a real NAT-traversal failure -- needs a TURN
-    // relay, see `turn_ice_server`) from other failure modes.
+    // relay, see `turn_ice_server`) from other failure modes, and the
+    // candidate counters distinguish a signaling failure (no candidates
+    // gathered or received) from pairs that existed but never connected.
     let last_ice_state: Arc<Mutex<RTCIceConnectionState>> =
         Arc::new(Mutex::new(RTCIceConnectionState::Unspecified));
     let last_ice_state_for_handler = Arc::clone(&last_ice_state);
@@ -1628,6 +1656,8 @@ pub(crate) async fn run_call(params: CallParams, mut output: EventSender<CallEve
     // instead of "Connecting..." forever.
     let connect_timeout_flag = Arc::clone(&connected_flag);
     let connect_timeout_ice_state = Arc::clone(&last_ice_state);
+    let connect_timeout_local_count = Arc::clone(&local_candidate_count);
+    let connect_timeout_remote_count = Arc::clone(&remote_candidate_count);
     let mut connect_timeout_output = output.clone();
     tokio::spawn(async move {
         tokio::time::sleep(CONNECT_TIMEOUT).await;
@@ -1636,9 +1666,11 @@ pub(crate) async fn run_call(params: CallParams, mut output: EventSender<CallEve
                 .lock()
                 .map(|state| *state)
                 .unwrap_or(RTCIceConnectionState::Unspecified);
+            let local_candidates = connect_timeout_local_count.load(Ordering::Relaxed);
+            let remote_candidates = connect_timeout_remote_count.load(Ordering::Relaxed);
             let _ = connect_timeout_output
                 .send(CallEvent::Failed(format!(
-                    "Connection timed out (ICE state: {ice_state})"
+                    "Connection timed out (ICE state: {ice_state}, local candidates: {local_candidates}, remote: {remote_candidates})"
                 )))
                 .await;
         }
@@ -1868,7 +1900,9 @@ pub(crate) async fn run_call(params: CallParams, mut output: EventSender<CallEve
                         if let Ok(init) =
                             serde_json::from_str::<RTCIceCandidateInit>(candidate_json)
                         {
-                            let _ = pc.add_ice_candidate(init).await;
+                            if pc.add_ice_candidate(init).await.is_ok() {
+                                remote_candidate_count.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     }
                 }
@@ -2131,9 +2165,11 @@ mod tests {
         }
     }
 
-    /// The gain helper: unity is a no-op, other gains scale and clamp.
+    /// The gain helper: unity is a no-op, moderate gains scale linearly,
+    /// and a big boost on already-loud samples soft-limits (stays in range,
+    /// but short of hard full scale -- no square-wave clipping).
     #[test]
-    fn gain_scales_and_clamps() {
+    fn gain_scales_and_soft_limits() {
         let mut samples = vec![0i16, 1000, -1000, i16::MAX, i16::MIN];
         let original = samples.clone();
         apply_gain(&mut samples, 1.0);
@@ -2144,8 +2180,8 @@ mod tests {
         assert_eq!(samples[2], -500);
 
         let mut loud = vec![i16::MAX, i16::MIN];
-        apply_gain(&mut loud, 2.0);
-        assert_eq!(loud[0], i16::MAX);
-        assert_eq!(loud[1], i16::MIN);
+        apply_gain(&mut loud, 5.0);
+        assert!(loud[0] > 0 && loud[0] < i16::MAX);
+        assert!(loud[1] < 0 && loud[1] > i16::MIN);
     }
 }

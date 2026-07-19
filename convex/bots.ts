@@ -9,7 +9,7 @@ import {
 import { internal } from "./_generated/api";
 import { currentUser } from "./session";
 import { Id, Doc } from "./_generated/dataModel";
-import { hashPassword, randomHex, timingSafeEqual } from "./auth";
+import { hashPassword, hashSessionToken, randomHex, timingSafeEqual } from "./auth";
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const BOT_TOKEN_PREFIX = "tbot_";
@@ -304,12 +304,15 @@ export const getBotByUsername = internalQuery({
 });
 
 export const createBotSession = internalMutation({
-  args: { userId: v.id("users"), token: v.string(), expiresAt: v.number() },
+  args: { userId: v.id("users"), tokenHash: v.string(), expiresAt: v.number() },
   handler: async (ctx, args) => {
     await ctx.db.insert("sessions", {
       userId: args.userId,
-      token: args.token,
+      tokenHash: args.tokenHash,
       expiresAt: args.expiresAt,
+      platform: "bot",
+      createdAt: Date.now(),
+      lastActiveAt: Date.now(),
     });
   },
 });
@@ -344,6 +347,9 @@ export const loginWithUsername = action({
     if (!bot.displayName || bot.displayName.trim().length < 2) {
       throw new Error("Bot rejected: missing name");
     }
+    if (!bot.salt || !bot.passwordHash) {
+      throw new Error("Bot not found");
+    }
 
     const attemptHash = await hashPassword(token, bot.salt);
     if (!timingSafeEqual(attemptHash, bot.passwordHash)) {
@@ -353,7 +359,7 @@ export const loginWithUsername = action({
     const sessionToken = randomHex(32);
     await ctx.runMutation(internal.bots.createBotSession, {
       userId: bot._id,
-      token: sessionToken,
+      tokenHash: await hashSessionToken(sessionToken),
       expiresAt: Date.now() + SESSION_TTL_MS,
     });
 

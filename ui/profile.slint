@@ -76,7 +76,8 @@ export component ProfileScreen inherits Rectangle {
                 background: Theme.danger-soft;
                 border-width: 1px;
                 border-color: Theme.danger;
-                Text { x: 16px; y: 16px; text: root.error; font-size: 13px; color: Theme.danger; wrap: word-wrap; }
+                height: error-text.preferred-height + 32px;
+                error-text := Text { x: 16px; y: 16px; width: parent.width - 32px; text: root.error; font-size: 13px; color: Theme.danger; wrap: word-wrap; }
             }
         }
 

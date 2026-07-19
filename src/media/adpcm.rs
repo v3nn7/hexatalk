@@ -32,6 +32,8 @@ const WIRE_FRAME_BYTES: usize = 4 + FRAME_SAMPLES / 2;
 /// the media engine only advertises this codec, so a peer running an old
 /// (PCMU-only) build finds no common codec and the call fails at
 /// negotiation instead of playing garbage.
+/// NOTE: wire-protocol constant — both call peers must agree on this exact
+/// string, so it keeps the pre-rebrand name for old↔new client compat.
 pub(super) const MIME_TYPE: &str = "audio/x-talkyss-adpcm";
 
 /// Dynamic RTP payload type for the codec.

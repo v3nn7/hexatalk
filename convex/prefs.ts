@@ -1,7 +1,21 @@
 import { v } from "convex/values";
 import { mutation, query, MutationCtx, QueryCtx } from "./_generated/server";
 import { currentUser } from "./session";
+import { hashSessionToken } from "./auth";
 import { Id } from "./_generated/dataModel";
+
+/** Hash-first token comparison with a plaintext fallback for legacy
+ * sessions written before token hashing (same pattern as auth.signOut). */
+function sessionMatchesToken(
+  session: { token?: string; tokenHash?: string },
+  sessionToken: string,
+  tokenHash: string,
+): boolean {
+  if (session.tokenHash !== undefined) {
+    return session.tokenHash === tokenHash;
+  }
+  return session.token === sessionToken;
+}
 
 /**
  * Returns false if any member has global storeChatHistory=false or a
@@ -92,13 +106,14 @@ export const signOutOtherSessions = mutation({
   args: { sessionToken: v.string() },
   handler: async (ctx, args) => {
     const me = await currentUser(ctx, args.sessionToken);
+    const tokenHash = await hashSessionToken(args.sessionToken);
     const sessions = await ctx.db
       .query("sessions")
       .withIndex("by_userId", (q) => q.eq("userId", me._id))
       .take(100);
     let killed = 0;
     for (const s of sessions) {
-      if (s.token !== args.sessionToken) {
+      if (!sessionMatchesToken(s, args.sessionToken, tokenHash)) {
         await ctx.db.delete("sessions", s._id);
         killed += 1;
       }
@@ -112,6 +127,7 @@ export const listSessions = query({
   args: { sessionToken: v.string() },
   handler: async (ctx, args) => {
     const me = await currentUser(ctx, args.sessionToken);
+    const tokenHash = await hashSessionToken(args.sessionToken);
     const sessions = await ctx.db
       .query("sessions")
       .withIndex("by_userId", (q) => q.eq("userId", me._id))
@@ -125,7 +141,7 @@ export const listSessions = query({
         platform: s.platform ?? "unknown",
         createdAt: s.createdAt ?? s._creationTime,
         lastActiveAt: s.lastActiveAt ?? s.createdAt ?? s._creationTime,
-        isCurrent: s.token === args.sessionToken,
+        isCurrent: sessionMatchesToken(s, args.sessionToken, tokenHash),
         expiresAt: s.expiresAt,
       }))
       .sort((a, b) => b.lastActiveAt - a.lastActiveAt);
@@ -144,7 +160,8 @@ export const revokeSession = mutation({
     if (!row || row.userId !== me._id) {
       throw new Error("Session not found");
     }
-    if (row.token === args.sessionToken) {
+    const tokenHash = await hashSessionToken(args.sessionToken);
+    if (sessionMatchesToken(row, args.sessionToken, tokenHash)) {
       throw new Error("Use Log out to end this device's session");
     }
     await ctx.db.delete("sessions", args.sessionId);
@@ -169,10 +186,18 @@ export const touchSession = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const session = await ctx.db
-      .query("sessions")
-      .withIndex("by_token", (q) => q.eq("token", args.sessionToken))
-      .unique();
+    const tokenHash = await hashSessionToken(args.sessionToken);
+    const session =
+      (await ctx.db
+        .query("sessions")
+        .withIndex("by_tokenHash", (q) => q.eq("tokenHash", tokenHash))
+        .unique()) ??
+      // Legacy rows written before token hashing still carry the plaintext
+      // token; match it directly.
+      (await ctx.db
+        .query("sessions")
+        .withIndex("by_token", (q) => q.eq("token", args.sessionToken))
+        .unique());
     if (!session || session.expiresAt < Date.now()) {
       throw new Error("Session expired, please log in again");
     }
@@ -244,6 +269,15 @@ export const getConversationStore = query({
   },
   handler: async (ctx, args) => {
     const me = await currentUser(ctx, args.sessionToken);
+    const membership = await ctx.db
+      .query("conversationMembers")
+      .withIndex("by_conversation_and_user", (q) =>
+        q.eq("conversationId", args.conversationId).eq("userId", me._id),
+      )
+      .unique();
+    if (!membership) {
+      throw new Error("You're not a member of this chat");
+    }
     const pref = await ctx.db
       .query("chatStorePrefs")
       .withIndex("by_user_and_conversation", (q) =>

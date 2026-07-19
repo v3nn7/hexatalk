@@ -1,6 +1,6 @@
 //! Local user-settings persistence: audio device choices, the mic noise
 //! gate threshold, and per-peer voice volumes survive app restarts via a
-//! JSON file next to the session token (`%APPDATA%/Talkyss/settings.json`).
+//! JSON file next to the session token (`%APPDATA%/HexaTalk/settings.json`).
 //!
 //! The schema is deliberately tolerant: `#[serde(default)]` everywhere, so a
 //! file written by an older/newer build (missing or unknown fields) loads
@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::session_store::talkyss_data_dir;
+use super::session_store::hexatalk_data_dir;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -22,13 +22,13 @@ pub(super) struct PersistedSettings {
     /// Mic noise gate threshold (linear amplitude 0..1). `None` = app default
     /// (`call::DEFAULT_NOISE_GATE`).
     pub(super) noise_gate: Option<f32>,
-    /// Per-peer voice volume gains (peer user_id -> gain, 0.0..=2.0). The
+    /// Per-peer voice volume gains (peer user_id -> gain, 0.0..=5.0). The
     /// 1:1 call remote uses the special key "*".
     pub(super) voice_gains: HashMap<String, f32>,
 }
 
 fn settings_file_path() -> std::path::PathBuf {
-    talkyss_data_dir().join("settings.json")
+    hexatalk_data_dir().join("settings.json")
 }
 
 /// Loads persisted settings, falling back to defaults if the file is

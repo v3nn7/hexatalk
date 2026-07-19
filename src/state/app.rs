@@ -18,7 +18,7 @@ use crate::net::rt::{Job, Task, WindowAction, job};
 
 use crate::crypto;
 use crate::media::call;
-use crate::media::notify::{BEEP_MESSAGE, notify_desktop, play_beep};
+use crate::media::notify::notify_desktop;
 use crate::media::screenshare;
 use crate::net::convex_parse::{expect_null, humanize_error, value_as_bool};
 use crate::net::peer;
@@ -35,7 +35,7 @@ use crate::net::subscriptions::{
 use crate::state::history;
 use crate::state::message::Message;
 use crate::state::session_store::{
-    connect_task, load_panel_prefs, load_session_token_from_disk, talkyss_data_dir,
+    connect_task, load_panel_prefs, load_session_token_from_disk, hexatalk_data_dir,
 };
 use crate::state::settings_store::{PersistedSettings, load_settings, save_settings};
 use crate::state::types::{
@@ -61,8 +61,18 @@ pub(crate) struct App {
     pub(crate) username_input: String,
     pub(crate) password_input: String,
     pub(crate) display_name_input: String,
+    pub(crate) email_input: String,
     pub(crate) auth_error: Option<String>,
     pub(crate) auth_busy: bool,
+
+    // ---- Email verification gate (shown whenever session.email_verified
+    // is false, both for brand-new signups and pre-existing accounts that
+    // predate this feature) ----
+    pub(crate) email_verify_input: String,
+    pub(crate) email_verify_code_input: String,
+    pub(crate) email_verify_code_sent: bool,
+    pub(crate) email_verify_busy: bool,
+    pub(crate) email_verify_error: Option<String>,
 
     pub(crate) session: Option<Session>,
     /// peerseal long-term identity public key (base64), published to Convex.
@@ -107,6 +117,12 @@ pub(crate) struct App {
     pub(crate) admin_detail_user_id: Option<String>,
     /// Loaded detail for `admin_detail_user_id` (on-demand adminUserDetail).
     pub(crate) admin_user_detail: Option<crate::state::types::AdminUserDetail>,
+    /// Pending reports queue (admin panel Reports section).
+    pub(crate) admin_reports: Vec<crate::state::types::MessageReport>,
+    pub(crate) admin_reports_status: Option<String>,
+    /// Message id whose "why are you reporting this" reason picker is open
+    /// in the chat view — at most one at a time.
+    pub(crate) reporting_message_id: Option<String>,
     pub(crate) sidebar_tab: SidebarTab,
     pub(crate) chat_filter_input: String,
     pub(crate) friends_filter_input: String,
@@ -241,7 +257,7 @@ pub(crate) struct App {
     pub(crate) settings_input_device: Option<String>,
     pub(crate) settings_output_device: Option<String>,
     pub(crate) noise_gate: Arc<AtomicU32>,
-    /// Per-peer voice volume gains (peer user_id -> gain, 0.0..=2.0). The
+    /// Per-peer voice volume gains (peer user_id -> gain, 0.0..=5.0). The
     /// 1:1 call remote uses the special key "*". Applied live to decoded
     /// remote audio in call.rs / room_voice.rs.
     pub(crate) voice_gains: Arc<std::sync::Mutex<std::collections::HashMap<String, f32>>>,
@@ -327,6 +343,12 @@ impl App {
                 username_input: String::new(),
                 password_input: String::new(),
                 display_name_input: String::new(),
+                email_input: String::new(),
+                email_verify_input: String::new(),
+                email_verify_code_input: String::new(),
+                email_verify_code_sent: false,
+                email_verify_busy: false,
+                email_verify_error: None,
                 auth_error: None,
                 auth_busy: false,
                 session: None,
@@ -358,6 +380,9 @@ impl App {
                 admin_stats: None,
                 admin_detail_user_id: None,
                 admin_user_detail: None,
+                admin_reports: Vec::new(),
+                admin_reports_status: None,
+                reporting_message_id: None,
                 sidebar_tab: SidebarTab::Chats,
                 chat_filter_input: String::new(),
                 friends_filter_input: String::new(),
@@ -518,6 +543,28 @@ impl App {
             .unwrap_or_default()
     }
 
+    /// Notification ping for new messages / mentions / friend requests.
+    /// Silenced while the user's own status is Do Not Disturb.
+    pub(crate) fn notify_ping(&self) {
+        let dnd = self
+            .session
+            .as_ref()
+            .map(|s| s.presence_status == "dnd")
+            .unwrap_or(false);
+        if !dnd {
+            crate::media::notify::notification_sound();
+        }
+    }
+
+    /// Anything worth swapping the window icon to the "unread" variant for:
+    /// an unread 1:1 DM, or an unread @-mention in any conversation (the
+    /// same `mention_count` that drives the red sidebar badge).
+    pub(crate) fn has_unread_alerts(&self) -> bool {
+        self.conversations
+            .iter()
+            .any(|c| c.mention_count > 0 || (c.unread && c.kind == "direct"))
+    }
+
     /// Recomputes the composer @-autocomplete popup contents from the
     /// current input + active conversation: server members in channels,
     /// friends in groups/DMs, plus an "everyone" entry only where the token
@@ -659,12 +706,12 @@ impl App {
     /// Drop in-memory chat + any leftover local vault/cache/ratchet files for
     /// this conversation (or the whole pair). Convex is cleared separately.
     pub(super) fn wipe_local_chat_history(&mut self) {
-        let data_dir = talkyss_data_dir();
+        let data_dir = hexatalk_data_dir();
         if let Some(session) = self.session.as_ref() {
             if let Some(conv_id) = self.active_conversation.as_deref() {
                 history::wipe_chat(&session.user_id, conv_id);
             }
-            // Chat "logs" left under %APPDATA%/Talkyss after DMs:
+            // Chat "logs" left under %APPDATA%/HexaTalk after DMs:
             // decrypt_cache_*, ratchet_v3_*, legacy ratchet_*.
             if let Some(peer_id) = self.active_conversation_peer_id.as_deref() {
                 crypto::DecryptCache::clear(&data_dir, &session.user_id, peer_id);
@@ -698,6 +745,9 @@ impl App {
         self.admin_stats = None;
         self.admin_detail_user_id = None;
         self.admin_user_detail = None;
+        self.admin_reports.clear();
+        self.admin_reports_status = None;
+        self.reporting_message_id = None;
         self.sidebar_tab = SidebarTab::Chats;
         self.chat_filter_input.clear();
         self.friends_filter_input.clear();
@@ -756,6 +806,12 @@ impl App {
         self.username_input.clear();
         self.password_input.clear();
         self.display_name_input.clear();
+        self.email_input.clear();
+        self.email_verify_input.clear();
+        self.email_verify_code_input.clear();
+        self.email_verify_code_sent = false;
+        self.email_verify_busy = false;
+        self.email_verify_error = None;
         self.auth_error = None;
         self.auth_busy = false;
         self.typing_names.clear();
@@ -1069,14 +1125,14 @@ impl App {
                     pinned: false,
                 };
                 if !(self.window_focused && is_viewing) {
-                    play_beep(BEEP_MESSAGE);
+                    self.notify_ping();
                     if mentions::mentions_any(&msg.body, &self.my_mention_names()) {
                         notify_desktop(
                             &format!("{} mentioned you", msg.author_name),
                             &mentions::snippet(&msg.body, 140),
                         );
                     } else {
-                        notify_desktop("Talkyss", &format!("New message · {}", msg.author_name));
+                        notify_desktop("HexaTalk", &format!("New message · {}", msg.author_name));
                     }
                 }
                 self.persist_peer_message(&msg, None);
@@ -1130,8 +1186,8 @@ impl App {
                     pinned: false,
                 };
                 if !(self.window_focused && is_viewing) {
-                    play_beep(BEEP_MESSAGE);
-                    notify_desktop("Talkyss", &format!("New message · {}", msg.author_name));
+                    self.notify_ping();
+                    notify_desktop("HexaTalk", &format!("New message · {}", msg.author_name));
                 }
                 self.persist_peer_message(&msg, Some(&bytes));
                 self.peer_live_messages
@@ -1307,7 +1363,7 @@ impl App {
 
         if self.group_key_store.is_none() {
             self.group_key_store = Some(crypto::GroupKeyStore::load(
-                &talkyss_data_dir(),
+                &hexatalk_data_dir(),
                 &session.user_id,
             ));
         }
@@ -1555,6 +1611,13 @@ impl App {
         let (Some(client), Some(session)) = (self.client.clone(), self.session.clone()) else {
             return subs;
         };
+        // Gated on top of the email-verify screen: no live data subscriptions
+        // fire until the account clears that gate. This also stops their
+        // frequent UI-sync churn from racing the verify-code text field and
+        // stomping keystrokes back to a stale (often empty) value.
+        if !session.email_verified {
+            return subs;
+        }
 
         subs.extend([
             friends_subscription(client.clone(), session.token.clone(), tx.clone()),
@@ -1738,16 +1801,6 @@ impl App {
             }
         }
 
-        // Ring while an incoming call is waiting to be answered.
-        if self
-            .my_call
-            .as_ref()
-            .map(|c| c.status == "ringing" && !c.is_caller)
-            .unwrap_or(false)
-        {
-            subs.push(ring_tick_job(tx.clone()));
-        }
-
         if let (Some(role), Some(key)) = (&self.call_role, &self.call_engine_key) {
             subs.push(call_subscription(
                 key.clone(),
@@ -1793,19 +1846,6 @@ fn update_check_job(tx: UnboundedSender<Message>) -> Job {
         loop {
             interval.tick().await;
             if tx.send(Message::CheckForUpdate).is_err() {
-                break;
-            }
-        }
-    })
-}
-
-/// 2s ring cadence while an incoming call is waiting to be answered.
-fn ring_tick_job(tx: UnboundedSender<Message>) -> Job {
-    job("ring-tick", async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(2000));
-        loop {
-            interval.tick().await;
-            if tx.send(Message::RingTick).is_err() {
                 break;
             }
         }

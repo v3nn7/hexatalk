@@ -51,10 +51,170 @@ const WIRE_MAGIC: &[u8; 4] = b"TKR3";
 /// Reject leftover TKR2 sessions on disk.
 const SESSION_VERSION: u32 = 3;
 
+// NOTE: all HKDF labels / AAD prefixes in this file are cryptographic
+// protocol constants. Both DM peers and every group member must derive
+// identical keys, and existing ratchet sessions reference the same labels,
+// so they keep the pre-rebrand "talkyss-*" names on purpose.
 const HKDF_INFO_ROOT: &[u8] = b"talkyss-root-v3";
 const HKDF_INFO_CHAIN0: &[u8] = b"talkyss-chain0-v3";
 const HKDF_INFO_CHAIN1: &[u8] = b"talkyss-chain1-v3";
 const HKDF_INFO_CK: &[u8] = b"talkyss-ck-v3";
+
+/// Magic prefix marking a file as a DPAPI-protected blob (Windows only),
+/// so readers can tell it apart from a legacy plaintext secret file.
+const DPAPI_MAGIC: &[u8; 5] = b"TKDP1";
+
+/// Write a secret file (session token, identity keys, ratchet state, decrypt
+/// caches, group keys). On Windows the contents are encrypted at rest with
+/// DPAPI (`CryptProtectData`, current-user scope, UI forbidden) and stored
+/// as `TKDP1 || blob`; on Unix the file is created with mode 0600 (an
+/// existing file keeps its mode, so it is re-tightened after the write).
+/// A DPAPI failure fails the write instead of silently falling back to
+/// plaintext.
+pub(crate) fn write_secret_file(path: &Path, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let stored = protect_for_storage(contents.as_ref())?;
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path)?;
+    file.write_all(&stored)?;
+    tighten_secret_file_perms(path);
+    Ok(())
+}
+
+/// Reads a file written by [`write_secret_file`]. A `TKDP1` blob is
+/// DPAPI-unprotected (Windows only); anything else is treated as a legacy
+/// plaintext secret and returned as-is (it gets migrated to DPAPI on the
+/// next write). Returns `None` when the file is missing/unreadable or a
+/// DPAPI blob fails to unprotect -- ciphertext is never returned as if it
+/// were plaintext.
+pub(crate) fn read_secret_file(path: &Path) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(path).ok()?;
+    if let Some(blob) = bytes.strip_prefix(DPAPI_MAGIC.as_slice()) {
+        #[cfg(windows)]
+        {
+            return dpapi::unprotect(blob);
+        }
+        #[cfg(not(windows))]
+        {
+            // A DPAPI blob copied onto a non-Windows machine is not
+            // readable here (the key lives in the originating Windows
+            // user profile) -- treat as absent rather than as garbage.
+            let _ = blob;
+            return None;
+        }
+    }
+    Some(bytes)
+}
+
+/// Wraps secret bytes for at-rest storage (see [`write_secret_file`]).
+fn protect_for_storage(plain: &[u8]) -> std::io::Result<Vec<u8>> {
+    #[cfg(windows)]
+    {
+        let protected = dpapi::protect(plain).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "DPAPI CryptProtectData failed",
+            )
+        })?;
+        let mut blob = Vec::with_capacity(DPAPI_MAGIC.len() + protected.len());
+        blob.extend_from_slice(DPAPI_MAGIC);
+        blob.extend_from_slice(&protected);
+        Ok(blob)
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(plain.to_vec())
+    }
+}
+
+/// Windows DPAPI (CryptProtectData/CryptUnprotectData), current-user scope.
+/// The OS key is tied to the logged-in Windows account, so the files can
+/// only be decrypted by the same user on the same machine -- copying
+/// `%APPDATA%\HexaTalk` elsewhere yields undecryptable blobs.
+#[cfg(windows)]
+mod dpapi {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Cryptography::{
+        CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
+    };
+
+    fn run(data: &[u8], protect: bool) -> Option<Vec<u8>> {
+        let mut input = CRYPT_INTEGER_BLOB {
+            cbData: data.len() as u32,
+            pbData: data.as_ptr() as *mut u8,
+        };
+        let mut output = CRYPT_INTEGER_BLOB {
+            cbData: 0,
+            pbData: std::ptr::null_mut(),
+        };
+        let ok = unsafe {
+            if protect {
+                CryptProtectData(
+                    &mut input,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    CRYPTPROTECT_UI_FORBIDDEN,
+                    &mut output,
+                )
+            } else {
+                CryptUnprotectData(
+                    &mut input,
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    CRYPTPROTECT_UI_FORBIDDEN,
+                    &mut output,
+                )
+            }
+        };
+        if ok == 0 || output.pbData.is_null() {
+            return None;
+        }
+        let bytes = unsafe {
+            std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec()
+        };
+        unsafe { LocalFree(output.pbData as *mut _) };
+        Some(bytes)
+    }
+
+    pub(super) fn protect(data: &[u8]) -> Option<Vec<u8>> {
+        run(data, true)
+    }
+
+    pub(super) fn unprotect(data: &[u8]) -> Option<Vec<u8>> {
+        run(data, false)
+    }
+}
+
+/// On Unix, chmod an existing secret file to 0600 when its mode is wider
+/// (repairs files written before the 0600 rule existed). No-op on other
+/// platforms and when the file is missing.
+pub(crate) fn tighten_secret_file_perms(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            if meta.permissions().mode() & 0o777 != 0o600 {
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
 
 /// A user's long-term X25519 identity key pair. The private half never leaves
 /// this device; only the public half is uploaded to Convex.
@@ -265,7 +425,7 @@ impl RatchetSession {
         let _ = std::fs::remove_file(legacy);
     }
 
-    /// Delete every ratchet_*.json under the Talkyss data dir.
+    /// Delete every ratchet_*.json under the HexaTalk data dir.
     pub(crate) fn clear_all(base_dir: &Path) {
         let Ok(entries) = std::fs::read_dir(base_dir) else {
             return;
@@ -345,7 +505,8 @@ impl RatchetSession {
     }
 
     fn load_from_path(path: &Path) -> Option<Self> {
-        let raw = std::fs::read_to_string(path).ok()?;
+        tighten_secret_file_perms(path);
+        let raw = read_secret_file(path).and_then(|b| String::from_utf8(b).ok())?;
         let p: PersistedSession = serde_json::from_str(&raw).ok()?;
         if p.version != SESSION_VERSION {
             return None;
@@ -399,7 +560,7 @@ impl RatchetSession {
             skipped,
         };
         let json = serde_json::to_string(&p).expect("session serializes");
-        std::fs::write(&self.path, json)
+        write_secret_file(&self.path, json)
     }
 
     fn skip_message_keys(&mut self, until: u32) -> Result<(), ()> {
@@ -526,8 +687,9 @@ impl DecryptCache {
 
     pub(crate) fn load(base_dir: &Path, local_user_id: &str, peer_user_id: &str) -> Self {
         let path = Self::path(base_dir, local_user_id, peer_user_id);
-        std::fs::read_to_string(path)
-            .ok()
+        tighten_secret_file_perms(&path);
+        read_secret_file(&path)
+            .and_then(|b| String::from_utf8(b).ok())
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default()
     }
@@ -538,7 +700,7 @@ impl DecryptCache {
             let _ = std::fs::create_dir_all(parent);
         }
         if let Ok(json) = serde_json::to_string(self) {
-            let _ = std::fs::write(path, json);
+            let _ = write_secret_file(&path, json);
         }
     }
 
@@ -547,7 +709,7 @@ impl DecryptCache {
         let _ = std::fs::remove_file(Self::path(base_dir, local_user_id, peer_user_id));
     }
 
-    /// Delete every decrypt_cache_*.json under the Talkyss data dir.
+    /// Delete every decrypt_cache_*.json under the HexaTalk data dir.
     pub(crate) fn clear_all(base_dir: &Path) {
         let Ok(entries) = std::fs::read_dir(base_dir) else {
             return;
@@ -777,8 +939,9 @@ pub(crate) struct GroupKeyStore {
 impl GroupKeyStore {
     pub(crate) fn load(base_dir: &Path, local_user_id: &str) -> Self {
         let path = base_dir.join(format!("group_keys_{local_user_id}.json"));
-        let keys = std::fs::read_to_string(&path)
-            .ok()
+        tighten_secret_file_perms(&path);
+        let keys = read_secret_file(&path)
+            .and_then(|b| String::from_utf8(b).ok())
             .and_then(|s| serde_json::from_str::<HashMap<String, StoredGroupKey>>(&s).ok())
             .map(|map| {
                 map.into_iter()
@@ -811,7 +974,7 @@ impl GroupKeyStore {
             })
             .collect();
         if let Ok(json) = serde_json::to_string(&map) {
-            let _ = std::fs::write(&self.path, json);
+            let _ = write_secret_file(&self.path, json);
         }
     }
 
@@ -884,7 +1047,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("talkyss-crypto-test-{nanos}"));
+        let dir = std::env::temp_dir().join(format!("hexatalk-crypto-test-{nanos}"));
         let _ = std::fs::create_dir_all(&dir);
         dir
     }

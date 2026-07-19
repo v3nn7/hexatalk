@@ -19,22 +19,19 @@ use crate::{AVATAR_PALETTE, PEER_CLEAR_HISTORY_CTRL, scroll_chat_to_bottom};
 
 use crate::crypto;
 use crate::media::call;
-use crate::media::notify::{
-    BEEP_CALL_CONNECTED, BEEP_FRIEND_REQUEST, BEEP_MESSAGE, notify_desktop, play_beep,
-    ringtone_start, ringtone_stop,
-};
+use crate::media::notify::{notify_desktop, ringtone_start, ringtone_stop};
 use crate::media::screenshare;
 use crate::net::convex_parse::{
     expect_null, expect_string, humanize_error, obj_f64, obj_str, obj_str_list, parse_admin_stats,
-    parse_admin_user_detail, parse_clear_conversation_result, parse_me, parse_object_array,
-    parse_profile_view, parse_server_stats, parse_session, value_as_bool,
+    parse_admin_user_detail, parse_clear_conversation_result, parse_me, parse_message_reports,
+    parse_object_array, parse_profile_view, parse_server_stats, parse_session, value_as_bool,
 };
 use crate::net::peer;
 use crate::net::subscriptions::{mark_read_task, typing_ping_task};
 use crate::state::app::App;
 use crate::state::message::Message;
 use crate::state::session_store::{
-    clear_session_file, connect_task, save_panel_prefs, save_session_to_disk, talkyss_data_dir,
+    clear_session_file, connect_task, save_panel_prefs, save_session_to_disk, hexatalk_data_dir,
 };
 use crate::state::types::{
     AttachmentPick, AuthMode, AvatarPick, BotSummary, CallRole, PendingAttachment, PeopleHit,
@@ -45,10 +42,10 @@ use crate::ui::mentions;
 use crate::ui::utils::{next_friend_request_privacy, next_presence_status};
 use crate::update_check::{UpdateOutcome, check_for_update_task, stage_exe_swap};
 
-/// `talkyss://invite/<code>` -- shareable alongside (or instead of) the bare
+/// `hexatalk://invite/<code>` -- shareable alongside (or instead of) the bare
 /// invite code; `extract_invite_code` accepts either form pasted back in.
 fn build_invite_link(code: &str) -> String {
-    format!("talkyss://invite/{code}")
+    format!("hexatalk://invite/{code}")
 }
 
 fn hostname_best_effort() -> String {
@@ -57,7 +54,7 @@ fn hostname_best_effort() -> String {
         .unwrap_or_else(|_| "device".into())
 }
 
-/// Pulls the invite code out of a pasted `talkyss://invite/<code>` (or
+/// Pulls the invite code out of a pasted `hexatalk://invite/<code>` (or
 /// `https://.../invite/<code>`) link, falling back to treating the whole
 /// trimmed input as a bare code if it doesn't look like a link.
 fn extract_invite_code(input: &str) -> String {
@@ -165,6 +162,13 @@ impl App {
                 self.display_name_input = value;
                 Task::none()
             }
+            Message::EmailInputChanged(value) => {
+                self.email_input = value;
+                if self.auth_error.is_some() {
+                    self.auth_error = None;
+                }
+                Task::none()
+            }
             Message::SubmitAuth => {
                 let Some(client) = self.client.clone() else {
                     self.auth_error =
@@ -199,6 +203,11 @@ impl App {
                             Some("Password must be at least 6 characters".to_string());
                         return Task::none();
                     }
+                    let email = self.email_input.trim();
+                    if email.is_empty() || !email.contains('@') || !email.contains('.') {
+                        self.auth_error = Some("Enter a valid email address".to_string());
+                        return Task::none();
+                    }
                 }
                 self.auth_busy = true;
                 self.auth_error = None;
@@ -223,6 +232,10 @@ impl App {
                 };
                 if self.auth_mode == AuthMode::Register {
                     args.insert("displayName".to_string(), Value::String(display_name));
+                    args.insert(
+                        "email".to_string(),
+                        Value::String(self.email_input.trim().to_lowercase()),
+                    );
                 }
 
                 Task::perform(
@@ -239,10 +252,13 @@ impl App {
             Message::AuthFinished(Ok(session)) => {
                 self.auth_busy = false;
                 self.password_input.clear();
+                self.email_input.clear();
                 self.auth_error = None;
                 save_session_to_disk(&session);
                 let avatar_url = session.avatar_image_url.clone();
                 let touch_token = session.token.clone();
+                self.email_verify_input = session.email.clone();
+                self.email_verify_code_sent = !session.email.is_empty();
                 self.session = Some(session);
                 self.show_toast("Signed in");
                 let touch = if let Some(client) = self.client.clone() {
@@ -291,6 +307,8 @@ impl App {
             }
             Message::RestoreFinished(Ok(session)) => {
                 let avatar_url = session.avatar_image_url.clone();
+                self.email_verify_input = session.email.clone();
+                self.email_verify_code_sent = !session.email.is_empty();
                 self.session = Some(session);
                 Task::batch([
                     self.fetch_missing_avatars(std::iter::once(avatar_url)),
@@ -305,6 +323,123 @@ impl App {
             // retry on the next login. Direct chats stay locked until the
             // public key is on the server and the peer has one too.
             Message::PublicKeyUploaded => Task::none(),
+
+            Message::EmailVerifyInputChanged(value) => {
+                self.email_verify_input = value;
+                if self.email_verify_error.is_some() {
+                    self.email_verify_error = None;
+                }
+                Task::none()
+            }
+            Message::EmailVerifyCodeInputChanged(value) => {
+                self.email_verify_code_input = value;
+                if self.email_verify_error.is_some() {
+                    self.email_verify_error = None;
+                }
+                Task::none()
+            }
+            Message::RequestEmailVerification => {
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                if self.email_verify_busy {
+                    return Task::none();
+                }
+                let email = self.email_verify_input.trim().to_lowercase();
+                if email.is_empty() || !email.contains('@') || !email.contains('.') {
+                    self.email_verify_error = Some("Enter a valid email address".to_string());
+                    return Task::none();
+                }
+                self.email_verify_busy = true;
+                self.email_verify_error = None;
+                let mut client = client;
+                Task::perform(
+                    async move {
+                        client
+                            .action(
+                                "email:requestEmailVerification",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(session.token),
+                                    "email".to_string() => Value::String(email),
+                                },
+                            )
+                            .await
+                            .map_err(|err| humanize_error(&err.to_string()))
+                            .and_then(expect_null)
+                    },
+                    Message::RequestEmailVerificationFinished,
+                )
+            }
+            Message::RequestEmailVerificationFinished(Ok(())) => {
+                self.email_verify_busy = false;
+                self.email_verify_code_sent = true;
+                self.show_toast("Verification code sent");
+                Task::none()
+            }
+            Message::RequestEmailVerificationFinished(Err(err)) => {
+                self.email_verify_busy = false;
+                self.email_verify_error = Some(err);
+                Task::none()
+            }
+            Message::SubmitEmailVerificationCode => {
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                if self.email_verify_busy {
+                    return Task::none();
+                }
+                let code = self.email_verify_code_input.trim().to_string();
+                if code.is_empty() {
+                    self.email_verify_error = Some("Enter the code from your email".to_string());
+                    return Task::none();
+                }
+                self.email_verify_busy = true;
+                self.email_verify_error = None;
+                let mut client = client;
+                Task::perform(
+                    async move {
+                        client
+                            .mutation(
+                                "email:verifyEmailCode",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(session.token),
+                                    "code".to_string() => Value::String(code),
+                                },
+                            )
+                            .await
+                            .map_err(|err| humanize_error(&err.to_string()))
+                            .and_then(expect_null)
+                    },
+                    Message::VerifyEmailCodeFinished,
+                )
+            }
+            Message::VerifyEmailCodeFinished(Ok(())) => {
+                self.email_verify_busy = false;
+                self.email_verify_code_input.clear();
+                if let Some(session) = &mut self.session {
+                    session.email = self.email_verify_input.clone();
+                    session.email_verified = true;
+                }
+                self.show_toast("Email verified");
+                Task::none()
+            }
+            Message::VerifyEmailCodeFinished(Err(err)) => {
+                self.email_verify_busy = false;
+                self.email_verify_error = Some(err);
+                Task::none()
+            }
+            Message::ChangeEmailVerifyAddress => {
+                self.email_verify_code_sent = false;
+                self.email_verify_code_input.clear();
+                self.email_verify_error = None;
+                Task::none()
+            }
 
             Message::CheckForUpdate => {
                 if self.pending_update_path.is_some() {
@@ -333,7 +468,7 @@ impl App {
                     }
                     UpdateOutcome::Downloaded { path, version } => {
                         self.update_check_status = Some(format!(
-                            "Update to v{version} downloaded — installs next time Talkyss restarts."
+                            "Update to v{version} downloaded — installs next time HexaTalk restarts."
                         ));
                         self.pending_update_path = Some(path);
                         self.show_toast(format!(
@@ -703,7 +838,6 @@ impl App {
                     .collect();
                 self.incoming_requests = requests;
                 if let Some(req) = newest {
-                    play_beep(BEEP_FRIEND_REQUEST);
                     let body = if req.note.is_empty() {
                         format!(
                             "{} (@{}) wants to add you as a friend",
@@ -715,6 +849,7 @@ impl App {
                             req.from_display_name, req.from_username, req.note
                         )
                     };
+                    self.notify_ping();
                     notify_desktop("Friend request", &body);
                 }
                 self.fetch_missing_avatars(urls)
@@ -764,8 +899,8 @@ impl App {
                             })
                     });
                     if !muted {
-                        play_beep(BEEP_MESSAGE);
-                        notify_desktop("Talkyss", &format!("New message · {title}"));
+                        self.notify_ping();
+                        notify_desktop("HexaTalk", &format!("New message · {title}"));
                     }
                 }
                 // Keep the open chat marked read as new traffic arrives --
@@ -858,7 +993,7 @@ impl App {
                     ping
                 };
                 if let Some((author, body)) = mention_ping {
-                    play_beep(BEEP_MESSAGE);
+                    self.notify_ping();
                     notify_desktop(
                         &format!("{author} mentioned you"),
                         &mentions::snippet(&body, 140),
@@ -974,6 +1109,115 @@ impl App {
                 Task::none()
             }
 
+            Message::ArmReportMessage(message_id) => {
+                self.reporting_message_id = Some(message_id);
+                Task::none()
+            }
+            Message::CancelReportMessage => {
+                self.reporting_message_id = None;
+                Task::none()
+            }
+            Message::SubmitMessageReport(message_id, message_body, reason) => {
+                self.reporting_message_id = None;
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                let mut client = client;
+                Task::perform(
+                    async move {
+                        client
+                            .mutation(
+                                "reports:reportMessage",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(session.token),
+                                    "messageId".to_string() => Value::String(message_id),
+                                    "messageBody".to_string() => Value::String(message_body),
+                                    "reason".to_string() => Value::String(reason),
+                                },
+                            )
+                            .await
+                            .map_err(|err| humanize_error(&err.to_string()))
+                            .and_then(expect_null)
+                    },
+                    Message::MessageReportFinished,
+                )
+            }
+            Message::MessageReportFinished(Ok(())) => {
+                self.show_toast("Reported to staff");
+                Task::none()
+            }
+            Message::MessageReportFinished(Err(err)) => {
+                self.chat_error = Some(err);
+                Task::none()
+            }
+            Message::LoadAdminReports => {
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                let mut client = client;
+                Task::perform(
+                    async move {
+                        client
+                            .query(
+                                "reports:adminListReports",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(session.token),
+                                },
+                            )
+                            .await
+                            .map_err(|err| humanize_error(&err.to_string()))
+                            .and_then(parse_message_reports)
+                    },
+                    Message::AdminReportsUpdated,
+                )
+            }
+            Message::AdminReportsUpdated(Ok(reports)) => {
+                self.admin_reports = reports;
+                self.admin_reports_status = None;
+                Task::none()
+            }
+            Message::AdminReportsUpdated(Err(err)) => {
+                self.admin_reports_status = Some(err);
+                Task::none()
+            }
+            Message::AdminResolveReport(report_id, status) => {
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                let mut client = client;
+                Task::perform(
+                    async move {
+                        client
+                            .mutation(
+                                "reports:adminResolveReport",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(session.token),
+                                    "reportId".to_string() => Value::String(report_id),
+                                    "status".to_string() => Value::String(status),
+                                },
+                            )
+                            .await
+                            .map_err(|err| humanize_error(&err.to_string()))
+                            .and_then(expect_null)
+                    },
+                    Message::AdminResolveReportFinished,
+                )
+            }
+            Message::AdminResolveReportFinished(Ok(())) => Task::done(Message::LoadAdminReports),
+            Message::AdminResolveReportFinished(Err(err)) => {
+                self.admin_reports_status = Some(err);
+                Task::none()
+            }
+
             Message::SidebarTabChanged(tab) => {
                 self.sidebar_tab = tab;
                 // Don't carry search terms across tabs.
@@ -986,9 +1230,12 @@ impl App {
                 if tab != SidebarTab::Admin {
                     self.admin_search_input.clear();
                 }
-                // Load platform counters when entering the Admin dashboard.
+                // Load platform counters + report queue when entering the Admin dashboard.
                 if tab == SidebarTab::Admin {
-                    return Task::done(Message::LoadAdminStats);
+                    return Task::batch([
+                        Task::done(Message::LoadAdminStats),
+                        Task::done(Message::LoadAdminReports),
+                    ]);
                 }
                 Task::none()
             }
@@ -3793,7 +4040,7 @@ impl App {
             }
             Message::VoiceVolumeChanged(user_id, volume) => {
                 if let Ok(mut gains) = self.voice_gains.lock() {
-                    gains.insert(user_id, volume.clamp(0.0, 2.0));
+                    gains.insert(user_id, volume.clamp(0.0, 5.0));
                 }
                 self.persist_settings();
                 Task::none()
@@ -3847,7 +4094,7 @@ impl App {
                 if self.group_key_store.is_none() {
                     if let Some(session) = &self.session {
                         self.group_key_store = Some(crypto::GroupKeyStore::load(
-                            &talkyss_data_dir(),
+                            &hexatalk_data_dir(),
                             &session.user_id,
                         ));
                     }
@@ -4295,7 +4542,7 @@ impl App {
                 let mut client = client;
                 Task::perform(
                     async move {
-                        let stats = client
+                        client
                             .query(
                                 "admin:adminStats",
                                 btreemap! {
@@ -4303,15 +4550,21 @@ impl App {
                                 },
                             )
                             .await
-                            .ok()
-                            .and_then(parse_admin_stats);
-                        Message::AdminStatsUpdated(stats)
+                            .map_err(|err| humanize_error(&err.to_string()))
+                            .and_then(|result| {
+                                parse_admin_stats(result)
+                                    .ok_or_else(|| "Could not read admin stats".to_string())
+                            })
                     },
-                    std::convert::identity,
+                    Message::AdminStatsUpdated,
                 )
             }
-            Message::AdminStatsUpdated(stats) => {
-                self.admin_stats = stats;
+            Message::AdminStatsUpdated(Ok(stats)) => {
+                self.admin_stats = Some(stats);
+                Task::none()
+            }
+            Message::AdminStatsUpdated(Err(err)) => {
+                self.admin_status = Some(err);
                 Task::none()
             }
 
@@ -4818,7 +5071,6 @@ impl App {
                     }
                     call::CallEvent::Connected => {
                         self.call_status_text = Some("Connected".to_string());
-                        play_beep(BEEP_CALL_CONNECTED);
                     }
                     call::CallEvent::Ended => {
                         self.call_role = None;
@@ -5547,19 +5799,6 @@ impl App {
                 Task::none()
             }
             Message::TypingPingFinished => Task::none(),
-
-            Message::RingTick => {
-                // Windows plays the looping callsound.mp3 ringtone via
-                // ringtone_start/stop in MyCallUpdated; the periodic beep
-                // remains as the fallback on other platforms.
-                #[cfg(not(windows))]
-                if let Some(call) = &self.my_call {
-                    if call.status == "ringing" && !call.is_caller {
-                        play_beep(crate::media::notify::BEEP_INCOMING_CALL);
-                    }
-                }
-                Task::none()
-            }
 
             Message::LogOut => {
                 clear_session_file();

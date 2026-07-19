@@ -204,7 +204,7 @@ export component SettingsScreen inherits Rectangle {
                 padding: 16px;
                 SecondaryButton { text: "← Back"; width: 90px; clicked => { root.close(); } }
                 Rectangle { horizontal-stretch: 1; }
-                Text { text: "Settings"; font-size: 20px; color: Theme.text-primary; vertical-alignment: center; }
+                Text { text: "Settings"; font-size: Theme.text-lg; color: Theme.text-primary; vertical-alignment: center; }
                 Rectangle { horizontal-stretch: 1; }
                 Rectangle { width: 90px; }
             }
@@ -221,7 +221,7 @@ export component SettingsScreen inherits Rectangle {
                 VerticalLayout {
                     padding: 16px;
                     spacing: 2px;
-                    Text { text: "SETTINGS"; font-size: 11px; color: Theme.text-muted; }
+                    Text { text: "SETTINGS"; font-size: Theme.text-xs; font-family: Theme.font-medium; letter-spacing: 1px; color: Theme.text-muted; }
                     Rectangle { height: 4px; }
                     SidebarItem { text: "My Account"; active: root.category == SettingsCategory.Account; clicked => { root.category_changed(SettingsCategory.Account); } }
                     SidebarItem { text: "Privacy"; active: root.category == SettingsCategory.Privacy; clicked => { root.category_changed(SettingsCategory.Privacy); } }
@@ -339,8 +339,8 @@ export component SettingsScreen inherits Rectangle {
                     }
 
                     if root.category == SettingsCategory.Bots: SectionCard {
-                        SectionTitle { text: "Talkyss bots"; }
-                        Text { text: "Headless bots: create here, invite to a server, run with crates/talkyss-bot."; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
+                        SectionTitle { text: "HexaTalk bots"; }
+                        Text { text: "Headless bots: create here, invite to a server, run with crates/hexatalk-bot."; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
                         HorizontalLayout {
                             spacing: 8px;
                             TextInputField { placeholder: "Bot display name"; value <=> root.new_bot_name_input; edited(t) => { root.new_bot_name_changed(t); } submitted => { root.create_bot(); } }

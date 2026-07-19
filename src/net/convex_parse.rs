@@ -158,6 +158,8 @@ pub(crate) fn parse_session(result: FunctionResult) -> Result<Session, String> {
                         p
                     }
                 },
+                email: obj_str(&obj, "email"),
+                email_verified: obj.get("emailVerified").map(value_as_bool).unwrap_or(false),
             })
         }
         FunctionResult::Value(_) => Err("Unexpected server response".to_string()),
@@ -211,6 +213,8 @@ pub(crate) fn parse_me(result: FunctionResult, token: String) -> Result<Session,
                         p
                     }
                 },
+                email: obj_str(&obj, "email"),
+                email_verified: obj.get("emailVerified").map(value_as_bool).unwrap_or(false),
             })
         }
         FunctionResult::Value(_) => Err("Unexpected server response".to_string()),
@@ -368,6 +372,33 @@ pub(crate) fn parse_admin_user_detail(result: FunctionResult) -> Option<AdminUse
             friend_count: obj_ms(&obj, "friendCount"),
         }),
         _ => None,
+    }
+}
+
+/// `reports:adminListReports` → the admin panel's report queue.
+pub(crate) fn parse_message_reports(
+    result: FunctionResult,
+) -> Result<Vec<crate::state::types::MessageReport>, String> {
+    match result {
+        FunctionResult::Value(Value::Array(items)) => Ok(items
+            .into_iter()
+            .filter_map(|item| match item {
+                Value::Object(obj) => Some(crate::state::types::MessageReport {
+                    report_id: obj_str(&obj, "reportId"),
+                    message_id: obj_str(&obj, "messageId"),
+                    conversation_label: obj_str(&obj, "conversationLabel"),
+                    reporter_username: obj_str(&obj, "reporterUsername"),
+                    author_username: obj_str(&obj, "authorUsername"),
+                    message_body: obj_str(&obj, "messageBody"),
+                    reason: obj_str(&obj, "reason"),
+                    status: obj_str(&obj, "status"),
+                    created_at: obj_ms(&obj, "createdAt"),
+                }),
+                _ => None,
+            })
+            .collect()),
+        FunctionResult::ErrorMessage(msg) => Err(msg),
+        _ => Err("Unexpected response".to_string()),
     }
 }
 

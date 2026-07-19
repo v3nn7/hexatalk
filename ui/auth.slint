@@ -9,6 +9,7 @@ export component AuthScreen inherits Rectangle {
     in-out property <string> username-input;
     in-out property <string> password-input;
     in-out property <string> display-name-input;
+    in-out property <string> email-input;
     in property <string> auth-error;
     in property <bool> auth-busy;
     in property <string> connect-status;
@@ -19,6 +20,7 @@ export component AuthScreen inherits Rectangle {
     callback username-edited(string);
     callback password-edited(string);
     callback display-name-edited(string);
+    callback email-edited(string);
 
     background: Theme.bg-primary;
 
@@ -46,7 +48,7 @@ export component AuthScreen inherits Rectangle {
             }
 
             VerticalLayout {
-                padding: 36px;
+                padding: 32px;
                 spacing: 12px;
                 alignment: start;
 
@@ -73,7 +75,7 @@ export component AuthScreen inherits Rectangle {
                         }
                     }
                     Text {
-                        text: "Talkyss";
+                        text: "HexaTalk";
                         font-size: 28px;
                         font-family: Theme.font-medium;
                         color: Theme.text-primary;
@@ -89,7 +91,7 @@ export component AuthScreen inherits Rectangle {
                 Text {
                     text: root.auth-mode == AuthMode.Login
                         ? "Sign in to continue your conversations."
-                        : "Join Talkyss — private chats, servers, and calls.";
+                        : "Join HexaTalk — private chats, servers, and calls.";
                     font-size: 13px;
                     color: Theme.text-muted;
                     wrap: word-wrap;
@@ -110,6 +112,14 @@ export component AuthScreen inherits Rectangle {
                     value <=> root.display-name-input;
                     enabled: !root.auth-busy;
                     edited(text) => { root.display-name-edited(text); }
+                }
+
+                if root.auth-mode == AuthMode.Register: FieldLabel { text: "Email"; }
+                if root.auth-mode == AuthMode.Register: TextInputField {
+                    placeholder: "you@example.com";
+                    value <=> root.email-input;
+                    enabled: !root.auth-busy;
+                    edited(text) => { root.email-edited(text); }
                 }
 
                 FieldLabel { text: "Password"; }

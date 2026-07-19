@@ -1,12 +1,12 @@
 [package]
-name = "talkyss-relay"
+name = "hexatalk-relay"
 version = "0.1.0"
 edition = "2021"
-description = "Standalone peerseal-compatible WebSocket relay server for Talkyss"
+description = "Standalone peerseal-compatible WebSocket relay server for HexaTalk"
 license = "MIT OR Apache-2.0"
 publish = false
 
-# Standalone crate: NOT a member of the Talkyss root workspace
+# Standalone crate: NOT a member of the HexaTalk root workspace
 # (root Cargo.toml has an explicit `members` list). This empty table
 # keeps `cargo build` here independent of the parent workspace.
 [workspace]

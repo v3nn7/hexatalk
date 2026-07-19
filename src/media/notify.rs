@@ -1,32 +1,12 @@
-//! Sound + OS notification side effects: the Windows `MessageBeep` alert
-//! sounds and the cross-platform toast via `notify-rust`.
+//! OS notification side effects: the cross-platform toast via `notify-rust`
+//! and the incoming-call ringtone through the Win32 MCI.
 
-// Plain u32 values matching the Win32 MB_ICON* MessageBeep flags, kept as
-// our own constants (rather than referencing `windows_sys` at call sites)
-// so the call sites stay platform-agnostic even though the actual sound
-// only plays on Windows.
-pub(crate) const BEEP_MESSAGE: u32 = 0; // MB_OK: new message / unread chat
-pub(crate) const BEEP_FRIEND_REQUEST: u32 = 32; // MB_ICONQUESTION
-pub(crate) const BEEP_INCOMING_CALL: u32 = 48; // MB_ICONEXCLAMATION
-pub(crate) const BEEP_CALL_CONNECTED: u32 = 64; // MB_ICONASTERISK
-
-#[cfg(windows)]
-pub(crate) fn play_beep(beep_type: u32) {
-    unsafe {
-        windows_sys::Win32::System::Diagnostics::Debug::MessageBeep(beep_type);
-    }
-}
-
-#[cfg(not(windows))]
-pub(crate) fn play_beep(_beep_type: u32) {}
-
-/// Fire-and-forget OS notification (Windows toast via `notify-rust`). Mirrors
-/// `play_beep`'s style: synchronous, errors swallowed -- a missed toast
-/// isn't worth failing an update over, and the accompanying beep already
-/// covers the "something happened" signal if the toast doesn't show.
+/// Fire-and-forget OS notification (Windows toast via `notify-rust`).
+/// Synchronous, errors swallowed -- a missed toast isn't worth failing an
+/// update over.
 pub(crate) fn notify_desktop(summary: &str, body: &str) {
     let _ = notify_rust::Notification::new()
-        .appname("Talkyss")
+        .appname("HexaTalk")
         .summary(summary)
         .body(body)
         .show();
@@ -38,6 +18,53 @@ pub(crate) fn notify_desktop(summary: &str, body: &str) {
 /// to the temp dir once because MCI needs a real path.
 #[cfg(windows)]
 const RINGTONE_BYTES: &[u8] = include_bytes!("../../assets/sounds/callsound.mp3");
+
+/// Notification ping: `assets/sounds/notification.mp3`, embedded and played
+/// one-shot through the same MCI path as the ringtone.
+#[cfg(windows)]
+const NOTIFICATION_BYTES: &[u8] = include_bytes!("../../assets/sounds/notification.mp3");
+
+/// Materializes an embedded sound asset to the temp dir (MCI needs a real
+/// path). The write goes through a PID-unique staging file + rename so a
+/// crash mid-write can never leave a truncated file that later runs would
+/// mistake for the real thing. Losing a race against another instance is
+/// fine -- the bytes are identical.
+#[cfg(windows)]
+fn materialize_sound(filename: &str, bytes: &[u8]) -> Option<std::path::PathBuf> {
+    let path = std::env::temp_dir().join(filename);
+    if path.exists() {
+        return Some(path);
+    }
+    let staging = std::env::temp_dir().join(format!("{filename}.{}.tmp", std::process::id()));
+    if std::fs::write(&staging, bytes).is_err() {
+        return None;
+    }
+    if std::fs::rename(&staging, &path).is_err() {
+        let _ = std::fs::remove_file(&staging);
+        if !path.exists() {
+            return None;
+        }
+    }
+    Some(path)
+}
+
+/// Plays the notification sound once. Every call restarts playback cleanly,
+/// so rapid consecutive notifications retrigger instead of stacking.
+#[cfg(windows)]
+pub(crate) fn notification_sound() {
+    let Some(path) = materialize_sound("hexatalk_notification.mp3", NOTIFICATION_BYTES) else {
+        return;
+    };
+    mci("close hexatalk_notify");
+    mci(&format!(
+        "open \"{}\" alias hexatalk_notify type mpegvideo",
+        path.to_string_lossy()
+    ));
+    mci("play hexatalk_notify");
+}
+
+#[cfg(not(windows))]
+pub(crate) fn notification_sound() {}
 
 #[cfg(windows)]
 fn mci(command: &str) {
@@ -59,23 +86,22 @@ fn mci(command: &str) {
 /// Starts looping the ringtone. Every call restarts playback cleanly.
 #[cfg(windows)]
 pub(crate) fn ringtone_start() {
-    let path = std::env::temp_dir().join("talkyss_callsound.mp3");
-    if !path.exists() && std::fs::write(&path, RINGTONE_BYTES).is_err() {
+    let Some(path) = materialize_sound("hexatalk_callsound.mp3", RINGTONE_BYTES) else {
         return;
-    }
-    mci("close talkyss_ring");
+    };
+    mci("close hexatalk_ring");
     mci(&format!(
-        "open \"{}\" alias talkyss_ring type mpegvideo",
+        "open \"{}\" alias hexatalk_ring type mpegvideo",
         path.to_string_lossy()
     ));
-    mci("play talkyss_ring repeat");
+    mci("play hexatalk_ring repeat");
 }
 
 /// Stops the ringtone and releases the MCI device.
 #[cfg(windows)]
 pub(crate) fn ringtone_stop() {
-    mci("stop talkyss_ring");
-    mci("close talkyss_ring");
+    mci("stop hexatalk_ring");
+    mci("close hexatalk_ring");
 }
 
 #[cfg(not(windows))]

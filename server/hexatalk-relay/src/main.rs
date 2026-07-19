@@ -1,4 +1,4 @@
-//! talkyss-relay — standalone peerseal-compatible WebSocket relay server.
+//! hexatalk-relay — standalone peerseal-compatible WebSocket relay server.
 //!
 //! Protocol (must match `crates/reprotocol/src/transport/relay.rs`):
 //!
@@ -57,10 +57,10 @@ const MAX_ROOM_ID_LEN: usize = 128;
 const MAX_LOGICAL_HINT: usize = 25 * 1024 * 1024;
 
 const HELP: &str = "\
-talkyss-relay — peerseal-compatible WebSocket relay server
+hexatalk-relay — peerseal-compatible WebSocket relay server
 
 USAGE:
-    talkyss-relay [OPTIONS]
+    hexatalk-relay [OPTIONS]
 
 OPTIONS:
     --bind <ADDR>        Listen address            [default: 0.0.0.0:9000]
@@ -543,7 +543,7 @@ async fn main() {
         max_peers = cfg.max_peers,
         max_frame = cfg.max_frame,
         token_required = shared.token.is_some(),
-        "talkyss-relay listening"
+        "hexatalk-relay listening"
     );
 
     loop {

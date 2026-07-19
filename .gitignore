@@ -44,6 +44,8 @@ Desktop.ini
 .claude/
 
 /.agents
-/crates/talkyss-mobile/target
-/server/talkyss-relay/target
+/crates/hexatalk-mobile/target
+/server/hexatalk-relay/target
 /installer/Output
+/crates/hexatalk-mobile/target
+/server/hexatalk-relay/target

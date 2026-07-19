@@ -3,7 +3,7 @@ import { mutation, internalMutation, query, MutationCtx, QueryCtx } from "./_gen
 import { currentUser } from "./session";
 import { Doc, Id } from "./_generated/dataModel";
 import { conversationAllowsStorage } from "./prefs";
-import { Perm, channelPermissions } from "./roles";
+import { Perm, channelPermissions, requirePerm } from "./roles";
 
 async function requireMembership(
   ctx: QueryCtx | MutationCtx,
@@ -598,6 +598,13 @@ export const clearConversation = mutation({
   handler: async (ctx, args) => {
     const me = await currentUser(ctx, args.sessionToken);
     await requireMembership(ctx, args.conversationId, me._id);
+
+    // Wiping a whole server channel's history is a destructive manage
+    // action — plain members may only clear their own DMs / groups.
+    const conversation = await ctx.db.get("conversations", args.conversationId);
+    if (conversation?.kind === "channel" && conversation.serverId) {
+      await requirePerm(ctx, conversation.serverId, me._id, Perm.MANAGE_CHANNELS);
+    }
 
     const batch = await ctx.db
       .query("messages")

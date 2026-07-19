@@ -5,7 +5,7 @@
 //! set BOT_USERNAME=bot_helper
 //! set BOT_TOKEN=tbot_…
 //! set CHANNEL_ID=j….
-//! cargo run -p talkyss-bot --example echo
+//! cargo run -p hexatalk-bot --example echo
 //! ```
 
 use std::collections::HashSet;
@@ -20,7 +20,7 @@ async fn main() -> Result<()> {
     let token = env::var("BOT_TOKEN")?;
     let channel = env::var("CHANNEL_ID")?;
 
-    let mut bot = talkyss_bot::Bot::login(&url, &username, &token).await?;
+    let mut bot = hexatalk_bot::Bot::login(&url, &username, &token).await?;
     println!("logged in as {} (@{})", bot.display_name, bot.username);
     println!("watching channel {channel}");
 

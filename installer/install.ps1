@@ -1,5 +1,5 @@
-# Talkyss zero-dependency installer (no Inno Setup needed).
-# Copies Talkyss.exe into %LOCALAPPDATA%\Programs\Talkyss, creates Start Menu
+# HexaTalk zero-dependency installer (no Inno Setup needed).
+# Copies HexaTalk.exe into %LOCALAPPDATA%\Programs\HexaTalk, creates Start Menu
 # (+ optional Desktop) shortcuts and registers the uninstaller under HKCU.
 #
 # Usage:
@@ -7,27 +7,27 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File installer\install.ps1 -Autostart -DesktopIcon
 #   powershell -NoProfile -ExecutionPolicy Bypass -File installer\install.ps1 -Uninstall
 #
-# After install Talkyss updates ITSELF automatically; this script is only
+# After install HexaTalk updates ITSELF automatically; this script is only
 # needed for the first-time setup.
 
 [CmdletBinding()]
 param(
-    [string]$SourceExe = "target\release\Talkyss.exe",
+    [string]$SourceExe = "target\release\HexaTalk.exe",
     [switch]$DesktopIcon,
     [switch]$Autostart,
     [switch]$Uninstall
 )
 
 $ErrorActionPreference = "Stop"
-$AppName = "Talkyss"
+$AppName = "HexaTalk"
 $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\$AppName"
-$ExePath = Join-Path $InstallDir "Talkyss.exe"
+$ExePath = Join-Path $InstallDir "HexaTalk.exe"
 $StartMenuDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$AppName"
 $UninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$AppName"
 $RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 
-function Stop-Talkyss {
-    Get-Process -Name "Talkyss" -ErrorAction SilentlyContinue | Stop-Process -Force
+function Stop-HexaTalk {
+    Get-Process -Name "HexaTalk" -ErrorAction SilentlyContinue | Stop-Process -Force
 }
 
 function New-Shortcut([string]$Path, [string]$Target) {
@@ -41,7 +41,7 @@ function New-Shortcut([string]$Path, [string]$Target) {
 
 if ($Uninstall) {
     Write-Host "Uninstalling $AppName..."
-    Stop-Talkyss
+    Stop-HexaTalk
     Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item $StartMenuDir -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item (Join-Path $env:USERPROFILE "Desktop\$AppName.lnk") -Force -ErrorAction SilentlyContinue
@@ -54,17 +54,17 @@ if ($Uninstall) {
 # Resolve the exe to install: parameter, next to this script, or repo build.
 $candidates = @(
     $SourceExe,
-    (Join-Path $PSScriptRoot "Talkyss.exe"),
-    (Join-Path $PSScriptRoot "..\target\release\Talkyss.exe")
+    (Join-Path $PSScriptRoot "HexaTalk.exe"),
+    (Join-Path $PSScriptRoot "..\target\release\HexaTalk.exe")
 )
 $Source = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $Source) {
-    throw "Talkyss.exe not found. Build it first (cargo build --release) or pass -SourceExe <path>."
+    throw "HexaTalk.exe not found. Build it first (cargo build --release) or pass -SourceExe <path>."
 }
 $Source = (Resolve-Path $Source).Path
 
 Write-Host "Installing $AppName from $Source"
-Stop-Talkyss
+Stop-HexaTalk
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 New-Item -ItemType Directory -Force -Path $StartMenuDir | Out-Null

@@ -143,6 +143,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hexatalk-relay"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "pico-args",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "http"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -375,18 +387,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "talkyss-relay"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "pico-args",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

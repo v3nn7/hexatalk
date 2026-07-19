@@ -1,4 +1,4 @@
-# Talkyss Mobile (Rust / egui)
+# HexaTalk Mobile (Rust / egui)
 
 Natywny klient Android w **Rust** — ten sam Convex co desktop, bez lagów Jetpack Compose.
 
@@ -6,10 +6,10 @@ Natywny klient Android w **Rust** — ten sam Convex co desktop, bez lagów Jetp
 
 | Co | Gdzie |
 |----|--------|
-| **APK (arm64)** | `target/release/apk/Talkyss.apk` (~4 MB) |
-| Kod | `crates/talkyss-mobile/` |
+| **APK (arm64)** | `target/release/apk/HexaTalk.apk` (~4 MB) |
+| Kod | `crates/hexatalk-mobile/` |
 
-Package id: `com.talkyss.mobile` (osobny od starego Kotlin `com.talkyss.android`).
+Package id: `com.hexatalk.mobile` (osobny od starego Kotlin `com.talkyss.android`).
 
 ## Funkcje
 
@@ -26,10 +26,10 @@ $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
 $env:ANDROID_NDK_ROOT = (Get-ChildItem "$env:ANDROID_HOME\ndk" | Sort-Object Name -Descending | Select-Object -First 1).FullName
 $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
 
-cd crates\talkyss-mobile
+cd crates\hexatalk-mobile
 cargo apk build --release --target aarch64-linux-android
 
-adb install -r target\release\apk\Talkyss.apk
+adb install -r target\release\apk\HexaTalk.apk
 ```
 
 Wymaga: NDK, `rustup target add aarch64-linux-android`, `cargo install cargo-apk`.
@@ -37,7 +37,7 @@ Wymaga: NDK, `rustup target add aarch64-linux-android`, `cargo install cargo-apk
 ## Preview UI na Windows
 
 ```powershell
-cd crates\talkyss-mobile
+cd crates\hexatalk-mobile
 cargo run --example desktop
 ```
 

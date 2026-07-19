@@ -36,6 +36,7 @@ export const listUsers = query({
  * - Cannot demote yourself
  * - Pinned owner (v3nn7) rank is permanent — cannot be changed
  * - Cannot assign "owner" via panel (only pinned list / code)
+ * - Granting/revoking "admin" is owner-only; admins manage users/moderators
  * - Moderators cannot set roles at all
  */
 export const setRole = mutation({
@@ -65,13 +66,16 @@ export const setRole = mutation({
       throw new Error("Owner rank is permanent and cannot be removed");
     }
 
-    if (platformRank(target) > platformRank(admin)) {
-      throw new Error("You can't change someone of higher rank");
+    // Equal rank is off-limits too: admins manage regular users and
+    // moderators, never other admins — only the owner outranks an admin.
+    if (platformRank(target) >= platformRank(admin)) {
+      throw new Error("You can't change someone of equal or higher rank");
     }
 
-    // Only owner can grant admin (admins can grant mod/user).
-    if (args.role === "admin" && admin.role !== "owner" && admin.role !== "admin") {
-      throw new Error("Only admins can grant admin");
+    // Granting the admin rank is owner-only (revoking it is covered by
+    // the rank check above, since only the owner outranks an admin).
+    if (args.role === "admin" && platformRole(admin) !== "owner") {
+      throw new Error("Only the instance owner can grant admin");
     }
 
     await ctx.db.patch("users", args.userId, { role: args.role });

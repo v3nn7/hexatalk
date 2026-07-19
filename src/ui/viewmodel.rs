@@ -11,8 +11,8 @@ use crate::media::screenshare;
 use crate::slint_ui as ui;
 use crate::state::types::{
     AdminUserRow, BlockedUser, ChannelSummary, ChatMessage, ConversationSummary, Friend,
-    FriendSuggestion, IncomingRequest, OutgoingRequest, PeopleHit, ServerMemberRow, ServerSummary,
-    is_online,
+    FriendSuggestion, IncomingRequest, MessageReport, OutgoingRequest, PeopleHit, ServerMemberRow,
+    ServerSummary, is_online,
 };
 use crate::ui::mentions;
 use crate::ui::utils::{format_day, format_relative_time, format_time, presence_label};
@@ -393,6 +393,7 @@ pub(crate) fn chat_message_rows(
     is_admin: bool,
     my_names: &[String],
     everyone_allowed: bool,
+    reporting_message_id: Option<&str>,
 ) -> Vec<ui::ChatMessageRow> {
     let mut rows = Vec::new();
     let mut last_author: Option<String> = None;
@@ -445,6 +446,8 @@ pub(crate) fn chat_message_rows(
                 can_delete: false,
                 can_purge: false,
                 can_react: false,
+                can_report: false,
+                reporting: false,
                 mentions_me: false,
                 mentions_everyone: false,
                 ping_label: "".into(),
@@ -479,6 +482,8 @@ pub(crate) fn chat_message_rows(
                 can_delete,
                 can_purge,
                 can_react: false,
+                can_report: false,
+                reporting: false,
                 mentions_me: false,
                 mentions_everyone: false,
                 ping_label: "".into(),
@@ -563,12 +568,36 @@ pub(crate) fn chat_message_rows(
             can_delete,
             can_purge,
             can_react,
+            can_report: !mine && !deleted_visible,
+            reporting: reporting_message_id == Some(msg.id.as_str()),
             mentions_me,
             mentions_everyone,
             ping_label: ping_label.into(),
         });
     }
     rows
+}
+
+/// `reports:adminListReports` rows for the admin panel's Reports section.
+pub(crate) fn report_rows(reports: &[MessageReport]) -> Vec<ui::ReportRow> {
+    reports
+        .iter()
+        .map(|r| ui::ReportRow {
+            report_id: r.report_id.clone().into(),
+            conversation_label: r.conversation_label.clone().into(),
+            reporter_username: format!("@{}", r.reporter_username).into(),
+            author_username: format!("@{}", r.author_username).into(),
+            message_body: r.message_body.clone().into(),
+            reason: match r.reason.as_str() {
+                "spam" => "Spam",
+                "harassment" => "Harassment",
+                "illegal_content" => "Illegal content",
+                _ => "Other",
+            }
+            .into(),
+            age_label: format_relative_time(r.created_at).into(),
+        })
+        .collect()
 }
 
 /// `id` round-trips through `encode_share_target`/`decode_share_target`
@@ -622,7 +651,7 @@ mod tests {
     fn share_target_round_trips() {
         let targets = vec![
             screenshare::ShareTarget::Monitor("DISPLAY1".to_string()),
-            screenshare::ShareTarget::Window("Talkyss".to_string()),
+            screenshare::ShareTarget::Window("HexaTalk".to_string()),
             // Window titles can contain the same separator the encoding
             // uses -- the id must still decode to the original title.
             screenshare::ShareTarget::Window("window: tricky: title".to_string()),
@@ -646,7 +675,7 @@ mod tests {
     fn share_target_labels_distinguish_kinds() {
         let rows = share_target_rows(&[
             screenshare::ShareTarget::Monitor("DISPLAY1".to_string()),
-            screenshare::ShareTarget::Window("Talkyss".to_string()),
+            screenshare::ShareTarget::Window("HexaTalk".to_string()),
         ]);
         assert_eq!(rows.len(), 2);
         assert!(rows[0].label.contains("entire screen"));

@@ -1,10 +1,10 @@
-//! Bridge between Talkyss UI and the local `peerseal` crate (crates/reprotocol).
+//! Bridge between HexaTalk UI and the local `peerseal` crate (crates/reprotocol).
 //!
 //! Direct chats use peerseal for live E2E traffic (Noise + optional Railway
 //! relay). Convex only carries the invite payload for pairing — never message
 //! bodies. This module does not modify the peerseal crate.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use base64::prelude::{BASE64_STANDARD, Engine as _};
@@ -16,7 +16,7 @@ use peerseal::{
 use tokio::sync::mpsc;
 
 /// Default production relay from peerseal docs (overridable via PEERSEAL_RELAY).
-const BAKED_RELAY: &str = env!("PEERSEAL_RELAY");
+/// Baked into the binary obfuscated — see src/obf.rs and build.rs.
 
 /// Commands from the UI thread into the peerseal worker.
 #[derive(Debug)]
@@ -68,27 +68,83 @@ pub(crate) fn is_peerseal_host(local_user_id: &str, peer_user_id: &str) -> bool 
 fn peerseal_identity_path(user_id: &str) -> PathBuf {
     let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(base)
-        .join("Talkyss")
+        .join("HexaTalk")
         .join(format!("peerseal_{user_id}.key"))
 }
 
 /// Load or create a peerseal identity and return (identity, base64 public key).
+///
+/// The key file is kept DPAPI-protected at rest via the shared
+/// `crypto::write_secret_file`/`read_secret_file` helpers (`TKDP1` blob on
+/// Windows). The byte format inside the blob is unchanged
+/// (`pub_hex\npriv_hex\n` — the same layout the peerseal crate's own
+/// `Identity::save_file` writes, which `state::history` also parses), and
+/// legacy plaintext files are migrated to DPAPI on load. The crate is not
+/// modified; its file APIs are simply no longer used for this path.
 pub(crate) fn load_peerseal_identity(user_id: &str) -> Result<(Identity, String), String> {
     let path = peerseal_identity_path(user_id);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let id = Identity::load_or_create(&path).map_err(|e| e.to_string())?;
+
+    let id = if path.exists() {
+        // An existing file must never be silently regenerated: a fresh key
+        // would break every peerseal session and lock the local history
+        // vault (its key is derived from this identity's private half).
+        let bytes = crate::crypto::read_secret_file(&path)
+            .ok_or_else(|| "couldn't read the peerseal identity key".to_string())?;
+        parse_identity_file(&bytes)
+            .ok_or_else(|| "the peerseal identity key file is corrupt".to_string())?
+    } else {
+        Identity::generate().map_err(|e| e.to_string())?
+    };
+
+    // (Re)save on every load: first creation, and migrating legacy
+    // plaintext files into DPAPI blobs.
+    save_identity_file(&path, &id)?;
+    crate::crypto::tighten_secret_file_perms(&path);
+
     let public_b64 = BASE64_STANDARD.encode(id.public);
     Ok((id, public_b64))
 }
 
+fn parse_identity_file(bytes: &[u8]) -> Option<Identity> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+    let public = hex_decode_32(lines.next()?.trim())?;
+    let private = hex_decode_32(lines.next()?.trim())?;
+    Some(Identity::from_parts(private, public))
+}
+
+fn save_identity_file(path: &Path, id: &Identity) -> Result<(), String> {
+    let body = format!(
+        "{}\n{}\n",
+        hex_encode(&id.public),
+        hex_encode(&id.private)
+    );
+    crate::crypto::write_secret_file(path, body).map_err(|e| e.to_string())
+}
+
+fn hex_encode(bytes: &[u8; 32]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn hex_decode_32(s: &str) -> Option<[u8; 32]> {
+    let bytes: Vec<u8> = (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect::<Option<_>>()?;
+    bytes.try_into().ok()
+}
+
+/// Default production relay comes from `build.rs` (obfuscated in the
+/// binary, see src/obf.rs); overridable via PEERSEAL_RELAY.
 fn resolve_relay() -> Result<String, String> {
     let from_env = std::env::var("PEERSEAL_RELAY")
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    let raw = from_env.unwrap_or_else(|| BAKED_RELAY.to_string());
+    let raw = from_env.unwrap_or_else(|| crate::obf::peerseal_relay().to_string());
     normalize_relay_url(&raw).map_err(|e| e.to_string())
 }
 
@@ -163,6 +219,10 @@ async fn run_dm_session(
     let host = is_peerseal_host(&local_user_id, &peer_user_id);
     let (identity, _) = load_peerseal_identity(&local_user_id)?;
     let relay = resolve_relay()?;
+    eprintln!(
+        "[peer] session start: role={} relay={relay} peer={peer_user_id}",
+        if host { "host" } else { "guest" }
+    );
 
     let _ = emit(
         &event_tx,
@@ -306,6 +366,7 @@ async fn host_connect_with_retry(
             }
         };
         if !published {
+            eprintln!("[peer] host: invite publish failed: {last_err}");
             let _ = emit(
                 event_tx,
                 PeerEvent::Status(format!("Invite publish failed: {last_err}")),
@@ -357,9 +418,13 @@ async fn host_connect_with_retry(
         };
 
         match result {
-            Ok(session) => return Ok(session),
+            Ok(session) => {
+                eprintln!("[peer] host: peer joined the room (attempt {attempt})");
+                return Ok(session);
+            }
             Err(e) => {
                 last_err = e.to_string();
+                eprintln!("[peer] host: accept failed (attempt {attempt}): {last_err}");
                 let friendly = humanize_relay_error(&last_err);
                 let _ = emit(event_tx, PeerEvent::Status(friendly)).await;
                 if !is_transient_relay_error(&last_err) || attempt == max_attempts {
@@ -401,7 +466,10 @@ async fn guest_connect_with_retry(
             .await;
             loop {
                 match cmd_rx.recv().await {
-                    Some(PeerCmd::InvitePayload(p)) => break p,
+                    Some(PeerCmd::InvitePayload(p)) => {
+                        eprintln!("[peer] guest: invite received ({} chars)", p.len());
+                        break p;
+                    }
                     Some(PeerCmd::Shutdown) | None => return Err("cancelled".into()),
                     Some(PeerCmd::SendText(_))
                     | Some(PeerCmd::SendPhoto { .. })
@@ -465,9 +533,13 @@ async fn guest_connect_with_retry(
             .force_relay();
 
         match node.join_invite(invite).await {
-            Ok(session) => return Ok(session),
+            Ok(session) => {
+                eprintln!("[peer] guest: joined room (attempt {attempt})");
+                return Ok(session);
+            }
             Err(e) => {
                 last_err = e.to_string();
+                eprintln!("[peer] guest: join failed (attempt {attempt}): {last_err}");
                 let friendly = humanize_relay_error(&last_err);
                 let _ = emit(event_tx, PeerEvent::Status(friendly)).await;
                 tokio::time::sleep(Duration::from_secs(1)).await;

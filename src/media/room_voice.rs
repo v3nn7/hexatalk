@@ -97,7 +97,7 @@ fn ice_config() -> RTCConfiguration {
 
 async fn build_api() -> Result<webrtc::api::API, String> {
     let mut media_engine = MediaEngine::default();
-    // Only the Talkyss ADPCM codec (see call.rs for why: mismatched peers
+    // Only the HexaTalk ADPCM codec (see call.rs for why: mismatched peers
     // must fail negotiation, not play garbage).
     media_engine
         .register_codec(
@@ -568,7 +568,7 @@ async fn create_peer_slot(
             ..Default::default()
         },
         "audio".to_string(),
-        "talkyss-room".to_string(),
+        "hexatalk-room".to_string(),
     ));
     pc.add_track(Arc::clone(&local_track) as Arc<dyn TrackLocal + Send + Sync>)
         .await

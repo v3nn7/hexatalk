@@ -103,6 +103,26 @@ export async function memberPermissions(
   return perms;
 }
 
+/** Highest position among the member's assigned roles (0 = only the
+ * implicit @everyone role) — the member's rung on the role hierarchy. */
+export async function highestRolePosition(
+  ctx: QueryCtx | MutationCtx,
+  membership: Doc<"serverMembers">,
+): Promise<number> {
+  const allRoles = await ctx.db
+    .query("serverRoles")
+    .withIndex("by_server", (q) => q.eq("serverId", membership.serverId))
+    .take(50);
+  const assigned = new Set(assignedRoleIds(membership).map(String));
+  let highest = 0;
+  for (const role of allRoles) {
+    if (assigned.has(String(role._id))) {
+      highest = Math.max(highest, role.position);
+    }
+  }
+  return highest;
+}
+
 export async function requirePerm(
   ctx: QueryCtx | MutationCtx,
   serverId: Id<"servers">,
@@ -286,7 +306,32 @@ export const updateRole = mutation({
     const me = await currentUser(ctx, args.sessionToken);
     const role = await ctx.db.get("serverRoles", args.roleId);
     if (!role) throw new Error("Role not found");
-    await requirePerm(ctx, role.serverId, me._id, Perm.MANAGE_ROLES);
+    const { server, membership, perms } = await requirePerm(
+      ctx,
+      role.serverId,
+      me._id,
+      Perm.MANAGE_ROLES,
+    );
+
+    // Discord-style hierarchy rules; the server owner bypasses them all.
+    if (server.ownerId !== me._id) {
+      if (role.position === 0) {
+        // The implicit @everyone role is server-wide — editing it takes
+        // Manage Server, not just Manage Roles.
+        if ((perms & Perm.MANAGE_SERVER) !== Perm.MANAGE_SERVER) {
+          throw new Error("Editing the everyone role requires Manage Server");
+        }
+      } else if (role.position >= (await highestRolePosition(ctx, membership))) {
+        throw new Error("You can't edit a role at or above your highest role");
+      }
+      // Never grant permission bits you don't hold yourself.
+      if (
+        args.permissions !== undefined &&
+        (args.permissions & ALL_PERMS & ~perms) !== 0
+      ) {
+        throw new Error("You can't grant permissions you don't have");
+      }
+    }
 
     const patch: {
       name?: string;
@@ -356,7 +401,7 @@ export const toggleRole = mutation({
   },
   handler: async (ctx, args) => {
     const me = await currentUser(ctx, args.sessionToken);
-    const { server } = await requirePerm(
+    const { server, membership: myMembership } = await requirePerm(
       ctx,
       args.serverId,
       me._id,
@@ -373,6 +418,14 @@ export const toggleRole = mutation({
     const role = await ctx.db.get("serverRoles", args.roleId);
     if (!role || role.serverId !== args.serverId) {
       throw new Error("Role not found on this server");
+    }
+    // Discord-style hierarchy: you can only hand out roles below your own
+    // highest role; the server owner bypasses this.
+    if (
+      server.ownerId !== me._id &&
+      role.position >= (await highestRolePosition(ctx, myMembership))
+    ) {
+      throw new Error("You can't assign a role at or above your highest role");
     }
     const current = assignedRoleIds(membership);
     const has = current.some((id) => id === args.roleId);

@@ -1,14 +1,34 @@
 import { MutationCtx, QueryCtx } from "./_generated/server";
 import { Doc, Id } from "./_generated/dataModel";
 
+/** SHA-256 hex — duplicated from auth.ts's hashSessionToken to avoid a
+ * circular import (auth.ts already imports from this file). */
+async function hashSessionToken(token: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(token),
+  );
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 export async function currentUser(
   ctx: QueryCtx | MutationCtx,
   sessionToken: string,
 ): Promise<Doc<"users">> {
-  const session = await ctx.db
-    .query("sessions")
-    .withIndex("by_token", (q) => q.eq("token", sessionToken))
-    .unique();
+  const tokenHash = await hashSessionToken(sessionToken);
+  const session =
+    (await ctx.db
+      .query("sessions")
+      .withIndex("by_tokenHash", (q) => q.eq("tokenHash", tokenHash))
+      .unique()) ??
+    // Legacy rows written before token hashing still carry the plaintext
+    // token; match it directly.
+    (await ctx.db
+      .query("sessions")
+      .withIndex("by_token", (q) => q.eq("token", sessionToken))
+      .unique());
   if (!session || session.expiresAt < Date.now()) {
     throw new Error("Session expired, please log in again");
   }
@@ -25,7 +45,7 @@ export async function currentUser(
 export type PlatformRole = "user" | "moderator" | "admin" | "owner";
 
 /** Hard-pinned platform owners — rank cannot be stripped via the admin panel. */
-export const OWNER_USERNAMES = ["v3nn7"];
+export const OWNER_USERNAMES = ["veni"];
 
 export function isPinnedOwnerUsername(username: string): boolean {
   return OWNER_USERNAMES.includes(username.trim().toLowerCase());

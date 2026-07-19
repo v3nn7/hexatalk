@@ -1,4 +1,4 @@
-//! Talkyss mobile UI — egui immediate mode (dark green, angular).
+//! HexaTalk mobile UI — egui immediate mode (dark green, angular).
 
 use crate::convex_api::{
     AuthSession, Backend, ChannelRow, ConversationRow, FriendRow, MessageRow, NetEvent, ServerRow,
@@ -37,7 +37,7 @@ const SYS_TOP_PT: f32 = 28.0;
 /// Extra bottom inset for gesture / 3-button nav bar.
 const SYS_BOTTOM_PT: f32 = 26.0;
 
-/// Pulls the invite code out of a pasted `talkyss://invite/<code>` (or
+/// Pulls the invite code out of a pasted `hexatalk://invite/<code>` (or
 /// `https://.../invite/<code>`) link, falling back to treating the whole
 /// trimmed input as a bare code if it doesn't look like a link. Matches the
 /// desktop client's `extract_invite_code`.
@@ -69,7 +69,7 @@ enum Screen {
 /// Must match `PERM_MANAGE_CHANNELS` in desktop's src/types.rs / convex/roles.ts.
 const PERM_MANAGE_CHANNELS: u32 = 1 << 2;
 
-pub struct TalkyssApp {
+pub struct HexaTalkApp {
     backend: Arc<Backend>,
     screen: Screen,
     tab: Tab,
@@ -129,7 +129,7 @@ pub struct TalkyssApp {
     rename_channel_input: String,
 }
 
-impl TalkyssApp {
+impl HexaTalkApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         install_app_fonts(&cc.egui_ctx);
 
@@ -503,7 +503,7 @@ impl TalkyssApp {
     }
 }
 
-impl eframe::App for TalkyssApp {
+impl eframe::App for HexaTalkApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.apply_responsive_style(ctx);
         self.apply_events();
@@ -577,7 +577,7 @@ impl eframe::App for TalkyssApp {
     }
 }
 
-impl TalkyssApp {
+impl HexaTalkApp {
     fn ui_root(&mut self, ui: &mut egui::Ui) {
         match self.screen {
             Screen::Auth => self.ui_auth(ui),
@@ -665,7 +665,7 @@ impl TalkyssApp {
                     );
                     ui.add_space(self.fs(10.0));
                     ui.label(
-                        RichText::new("Talkyss")
+                        RichText::new("HexaTalk")
                             .color(TEXT)
                             .size(self.fs(24.0))
                             .strong(),
@@ -843,7 +843,7 @@ impl TalkyssApp {
                     ui.add_space(6.0);
                     ui.vertical(|ui| {
                         ui.label(
-                            RichText::new("Talkyss")
+                            RichText::new("HexaTalk")
                                 .color(TEXT)
                                 .strong()
                                 .size(self.fs(15.0)),
@@ -1376,7 +1376,7 @@ impl TalkyssApp {
                         if is_owner && !invite.is_empty() {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if ui.add(self.ghost_btn("Copy link")).clicked() {
-                                    ui.ctx().copy_text(format!("talkyss://invite/{invite}"));
+                                    ui.ctx().copy_text(format!("hexatalk://invite/{invite}"));
                                     self.status = Some("Invite link copied".into());
                                     self.status_ttl = 2.5;
                                 }
@@ -1708,7 +1708,7 @@ fn fmt_time(ms: f64) -> String {
 
 fn session_path() -> PathBuf {
     let base = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
-    base.join("talkyss-mobile").join("session.json")
+    base.join("hexatalk-mobile").join("session.json")
 }
 
 fn save_session(s: &AuthSession) {

@@ -1,17 +1,17 @@
 [workspace]
-members = [".", "crates/reprotocol", "crates/talkyss-bot"]
-# talkyss-mobile is a standalone crate (own [workspace]) so cargo-apk can build APKs.
+members = [".", "crates/reprotocol", "crates/hexatalk-bot"]
+# hexatalk-mobile is a standalone crate (own [workspace]) so cargo-apk can build APKs.
 resolver = "2"
 
 [package]
-name = "Talkyss"
+name = "HexaTalk"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 # GUI toolkit: Slint (see ui/*.slint + src/rt.rs). The old iced frontend
 # (src/view/*.rs) has been fully ported and removed.
-slint = "1.17.1"
+slint = { version = "1.17.1", features = ["unstable-winit-030"] }
 copypasta = "0.10"
 convex = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
@@ -29,10 +29,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.150"
 bytes = "1.12.1"
 rfd = "0.17.2"
-reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls", "stream"] }
 xcap = "0.9.6"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 x25519-dalek = { version = "3.0.0", features = ["static_secrets", "getrandom"] }
+# Release-signature verification for the auto-updater (src/update_check.rs).
+# 2.x matches the rand_core 0.6 already in the tree; only signature
+# verification is needed here, so keygen/pkcs8 features stay off.
+ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
 aes-gcm = "0.10"
 hkdf = "0.13.0"
 sha2 = "0.11.0"
@@ -45,7 +49,7 @@ peerseal = { path = "crates/reprotocol" }
 rustls = { version = "0.23.42", default-features = false, features = ["std", "tls12", "ring"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_Diagnostics_Debug", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_Media_Multimedia"] }
+windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_Media_Multimedia", "Win32_Security_Cryptography"] }
 
 # The tray icon needs a live event loop on whatever thread owns it: a Win32
 # message loop on Windows, a GTK/glib main loop on Linux (see src/tray.rs).

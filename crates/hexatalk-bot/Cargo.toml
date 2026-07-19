@@ -1,8 +1,8 @@
 [package]
-name = "talkyss-bot"
+name = "hexatalk-bot"
 version = "0.1.0"
 edition = "2021"
-description = "Headless Talkyss bot SDK (Convex-backed)"
+description = "Headless HexaTalk bot SDK (Convex-backed)"
 license = "MIT"
 
 [dependencies]

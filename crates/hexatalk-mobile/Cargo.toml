@@ -1,15 +1,15 @@
-# Standalone workspace so `cargo apk` works (parent Talkyss workspace is ignored).
+# Standalone workspace so `cargo apk` works (parent HexaTalk workspace is ignored).
 [workspace]
 
 [package]
-name = "talkyss-mobile"
+name = "hexatalk-mobile"
 version = "0.2.0"
 edition = "2021"
-description = "Talkyss mobile client — native Rust (egui), same Convex backend as desktop"
+description = "HexaTalk mobile client — native Rust (egui), same Convex backend as desktop"
 publish = false
 
 [lib]
-name = "talkyss_mobile"
+name = "hexatalk_mobile"
 # cdylib for Android NativeActivity; rlib for desktop example linking.
 crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
@@ -47,8 +47,8 @@ jni = "0.21"
 ndk-context = "0.1"
 
 [package.metadata.android]
-package = "com.talkyss.mobile"
-apk_name = "Talkyss"
+package = "com.hexatalk.mobile"
+apk_name = "HexaTalk"
 build_targets = ["aarch64-linux-android"]
 
 [package.metadata.android.sdk]
@@ -62,7 +62,7 @@ name = "android.permission.INTERNET"
 name = "android.permission.ACCESS_NETWORK_STATE"
 
 [package.metadata.android.application]
-label = "Talkyss"
+label = "HexaTalk"
 
 # Same idea as the Kotlin app: debug keystore for local release installs.
 [package.metadata.android.signing.release]

@@ -29,18 +29,22 @@ component RailButton inherits Rectangle {
         }
     }
 
-    if root.active: Rectangle {
+    // Discord-style left pill: full-height spine when active, a shorter
+    // stub on hover, collapsed (invisible) otherwise.
+    Rectangle {
         x: 0;
         y: (parent.height - self.height) / 2;
         width: 3px;
-        height: 32px;
+        height: root.active ? 32px : (touch.has-hover ? 18px : 0px);
         background: Theme.accent;
+        animate height { duration: 120ms; }
     }
 
+    // Unread/mention badge pinned to the bottom-right corner like Discord.
     if root.badge > 0: Badge {
         text: root.badge > 9 ? "9+" : root.badge;
         x: parent.width - self.width;
-        y: 0;
+        y: parent.height - self.height;
     }
 }
 
@@ -83,7 +87,7 @@ export component ServerRail inherits Rectangle {
             badge: root.unread_count;
             clicked => { root.go_home(); }
             Image {
-                source: @image-url("../assets/textures/talkyssicon.png");
+                source: @image-url("../assets/textures/hexatalkicon.png");
                 width: 32px;
                 height: 32px;
                 image-fit: ImageFit.cover;
@@ -121,7 +125,7 @@ export component ServerRail inherits Rectangle {
                 text: "+";
                 font-size: 22px;
                 font-family: Theme.font-medium;
-                color: root.add_menu_open ? #050d05 : Theme.accent;
+                color: Theme.accent;
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }

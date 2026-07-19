@@ -117,6 +117,9 @@ export component ChatArea inherits Rectangle {
     callback delete(string);
     callback purge(string);
     callback open_attachment(string);
+    callback report(string);
+    callback report_reason(string, string, string);
+    callback report_cancel(string);
     callback voice_volume_changed(string, float);
 
     background: Theme.bg-primary;
@@ -160,7 +163,7 @@ export component ChatArea inherits Rectangle {
                 }
             }
             Text {
-                text: "Welcome to Talkyss";
+                text: "Welcome to HexaTalk";
                 font-size: 28px;
                 color: Theme.text-primary;
                 horizontal-alignment: center;
@@ -203,7 +206,7 @@ export component ChatArea inherits Rectangle {
             border-width: 1px;
             border-color: Theme.border;
             HorizontalLayout {
-                padding: 18px;
+                padding: 16px;
                 spacing: 12px;
                 // No `alignment: start` -- same story as the composer row
                 // and the rail (see their comments): it disabled the
@@ -230,7 +233,7 @@ export component ChatArea inherits Rectangle {
                 }
                 Text {
                     text: root.peer_title;
-                    font-size: 17px;
+                    font-size: Theme.text-lg;
                     font-family: Theme.font-medium;
                     color: Theme.text-primary;
                     vertical-alignment: center;
@@ -328,7 +331,7 @@ export component ChatArea inherits Rectangle {
                     Slider {
                         horizontal-stretch: 1;
                         minimum: 0;
-                        maximum: 2;
+                        maximum: 5;
                         value: u.volume;
                         changed(v) => { root.voice_volume_changed(u.user_id, v); }
                     }
@@ -358,6 +361,9 @@ export component ChatArea inherits Rectangle {
                     delete(id) => { root.delete(id); }
                     purge(id) => { root.purge(id); }
                     open_attachment(url) => { root.open_attachment(url); }
+                    report(id) => { root.report(id); }
+                    report_reason(id, body, reason) => { root.report_reason(id, body, reason); }
+                    report_cancel(id) => { root.report_cancel(id); }
                 }
             }
         }
@@ -376,6 +382,13 @@ export component ChatArea inherits Rectangle {
                     font-size: 11px;
                     font-family: Theme.font-medium;
                     color: Theme.accent;
+                }
+
+                if root.is_editing: Text {
+                    text: "▌ editing message";
+                    font-size: 11px;
+                    font-family: Theme.font-medium;
+                    color: Theme.warning;
                 }
 
                 if root.has_pending_reply: Rectangle {
@@ -506,7 +519,8 @@ export component ChatArea inherits Rectangle {
                         text: ">";
                         font-size: 16px;
                         font-family: Theme.font-medium;
-                        color: Theme.accent;
+                        color: composer_input.has-focus ? Theme.accent : Theme.accent-dim;
+                        animate color { duration: 120ms; }
                         vertical-alignment: center;
                         horizontal-stretch: 0;
                     }
@@ -548,7 +562,9 @@ export component ChatArea inherits Rectangle {
                     }
                     PrimaryButton {
                         text: root.send_label;
-                        enabled: root.crypto_ready;
+                        // Empty sends are a no-op in Rust (body trimmed,
+                        // attachment-only allowed) -- reflect that in the UI.
+                        enabled: root.crypto_ready && (root.message_input != "" || root.has_pending_attachment);
                         width: 90px;
                         clicked => { root.send(); }
                     }

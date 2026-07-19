@@ -5,6 +5,23 @@ import { Theme } from "theme.slint";
 import { Avatar, ResizeHandle } from "widgets.slint";
 import { MemberRow } from "chat_types.slint";
 
+// Uniform group header (ONLINE / OFFLINE / BOTS): fixed-height band with
+// the label aligned to the row content below it.
+component MemberSectionHeader inherits Rectangle {
+    in property <string> text;
+    in property <color> label-color: Theme.text-muted;
+    height: 24px;
+    Text {
+        x: 10px;
+        text: root.text;
+        font-size: Theme.text-xs;
+        font-family: Theme.font-medium;
+        letter-spacing: 1px;
+        color: root.label-color;
+        vertical-alignment: center;
+    }
+}
+
 component MemberEntry inherits Rectangle {
     in property <MemberRow> m;
     callback open_profile(string);
@@ -16,7 +33,10 @@ component MemberEntry inherits Rectangle {
         clicked => { root.open_profile(m.user_id); }
     }
     content := HorizontalLayout {
-        padding: 4px;
+        padding-left: 10px;
+        padding-right: 4px;
+        padding-top: 4px;
+        padding-bottom: 4px;
         spacing: 8px;
         alignment: start;
         Avatar {
@@ -27,6 +47,8 @@ component MemberEntry inherits Rectangle {
             show-presence: true;
             online: m.online;
             vertical-stretch: 0;
+            // Offline members dim like Discord; the name below is already muted.
+            opacity: m.online ? 1.0 : 0.5;
         }
         VerticalLayout {
             spacing: 1px;
@@ -139,11 +161,13 @@ export component MembersDrawer inherits HorizontalLayout {
                 viewport-height: members_col.preferred-height;
                 members_col := VerticalLayout {
                     width: parent.width;
-                    if root.online_members.length > 0: Text { text: "ONLINE — \{root.online_members.length}"; font-size: Theme.text-xs; font-family: Theme.font-medium; color: Theme.online; }
+                    if root.online_members.length > 0: MemberSectionHeader { text: "ONLINE — \{root.online_members.length}"; label-color: Theme.online; }
                     for m in root.online_members: MemberEntry { m: m; open_profile(id) => { root.open_profile(id); } }
-                    if root.offline_members.length > 0: Text { text: "OFFLINE — \{root.offline_members.length}"; font-size: Theme.text-xs; font-family: Theme.font-medium; color: Theme.text-muted; }
+                    if root.offline_members.length > 0: Rectangle { height: 6px; }
+                    if root.offline_members.length > 0: MemberSectionHeader { text: "OFFLINE — \{root.offline_members.length}"; }
                     for m in root.offline_members: MemberEntry { m: m; open_profile(id) => { root.open_profile(id); } }
-                    if root.bot_members.length > 0: Text { text: "BOTS — \{root.bot_members.length}"; font-size: Theme.text-xs; font-family: Theme.font-medium; color: Theme.accent; }
+                    if root.bot_members.length > 0: Rectangle { height: 6px; }
+                    if root.bot_members.length > 0: MemberSectionHeader { text: "BOTS — \{root.bot_members.length}"; label-color: Theme.accent; }
                     for m in root.bot_members: MemberEntry { m: m; open_profile(id) => { root.open_profile(id); } }
                 }
             }

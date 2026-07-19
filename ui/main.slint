@@ -10,6 +10,7 @@ import "../assets/fonts/Roboto-Medium.ttf";
 import { Theme } from "theme.slint";
 import { StatsChip, TextInputField } from "widgets.slint";
 import { AuthScreen, AuthMode } from "auth.slint";
+import { EmailVerifyScreen } from "email_verify.slint";
 import { ServerRail } from "rail.slint";
 import { Sidebar, SidebarTab } from "sidebar.slint";
 import { ChatArea } from "chat_area.slint";
@@ -25,15 +26,15 @@ import {
 import {
     ServerRow, ConversationRow, FriendRow, IncomingRequestRow, OutgoingRequestRow,
     PeopleHitRow, SuggestionRow, BlockedRow, ChannelRow, AdminUserRow, GroupCandidateRow,
-    ChatMessageRow, MemberRow, ShareTargetRow, RoleTagRow, VoiceUserVolumeRow,
+    ChatMessageRow, MemberRow, ShareTargetRow, RoleTagRow, VoiceUserVolumeRow, ReportRow,
 } from "chat_types.slint";
 
 export { AuthMode, SidebarTab }
 
-export enum Screen { Auth, Chat, Profile, Settings, ServerSettings }
+export enum Screen { Auth, EmailVerify, Chat, Profile, Settings, ServerSettings }
 
 export component AppWindow inherits Window {
-    title: "Talkyss";
+    title: "HexaTalk";
     background: Theme.bg-primary;
     preferred-width: 1180px;
     preferred-height: 760px;
@@ -48,6 +49,7 @@ export component AppWindow inherits Window {
     in-out property <string> username-input;
     in-out property <string> password-input;
     in-out property <string> display-name-input;
+    in-out property <string> email-input;
     in property <string> auth-error;
     in property <bool> auth-busy;
     in property <string> connect-status;
@@ -57,6 +59,7 @@ export component AppWindow inherits Window {
     callback auth-username-changed(string);
     callback auth-password-changed(string);
     callback auth-display-name-changed(string);
+    callback auth-email-changed(string);
     callback auth-submit;
 
     // Passive, always-present sizing reference: a plain child of Window
@@ -81,6 +84,7 @@ export component AppWindow inherits Window {
         username-input <=> root.username-input;
         password-input <=> root.password-input;
         display-name-input <=> root.display-name-input;
+        email-input <=> root.email-input;
         auth-error: root.auth-error;
         auth-busy: root.auth-busy;
         connect-status: root.connect-status;
@@ -90,6 +94,37 @@ export component AppWindow inherits Window {
         username-edited(text) => { root.auth-username-changed(text); }
         password-edited(text) => { root.auth-password-changed(text); }
         display-name-edited(text) => { root.auth-display-name-changed(text); }
+        email-edited(text) => { root.auth-email-changed(text); }
+    }
+
+    // ==================== Email verification gate ====================
+    in-out property <string> email-verify-input;
+    in-out property <string> email-verify-code-input;
+    in property <bool> email-verify-code-sent: false;
+    in property <string> email-verify-error;
+    in property <bool> email-verify-busy: false;
+
+    callback email-verify-email-changed(string);
+    callback email-verify-send-code;
+    callback email-verify-code-changed(string);
+    callback email-verify-submit-code;
+    callback email-verify-change-email;
+    callback email-verify-log-out;
+
+    if root.current-screen == Screen.EmailVerify: EmailVerifyScreen {
+        width: size_ref.width;
+        height: size_ref.height;
+        email-input <=> root.email-verify-input;
+        code-input <=> root.email-verify-code-input;
+        code-sent: root.email-verify-code-sent;
+        verify-error: root.email-verify-error;
+        verify-busy: root.email-verify-busy;
+        email-edited(text) => { root.email-verify-email-changed(text); }
+        send-code => { root.email-verify-send-code(); }
+        code-edited(text) => { root.email-verify-code-changed(text); }
+        verify-code => { root.email-verify-submit-code(); }
+        change-email => { root.email-verify-change-email(); }
+        log-out => { root.email-verify-log-out(); }
     }
 
     // ==================== Profile screen ====================
@@ -570,6 +605,9 @@ export component AppWindow inherits Window {
     in property <int> chat_admin_banned: 0;
     in property <int> chat_admin_bots: 0;
     in property <int> chat_admin_servers: 0;
+    in property <[ReportRow]> chat_admin_reports: [];
+    in property <string> chat_admin_reports_status;
+    callback chat_admin_resolve_report(string, string);
     in property <string> chat_my_display_name;
     in property <string> chat_my_initial;
     in property <color> chat_my_avatar_color: Theme.accent;
@@ -681,6 +719,9 @@ export component AppWindow inherits Window {
     callback chat_delete(string);
     callback chat_purge(string);
     callback chat_open_attachment(string);
+    callback chat_report(string);
+    callback chat_report_reason(string, string, string);
+    callback chat_report_cancel(string);
     callback chat_voice_volume_changed(string, float);
 
     // ---- Members drawer ----
@@ -843,6 +884,9 @@ export component AppWindow inherits Window {
                 admin_banned: root.chat_admin_banned;
                 admin_bots: root.chat_admin_bots;
                 admin_servers: root.chat_admin_servers;
+                admin_reports: root.chat_admin_reports;
+                admin_reports_status: root.chat_admin_reports_status;
+                admin_resolve_report(id, status) => { root.chat_admin_resolve_report(id, status); }
                 my_display_name: root.chat_my_display_name;
                 my_initial: root.chat_my_initial;
                 my_avatar_color: root.chat_my_avatar_color;
@@ -958,6 +1002,9 @@ export component AppWindow inherits Window {
                 delete(id) => { root.chat_delete(id); }
                 purge(id) => { root.chat_purge(id); }
                 open_attachment(url) => { root.chat_open_attachment(url); }
+                report(id) => { root.chat_report(id); }
+                report_reason(id, body, reason) => { root.chat_report_reason(id, body, reason); }
+                report_cancel(id) => { root.chat_report_cancel(id); }
                 voice_volume_changed(id, v) => { root.chat_voice_volume_changed(id, v); }
             }
 
@@ -1056,6 +1103,7 @@ export component AppWindow inherits Window {
                         for r[i] in root.command_palette_results: Rectangle {
                             height: 40px;
                             background: rt.has-hover ? Theme.bg-hover : transparent;
+                            animate background { duration: 120ms; }
                             rt := TouchArea { clicked => { root.command_palette_pick(i); } }
                             Text {
                                 x: 8px;

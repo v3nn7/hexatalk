@@ -1449,6 +1449,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "hexatalk-mobile"
+version = "0.2.0"
+dependencies = [
+ "android_logger",
+ "anyhow",
+ "dirs",
+ "eframe",
+ "egui",
+ "env_logger",
+ "jni 0.21.1",
+ "log",
+ "ndk-context",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "winit",
+]
+
+[[package]]
 name = "http"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3166,26 +3186,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "talkyss-mobile"
-version = "0.2.0"
-dependencies = [
- "android_logger",
- "anyhow",
- "dirs",
- "eframe",
- "egui",
- "env_logger",
- "jni 0.21.1",
- "log",
- "ndk-context",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "winit",
 ]
 
 [[package]]

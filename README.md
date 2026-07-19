@@ -1,4 +1,4 @@
-# Talkyss
+# HexaTalk
 
 Natywny komunikator desktop (Rust + **Slint**) z realtime bazą
 [Convex](https://convex.dev). Dodatkowo: mobile Android (egui), bot SDK,
@@ -35,12 +35,12 @@ P2P **peerseal** (E2EE), WebRTC głos / screen share, serwery w stylu Discord.
 - SAS / fingerprint peerseal w DM
 
 ### Mobile + infra
-- Android crate (`crates/talkyss-mobile`) — chat, friends, servers
+- Android crate (`crates/hexatalk-mobile`) — chat, friends, servers
 - `push:registerToken` + `push:tokensForConversationNotify` (FCM/APNs keys w Convex env)
 - Auto-update check, tray, installer
 
 ### Boty
-- Headless `talkyss-bot` SDK (login token, send to channels)
+- Headless `hexatalk-bot` SDK (login token, send to channels)
 
 ## Struktura
 
@@ -50,9 +50,9 @@ P2P **peerseal** (E2EE), WebRTC głos / screen share, serwery w stylu Discord.
 | `src/` | Desktop app (Slint UI, WebRTC, peerseal, tray) |
 | `ui/*.slint` | GUI |
 | `crates/reprotocol` | peerseal P2P (nie edytować — tylko integrować) |
-| `crates/talkyss-bot` | Bot SDK |
-| `crates/talkyss-mobile` | Android client |
-| `server/talkyss-relay` | Relay peerseal |
+| `crates/hexatalk-bot` | Bot SDK |
+| `crates/hexatalk-mobile` | Android client |
+| `server/hexatalk-relay` | Relay peerseal |
 
 ## Uruchomienie
 
@@ -62,7 +62,7 @@ npx convex dev   # terminal 1 — wdraża schema + functions
 cargo run        # terminal 2 — desktop
 ```
 
-Mobile APK: zobacz `crates/talkyss-mobile/README.md`.
+Mobile APK: zobacz `crates/hexatalk-mobile/README.md`.
 
 ## Nowe API (skrót)
 

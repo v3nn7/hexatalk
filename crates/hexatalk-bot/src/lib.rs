@@ -1,10 +1,10 @@
-//! Talkyss headless bot SDK.
+//! HexaTalk headless bot SDK.
 //!
 //! Bots log in with a token (no GUI), join servers by invitation from a human
 //! owner, and post to text channels they can see.
 //!
 //! ```ignore
-//! let bot = talkyss_bot::Bot::login(&url, "bot_helper", "tbot_…").await?;
+//! let bot = hexatalk_bot::Bot::login(&url, "bot_helper", "tbot_…").await?;
 //! bot.send_message(&channel_id, "hello").await?;
 //! ```
 
@@ -16,13 +16,25 @@ use futures::StreamExt;
 use maplit::btreemap;
 use serde::Deserialize;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Bot {
     client: ConvexClient,
     session_token: String,
     pub bot_id: String,
     pub username: String,
     pub display_name: String,
+}
+
+// `ConvexClient` doesn't implement `Debug`, so a manual no-op-ish impl keeps
+// `Bot` printable for logging without leaking the session token.
+impl std::fmt::Debug for Bot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Bot")
+            .field("bot_id", &self.bot_id)
+            .field("username", &self.username)
+            .field("display_name", &self.display_name)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

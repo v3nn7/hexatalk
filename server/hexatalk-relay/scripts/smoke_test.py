@@ -1,4 +1,4 @@
-"""Raw-socket WebSocket smoke test for talkyss-relay (no external deps).
+"""Raw-socket WebSocket smoke test for hexatalk-relay (no external deps).
 
 Verifies the exact protocol the peerseal client expects:
   - plain HTTP endpoints (/healthz, /v1/limits)

@@ -575,7 +575,7 @@ export const blockUser = mutation({
     const target = await ctx.db.get("users", args.userId);
     if (!target) throw new Error("User not found");
     if (isProtectedTarget(target)) {
-      throw new Error("You can't block Talkyss staff");
+      throw new Error("You can't block HexaTalk staff");
     }
     if (platformRank(target) >= platformRank(me) && platformRank(target) >= 50) {
       throw new Error("You can't block staff at your rank or higher");

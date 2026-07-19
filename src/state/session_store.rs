@@ -29,7 +29,7 @@ pub(super) fn connect_task(deployment_url: String) -> Task<Message> {
 fn session_file_path() -> std::path::PathBuf {
     let base = env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
     std::path::Path::new(&base)
-        .join("Talkyss")
+        .join("HexaTalk")
         .join("session.txt")
 }
 
@@ -38,12 +38,14 @@ pub(super) fn save_session_to_disk(session: &Session) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(&path, &session.token);
+    let _ = crypto::write_secret_file(&path, &session.token);
 }
 
 pub(super) fn load_session_token_from_disk() -> Option<String> {
-    std::fs::read_to_string(session_file_path())
-        .ok()
+    let path = session_file_path();
+    crypto::tighten_secret_file_perms(&path);
+    crypto::read_secret_file(&path)
+        .and_then(|b| String::from_utf8(b).ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
@@ -52,17 +54,17 @@ pub(super) fn clear_session_file() {
     let _ = std::fs::remove_file(session_file_path());
 }
 
-pub(super) fn talkyss_data_dir() -> std::path::PathBuf {
+pub(super) fn hexatalk_data_dir() -> std::path::PathBuf {
     let base = env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-    std::path::Path::new(&base).join("Talkyss")
+    std::path::Path::new(&base).join("HexaTalk")
 }
 
 fn identity_key_path(user_id: &str) -> std::path::PathBuf {
-    talkyss_data_dir().join(format!("identity_{user_id}.key"))
+    hexatalk_data_dir().join(format!("identity_{user_id}.key"))
 }
 
 fn panel_prefs_path() -> std::path::PathBuf {
-    talkyss_data_dir().join("panel_prefs.txt")
+    hexatalk_data_dir().join("panel_prefs.txt")
 }
 
 /// Loads (channel_list_width, members_panel_preferred_width), falling back
@@ -98,8 +100,13 @@ pub(super) fn save_panel_prefs(channel_list_width: f32, members_panel_preferred_
 /// file; only its public half is ever sent to the server.
 fn load_or_create_identity_key(user_id: &str) -> crypto::IdentityKeyPair {
     let path = identity_key_path(user_id);
-    if let Ok(bytes) = std::fs::read(&path) {
+    crypto::tighten_secret_file_perms(&path);
+    if let Some(bytes) = crypto::read_secret_file(&path) {
         if let Ok(raw) = <[u8; 32]>::try_from(bytes.as_slice()) {
+            // The identity key is written only once (at creation), so a
+            // legacy plaintext file would never migrate on its own --
+            // re-save through the DPAPI-aware writer on every load.
+            let _ = crypto::write_secret_file(&path, raw);
             return crypto::IdentityKeyPair::from_bytes(raw);
         }
     }
@@ -108,6 +115,6 @@ fn load_or_create_identity_key(user_id: &str) -> crypto::IdentityKeyPair {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(&path, key.to_bytes());
+    let _ = crypto::write_secret_file(&path, key.to_bytes());
     key
 }

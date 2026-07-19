@@ -5,9 +5,14 @@ export default defineSchema({
   users: defineTable({
     username: v.string(),
     displayName: v.string(),
-    salt: v.string(),
-    passwordHash: v.string(),
-    // Platform role: user < moderator < admin < owner (Talkyss hierarchy).
+    // Legacy local-password fields — unset for accounts created after the
+    // Clerk migration; left on old rows rather than backfilled/dropped.
+    salt: v.optional(v.string()),
+    passwordHash: v.optional(v.string()),
+    // Clerk user id ("sub" claim). Set on first Clerk sign-in, either on a
+    // freshly created row or linked onto a pre-Clerk row matched by username.
+    clerkId: v.optional(v.string()),
+    // Platform role: user < moderator < admin < owner (HexaTalk hierarchy).
     role: v.optional(
       v.union(
         v.literal("user"),
@@ -49,17 +54,36 @@ export default defineSchema({
         v.literal("invisible"),
       ),
     ),
-    // Talkyss bots are users without GUI; marked in the client as *bot.
+    // HexaTalk bots are users without GUI; marked in the client as *bot.
     isBot: v.optional(v.boolean()),
     // Human owner who created the bot (only for isBot users).
     botOwnerId: v.optional(v.id("users")),
+    // Unset on accounts created before email verification existed — those
+    // users get gated to a "verify your email" screen on next login.
+    email: v.optional(v.string()),
+    emailVerified: v.optional(v.boolean()),
   })
     .index("by_username", ["username"])
-    .index("by_botOwner", ["botOwnerId"]),
+    .index("by_botOwner", ["botOwnerId"])
+    .index("by_clerkId", ["clerkId"])
+    .index("by_email", ["email"]),
+
+  emailVerificationCodes: defineTable({
+    userId: v.id("users"),
+    email: v.string(),
+    // sha256(code) hex — the plaintext code is only ever in the email itself.
+    codeHash: v.string(),
+    expiresAt: v.number(),
+    attempts: v.number(),
+  }).index("by_userId", ["userId"]),
 
   sessions: defineTable({
     userId: v.id("users"),
-    token: v.string(),
+    // Legacy plaintext token: only present on rows written before token
+    // hashing; cleared lazily on first hash-based hit. Never set on new rows.
+    token: v.optional(v.string()),
+    // sha256(session token) hex — the only credential stored for new sessions.
+    tokenHash: v.optional(v.string()),
     expiresAt: v.number(),
     // Device metadata for security UI (list / revoke).
     deviceName: v.optional(v.string()),
@@ -77,6 +101,7 @@ export default defineSchema({
     lastActiveAt: v.optional(v.number()),
   })
     .index("by_token", ["token"])
+    .index("by_tokenHash", ["tokenHash"])
     .index("by_userId", ["userId"]),
 
   loginAttempts: defineTable({
@@ -201,7 +226,7 @@ export default defineSchema({
     inviteCode: v.string(),
     // Optional square icon (owner uploads).
     iconStorageId: v.optional(v.id("_storage")),
-    // Vanity path e.g. "talkyss" — only Talkyss app admins may set this.
+    // Vanity path e.g. "hexatalk" — only HexaTalk app admins may set this.
     customSlug: v.optional(v.string()),
     // Short "about" blurb shown in server settings and the join preview.
     // Optional so pre-existing servers validate unchanged.
@@ -302,6 +327,39 @@ export default defineSchema({
   })
     .index("by_message", ["messageId"])
     .index("by_message_and_user_and_emoji", ["messageId", "userId", "emoji"]),
+
+  // User-submitted "report this message" flags, reviewed by staff in the
+  // admin panel. Snapshots the (client-decrypted) message body and reason at
+  // report time, since the message itself may later be edited/deleted, or —
+  // for E2EE DMs — never legible to the server at all.
+  messageReports: defineTable({
+    messageId: v.id("messages"),
+    conversationId: v.id("conversations"),
+    conversationLabel: v.string(),
+    reporterId: v.id("users"),
+    reporterUsername: v.string(),
+    authorId: v.id("users"),
+    authorUsername: v.string(),
+    messageBodySnapshot: v.string(),
+    reason: v.union(
+      v.literal("spam"),
+      v.literal("harassment"),
+      v.literal("illegal_content"),
+      v.literal("other"),
+    ),
+    status: v.union(
+      v.literal("pending"),
+      v.literal("actioned"),
+      v.literal("dismissed"),
+    ),
+    createdAt: v.number(),
+    reviewedBy: v.optional(v.id("users")),
+    reviewedByUsername: v.optional(v.string()),
+    reviewedAt: v.optional(v.number()),
+    reviewNote: v.optional(v.string()),
+  })
+    .index("by_status", ["status"])
+    .index("by_message_and_reporter", ["messageId", "reporterId"]),
 
   calls: defineTable({
     conversationId: v.id("conversations"),

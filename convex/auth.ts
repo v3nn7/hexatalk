@@ -6,7 +6,7 @@ import {
   mutation,
   query,
 } from "./_generated/server";
-import { internal } from "./_generated/api";
+import { api, internal } from "./_generated/api";
 import { Doc, Id } from "./_generated/dataModel";
 import {
   currentUser,
@@ -28,6 +28,8 @@ type AuthResult = {
   username: string;
   displayName: string;
   role: PlatformRole;
+  email: string;
+  emailVerified: boolean;
 };
 
 function forcedRoleForUsername(username: string): PlatformRole | null {
@@ -42,6 +44,12 @@ export function bytesToHex(bytes: Uint8Array): string {
     .join("");
 }
 
+export function randomHex(byteLength: number): string {
+  const bytes = new Uint8Array(byteLength);
+  crypto.getRandomValues(bytes);
+  return bytesToHex(bytes);
+}
+
 function hexToBytes(hex: string): Uint8Array {
   const bytes = new Uint8Array(hex.length / 2);
   for (let i = 0; i < bytes.length; i++) {
@@ -50,10 +58,13 @@ function hexToBytes(hex: string): Uint8Array {
   return bytes;
 }
 
-export function randomHex(byteLength: number): string {
-  const bytes = new Uint8Array(byteLength);
-  crypto.getRandomValues(bytes);
-  return bytesToHex(bytes);
+/** SHA-256 hex of a session token; only this hash is stored in the DB. */
+export async function hashSessionToken(token: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(token),
+  );
+  return bytesToHex(new Uint8Array(digest));
 }
 
 export async function hashPassword(password: string, saltHex: string): Promise<string> {
@@ -66,7 +77,7 @@ export async function hashPassword(password: string, saltHex: string): Promise<s
     ["deriveBits"],
   );
   const bits = await crypto.subtle.deriveBits(
-    { name: "PBKDF2", salt, iterations: PBKDF2_ITERATIONS, hash: "SHA-256" },
+    { name: "PBKDF2", salt: salt as BufferSource, iterations: PBKDF2_ITERATIONS, hash: "SHA-256" },
     keyMaterial,
     256,
   );
@@ -87,16 +98,30 @@ export const signUp = action({
     username: v.string(),
     password: v.string(),
     displayName: v.string(),
+    email: v.string(),
   },
   handler: async (ctx, args): Promise<AuthResult> => {
     const username = args.username.trim().toLowerCase();
     const displayName = args.displayName.trim() || args.username.trim();
+    const email = args.email.trim().toLowerCase();
 
     if (username.length < 3) {
       throw new Error("Username must be at least 3 characters");
     }
+    if (username.length > 32) {
+      throw new Error("Username must be 32 characters or fewer");
+    }
+    if (displayName.length > 50) {
+      throw new Error("Display name is too long");
+    }
     if (args.password.length < 6) {
       throw new Error("Password must be at least 6 characters");
+    }
+    if (args.password.length > 128) {
+      throw new Error("Password is too long");
+    }
+    if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      throw new Error("Enter a valid email address");
     }
 
     const existing: Doc<"users"> | null = await ctx.runQuery(
@@ -105,6 +130,10 @@ export const signUp = action({
     );
     if (existing) {
       throw new Error("This username is taken");
+    }
+    const existingEmail = await ctx.runQuery(internal.email.getUserByEmail, { email });
+    if (existingEmail) {
+      throw new Error("This email is already in use");
     }
 
     const salt = randomHex(16);
@@ -122,11 +151,15 @@ export const signUp = action({
     const token = randomHex(32);
     await ctx.runMutation(internal.auth.createSession, {
       userId,
-      token,
+      tokenHash: await hashSessionToken(token),
       expiresAt: Date.now() + SESSION_TTL_MS,
     });
 
-    return { token, userId, username, displayName, role };
+    // Fire off the verification code; the client gates the new account on
+    // a "verify your email" screen until this comes back confirmed.
+    await ctx.runAction(internal.email.issueCodeForUser, { userId, email });
+
+    return { token, userId, username, displayName, role, email, emailVerified: false };
   },
 });
 
@@ -153,7 +186,7 @@ export const signIn = action({
       internal.auth.getUserByUsername,
       { username },
     );
-    if (!user) {
+    if (!user || !user.passwordHash || !user.salt) {
       await ctx.runMutation(internal.auth.recordFailedLogin, { username });
       throw new Error("Invalid username or password");
     }
@@ -183,7 +216,7 @@ export const signIn = action({
     const token = randomHex(32);
     await ctx.runMutation(internal.auth.createSession, {
       userId: user._id,
-      token,
+      tokenHash: await hashSessionToken(token),
       expiresAt: Date.now() + SESSION_TTL_MS,
     });
 
@@ -193,64 +226,9 @@ export const signIn = action({
       username: user.username,
       displayName: user.displayName,
       role,
+      email: user.email ?? "",
+      emailVerified: user.emailVerified === true,
     };
-  },
-});
-
-export const signOut = mutation({
-  args: { sessionToken: v.string() },
-  handler: async (ctx, args) => {
-    const session = await ctx.db
-      .query("sessions")
-      .withIndex("by_token", (q) => q.eq("token", args.sessionToken))
-      .unique();
-    if (session) {
-      await ctx.db.delete("sessions", session._id);
-    }
-    return null;
-  },
-});
-
-export const me = query({
-  args: { sessionToken: v.string() },
-  handler: async (ctx, args) => {
-    const user = await currentUser(ctx, args.sessionToken);
-    const avatarImageUrl = user.avatarStorageId
-      ? await ctx.storage.getUrl(user.avatarStorageId)
-      : null;
-    return {
-      userId: user._id,
-      username: user.username,
-      displayName: user.displayName,
-      role: resolvePlatformRole(user),
-      avatarColor: user.avatarColor ?? "",
-      statusMessage: user.statusMessage ?? "",
-      bio: user.bio ?? "",
-      avatarImageUrl: avatarImageUrl ?? "",
-      storeChatHistory: user.storeChatHistory !== false,
-      hideOnlineStatus: user.hideOnlineStatus === true,
-      friendsOnlyDms: user.friendsOnlyDms === true,
-      discoverable: user.discoverable !== false,
-      friendRequestPrivacy: user.friendRequestPrivacy ?? "everyone",
-      presenceStatus: user.presenceStatus ?? "online",
-    };
-  },
-});
-
-export const resolveSessionUser = internalQuery({
-  args: { sessionToken: v.string() },
-  handler: async (ctx, args) => {
-    return await currentUser(ctx, args.sessionToken);
-  },
-});
-
-export const getUserByUsername = internalQuery({
-  args: { username: v.string() },
-  handler: async (ctx, args) => {
-    return await ctx.db
-      .query("users")
-      .withIndex("by_username", (q) => q.eq("username", args.username))
-      .unique();
   },
 });
 
@@ -344,7 +322,7 @@ export const setRole = internalMutation({
 export const createSession = internalMutation({
   args: {
     userId: v.id("users"),
-    token: v.string(),
+    tokenHash: v.string(),
     expiresAt: v.number(),
     deviceName: v.optional(v.string()),
     platform: v.optional(
@@ -362,7 +340,7 @@ export const createSession = internalMutation({
     const now = Date.now();
     await ctx.db.insert("sessions", {
       userId: args.userId,
-      token: args.token,
+      tokenHash: args.tokenHash,
       expiresAt: args.expiresAt,
       deviceName: args.deviceName ?? "Unknown device",
       platform: args.platform ?? "unknown",
@@ -397,12 +375,18 @@ export const changePassword = action({
       sessionToken: args.sessionToken,
     });
 
+    if (!user.passwordHash || !user.salt) {
+      throw new Error("This account signs in via Clerk and has no local password");
+    }
     const attemptHash = await hashPassword(args.currentPassword, user.salt);
     if (!timingSafeEqual(attemptHash, user.passwordHash)) {
       throw new Error("Current password is incorrect");
     }
     if (args.newPassword.length < 6) {
       throw new Error("Password must be at least 6 characters");
+    }
+    if (args.newPassword.length > 128) {
+      throw new Error("Password is too long");
     }
 
     const salt = randomHex(16);
@@ -412,6 +396,77 @@ export const changePassword = action({
       salt,
       passwordHash,
     });
+    // Password change revokes every other session of this user.
+    await ctx.runMutation(api.prefs.signOutOtherSessions, {
+      sessionToken: args.sessionToken,
+    });
     return null;
+  },
+});
+
+export const signOut = mutation({
+  args: { sessionToken: v.string() },
+  handler: async (ctx, args) => {
+    const tokenHash = await hashSessionToken(args.sessionToken);
+    const session =
+      (await ctx.db
+        .query("sessions")
+        .withIndex("by_tokenHash", (q) => q.eq("tokenHash", tokenHash))
+        .unique()) ??
+      // Legacy rows written before token hashing still carry the plaintext
+      // token; match it directly (the row is deleted right after anyway).
+      (await ctx.db
+        .query("sessions")
+        .withIndex("by_token", (q) => q.eq("token", args.sessionToken))
+        .unique());
+    if (session) {
+      await ctx.db.delete("sessions", session._id);
+    }
+    return null;
+  },
+});
+
+export const me = query({
+  args: { sessionToken: v.string() },
+  handler: async (ctx, args) => {
+    const user = await currentUser(ctx, args.sessionToken);
+    const avatarImageUrl = user.avatarStorageId
+      ? await ctx.storage.getUrl(user.avatarStorageId)
+      : null;
+    return {
+      userId: user._id,
+      username: user.username,
+      displayName: user.displayName,
+      role: resolvePlatformRole(user),
+      avatarColor: user.avatarColor ?? "",
+      statusMessage: user.statusMessage ?? "",
+      bio: user.bio ?? "",
+      avatarImageUrl: avatarImageUrl ?? "",
+      storeChatHistory: user.storeChatHistory !== false,
+      hideOnlineStatus: user.hideOnlineStatus === true,
+      friendsOnlyDms: user.friendsOnlyDms === true,
+      discoverable: user.discoverable !== false,
+      friendRequestPrivacy: user.friendRequestPrivacy ?? "everyone",
+      presenceStatus: user.presenceStatus ?? "online",
+      email: user.email ?? "",
+      emailVerified: user.emailVerified === true,
+    };
+  },
+});
+
+export const resolveSessionUser = internalQuery({
+  args: { sessionToken: v.string() },
+  handler: async (ctx, args) => {
+    return await currentUser(ctx, args.sessionToken);
+  },
+});
+
+export const getUserByUsername = internalQuery({
+  args: { username: v.string() },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("users")
+      .withIndex("by_username", (q) => q.eq("username", args.username))
+      .unique();
   },
 });

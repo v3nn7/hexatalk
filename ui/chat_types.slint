@@ -40,12 +40,25 @@ export struct ChatMessageRow {
     can_delete: bool,
     can_purge: bool,
     can_react: bool,
+    can_report: bool,
+    // True while this message's report-reason picker is open.
+    reporting: bool,
     // Discord-style mention highlight: `mentions_me` = body pings the
     // current user, `mentions_everyone` = body contains @everyone in a
     // channel/group. `ping_label` is "pinged 5m ago"-style text ("" = no ping).
     mentions_me: bool,
     mentions_everyone: bool,
     ping_label: string,
+}
+
+export struct ReportRow {
+    report_id: string,
+    conversation_label: string,
+    reporter_username: string,
+    author_username: string,
+    message_body: string,
+    reason: string,
+    age_label: string,
 }
 
 export struct ConversationRow {

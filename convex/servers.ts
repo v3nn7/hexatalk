@@ -9,6 +9,7 @@ import {
   Perm,
   DEFAULT_STAFF_PERMS,
   channelPermissions,
+  highestRolePosition,
 } from "./roles";
 
 // Excludes visually-similar characters (0/O, 1/I/L) so invite codes read
@@ -342,7 +343,7 @@ export const removeServerIcon = mutation({
 });
 
 /**
- * Vanity slug (custom server URL path). Only Talkyss platform admins
+ * Vanity slug (custom server URL path). Only HexaTalk platform admins
  * (users.role === "admin") may set this — not regular server owners.
  */
 export const setCustomSlug = mutation({
@@ -354,7 +355,7 @@ export const setCustomSlug = mutation({
   handler: async (ctx, args) => {
     const me = await currentUser(ctx, args.sessionToken);
     if (me.role !== "admin") {
-      throw new Error("Only Talkyss administration can set custom server URLs");
+      throw new Error("Only HexaTalk administration can set custom server URLs");
     }
     const server = await ctx.db.get("servers", args.serverId);
     if (!server) throw new Error("Server not found");
@@ -392,7 +393,7 @@ export const clearCustomSlug = mutation({
   handler: async (ctx, args) => {
     const me = await currentUser(ctx, args.sessionToken);
     if (me.role !== "admin") {
-      throw new Error("Only Talkyss administration can set custom server URLs");
+      throw new Error("Only HexaTalk administration can set custom server URLs");
     }
     const server = await ctx.db.get("servers", args.serverId);
     if (!server) throw new Error("Server not found");
@@ -897,7 +898,7 @@ export const kickMember = mutation({
   },
   handler: async (ctx, args) => {
     const me = await currentUser(ctx, args.sessionToken);
-    const { server } = await requirePerm(
+    const { server, membership: myMembership } = await requirePerm(
       ctx,
       args.serverId,
       me._id,
@@ -913,7 +914,7 @@ export const kickMember = mutation({
         targetUser.role === "owner" ||
         targetUser.username === "v3nn7")
     ) {
-      throw new Error("Talkyss staff/owner cannot be kicked from servers");
+      throw new Error("HexaTalk staff/owner cannot be kicked from servers");
     }
 
     const membership = await ctx.db
@@ -924,6 +925,15 @@ export const kickMember = mutation({
       .unique();
     if (!membership) {
       throw new Error("That user isn't a member of this server");
+    }
+    // Discord-style hierarchy: non-owners can only kick members below
+    // their own highest role (mirrors toggleRole in roles.ts).
+    if (
+      server.ownerId !== me._id &&
+      (await highestRolePosition(ctx, membership)) >=
+        (await highestRolePosition(ctx, myMembership))
+    ) {
+      throw new Error("You can't kick someone with an equal or higher role");
     }
     await ctx.db.delete("serverMembers", membership._id);
 

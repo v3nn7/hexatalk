@@ -40,6 +40,8 @@ pub(crate) struct Session {
     pub(crate) friend_request_privacy: String,
     /// online | idle | dnd | invisible
     pub(crate) presence_status: String,
+    pub(crate) email: String,
+    pub(crate) email_verified: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -326,6 +328,22 @@ pub(crate) struct AdminStats {
     pub(crate) staff: i64,
     pub(crate) bots: i64,
     pub(crate) servers: i64,
+}
+
+/// One reported message, shown in the admin panel's Reports queue
+/// (`reports:adminListReports`). Staff-only, log-and-review — never an
+/// automatic ban.
+#[derive(Debug, Clone)]
+pub(crate) struct MessageReport {
+    pub(crate) report_id: String,
+    pub(crate) message_id: String,
+    pub(crate) conversation_label: String,
+    pub(crate) reporter_username: String,
+    pub(crate) author_username: String,
+    pub(crate) message_body: String,
+    pub(crate) reason: String,
+    pub(crate) status: String,
+    pub(crate) created_at: i64,
 }
 
 /// Expanded detail for one user, shown in the admin per-user drawer
