@@ -291,6 +291,63 @@ pub(crate) struct ServerSummary {
     pub(crate) invite_code: String,
     pub(crate) icon_url: String,
     pub(crate) custom_slug: String,
+    /// Owner-editable "about" blurb (may be empty).
+    pub(crate) description: String,
+    /// Server creation time, ms since epoch (from Convex `_creationTime`).
+    pub(crate) created_at: i64,
+    /// Conversation id a new member lands in first ("" = fall back to first
+    /// text channel).
+    pub(crate) welcome_channel_id: String,
+    /// When true the public invite code is dormant (no new joins by code).
+    pub(crate) invites_paused: bool,
+}
+
+/// Read-only per-server counters for the Overview stats card (on-demand
+/// `servers:serverStats` query, not a live subscription).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ServerStats {
+    pub(crate) member_count: i64,
+    pub(crate) text_channels: i64,
+    pub(crate) voice_channels: i64,
+    pub(crate) role_count: i64,
+    pub(crate) message_count: i64,
+    pub(crate) messages_capped: bool,
+    pub(crate) created_at: i64,
+    pub(crate) oldest_member_name: String,
+    pub(crate) oldest_member_joined_at: i64,
+}
+
+/// Platform-wide counters for the admin dashboard header (on-demand
+/// `admin:adminStats` query).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AdminStats {
+    pub(crate) total_users: i64,
+    pub(crate) online: i64,
+    pub(crate) banned: i64,
+    pub(crate) staff: i64,
+    pub(crate) bots: i64,
+    pub(crate) servers: i64,
+}
+
+/// Expanded detail for one user, shown in the admin per-user drawer
+/// (on-demand `admin:adminUserDetail` query).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AdminUserDetail {
+    pub(crate) user_id: String,
+    pub(crate) username: String,
+    pub(crate) display_name: String,
+    pub(crate) role: String,
+    pub(crate) banned: bool,
+    pub(crate) is_bot: bool,
+    pub(crate) bio: String,
+    pub(crate) status_message: String,
+    pub(crate) avatar_color: String,
+    pub(crate) avatar_image_url: String,
+    pub(crate) created_at: i64,
+    pub(crate) online: bool,
+    pub(crate) last_seen_at: i64,
+    pub(crate) server_names: Vec<String>,
+    pub(crate) friend_count: i64,
 }
 
 #[derive(Debug, Clone)]

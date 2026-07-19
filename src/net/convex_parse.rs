@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use convex::{FunctionResult, Value};
 
-use crate::state::types::{ProfileView, Session};
+use crate::state::types::{AdminStats, AdminUserDetail, ProfileView, ServerStats, Session};
 
 // ---------- Convex parsing helpers ----------
 
@@ -316,6 +316,64 @@ pub(crate) fn parse_profile_view(result: FunctionResult) -> Result<ProfileView, 
     }
 }
 
+
+/// `servers:serverStats` → typed counts. `None` on any error (the caller
+/// just leaves the stats card in its "loading" state).
+pub(crate) fn parse_server_stats(result: FunctionResult) -> Option<ServerStats> {
+    match result {
+        FunctionResult::Value(Value::Object(obj)) => Some(ServerStats {
+            member_count: obj_ms(&obj, "memberCount"),
+            text_channels: obj_ms(&obj, "textChannels"),
+            voice_channels: obj_ms(&obj, "voiceChannels"),
+            role_count: obj_ms(&obj, "roleCount"),
+            message_count: obj_ms(&obj, "messageCount"),
+            messages_capped: obj_bool(&obj, "messagesCapped"),
+            created_at: obj_ms(&obj, "createdAt"),
+            oldest_member_name: obj_str(&obj, "oldestMemberName"),
+            oldest_member_joined_at: obj_ms(&obj, "oldestMemberJoinedAt"),
+        }),
+        _ => None,
+    }
+}
+
+/// `admin:adminStats` → typed platform counters. `None` on error.
+pub(crate) fn parse_admin_stats(result: FunctionResult) -> Option<AdminStats> {
+    match result {
+        FunctionResult::Value(Value::Object(obj)) => Some(AdminStats {
+            total_users: obj_ms(&obj, "totalUsers"),
+            online: obj_ms(&obj, "online"),
+            banned: obj_ms(&obj, "banned"),
+            staff: obj_ms(&obj, "staff"),
+            bots: obj_ms(&obj, "bots"),
+            servers: obj_ms(&obj, "servers"),
+        }),
+        _ => None,
+    }
+}
+
+/// `admin:adminUserDetail` → expanded user record. `None` on error.
+pub(crate) fn parse_admin_user_detail(result: FunctionResult) -> Option<AdminUserDetail> {
+    match result {
+        FunctionResult::Value(Value::Object(obj)) => Some(AdminUserDetail {
+            user_id: obj_str(&obj, "userId"),
+            username: obj_str(&obj, "username"),
+            display_name: obj_str(&obj, "displayName"),
+            role: obj_str(&obj, "role"),
+            banned: obj_bool(&obj, "banned"),
+            is_bot: obj_bool(&obj, "isBot"),
+            bio: obj_str(&obj, "bio"),
+            status_message: obj_str(&obj, "statusMessage"),
+            avatar_color: obj_str(&obj, "avatarColor"),
+            avatar_image_url: obj_str(&obj, "avatarImageUrl"),
+            created_at: obj_ms(&obj, "createdAt"),
+            online: obj_bool(&obj, "online"),
+            last_seen_at: obj_ms(&obj, "lastSeenAt"),
+            server_names: obj_str_list(&obj, "serverNames"),
+            friend_count: obj_ms(&obj, "friendCount"),
+        }),
+        _ => None,
+    }
+}
 
 pub(crate) fn parse_object_array(result: FunctionResult) -> Vec<BTreeMap<String, Value>> {
     match result {

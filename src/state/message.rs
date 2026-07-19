@@ -166,6 +166,24 @@ pub(crate) enum Message {
     DeleteServer,
     DeleteServerFinished(Result<(), String>),
     ServerSettingsCategoryChanged(ServerSettingsCategory),
+    // ---- Server description ----
+    ServerDescriptionInputChanged(String),
+    SaveServerDescription,
+    SaveServerDescriptionFinished(Result<(), String>),
+    // ---- Transfer ownership (Danger Zone) ----
+    /// user_id of the member the owner is about to hand the server to (arms
+    /// the confirm step); passing "" cancels.
+    ConfirmTransferOwnership(String),
+    TransferOwnership(String),
+    TransferOwnershipFinished(Result<(), String>),
+    // ---- Defaults: welcome channel + invite pause ----
+    SetWelcomeChannel(String),
+    SetWelcomeChannelFinished(Result<(), String>),
+    ToggleInvitesPaused,
+    SetInvitesPausedFinished(Result<(), String>),
+    // ---- Server stats (on-demand) ----
+    LoadServerStats,
+    ServerStatsUpdated(Option<crate::state::types::ServerStats>),
     MembersUpdated(Vec<ServerMemberRow>),
     KickMember(String),
     KickMemberFinished(Result<(), String>),
@@ -286,6 +304,16 @@ pub(crate) enum Message {
     AdminSetRoleFinished(Result<(), String>),
     AdminSetBanned(String, bool),
     AdminSetBannedFinished(Result<(), String>),
+    // ---- Admin panel: stats, filter, per-user detail, force-logout ----
+    LoadAdminStats,
+    AdminStatsUpdated(Option<crate::state::types::AdminStats>),
+    /// 0 = All, 1 = Users, 2 = Staff, 3 = Banned (client-side filter).
+    SetAdminFilter(i32),
+    /// Toggle the expanded detail drawer for a user (empty/"same id" closes).
+    ToggleAdminUserDetail(String),
+    AdminUserDetailUpdated(Option<crate::state::types::AdminUserDetail>),
+    AdminRevokeSessions(String),
+    AdminRevokeSessionsFinished(Result<(), String>),
 
     Tick,
     HeartbeatFinished,

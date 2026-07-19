@@ -8,6 +8,7 @@
 import "../assets/fonts/Roboto-Regular.ttf";
 import "../assets/fonts/Roboto-Medium.ttf";
 import { Theme } from "theme.slint";
+import { StatsChip } from "widgets.slint";
 import { AuthScreen, AuthMode } from "auth.slint";
 import { ServerRail } from "rail.slint";
 import { Sidebar, SidebarTab } from "sidebar.slint";
@@ -540,6 +541,12 @@ export component AppWindow inherits Window {
     in property <string> chat_admin_status;
     in property <[AdminUserRow]> chat_admin_users: [];
     in property <bool> chat_is_admin: false;
+    in property <int> chat_admin_total_users: 0;
+    in property <int> chat_admin_online: 0;
+    in property <int> chat_admin_staff: 0;
+    in property <int> chat_admin_banned: 0;
+    in property <int> chat_admin_bots: 0;
+    in property <int> chat_admin_servers: 0;
     in property <string> chat_my_display_name;
     in property <string> chat_my_initial;
     in property <color> chat_my_avatar_color: Theme.accent;
@@ -795,6 +802,12 @@ export component AppWindow inherits Window {
                 admin_status: root.chat_admin_status;
                 admin_users: root.chat_admin_users;
                 is_admin: root.chat_is_admin;
+                admin_total_users: root.chat_admin_total_users;
+                admin_online: root.chat_admin_online;
+                admin_staff: root.chat_admin_staff;
+                admin_banned: root.chat_admin_banned;
+                admin_bots: root.chat_admin_bots;
+                admin_servers: root.chat_admin_servers;
                 my_display_name: root.chat_my_display_name;
                 my_initial: root.chat_my_initial;
                 my_avatar_color: root.chat_my_avatar_color;

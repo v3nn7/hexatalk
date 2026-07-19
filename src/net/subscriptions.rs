@@ -307,6 +307,10 @@ pub(crate) fn servers_subscription(
                     invite_code: obj_str(&obj, "inviteCode"),
                     icon_url: obj_str(&obj, "iconUrl"),
                     custom_slug: obj_str(&obj, "customSlug"),
+                    description: obj_str(&obj, "description"),
+                    created_at: obj_ms(&obj, "createdAt"),
+                    welcome_channel_id: obj_str(&obj, "welcomeChannelId"),
+                    invites_paused: obj_bool(&obj, "invitesPaused"),
                 })
                 .collect();
             if tx.send(Message::ServersUpdated(servers)).is_err() {

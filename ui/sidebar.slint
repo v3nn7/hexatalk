@@ -3,7 +3,7 @@
 // section of src/view/chat.rs.
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { Avatar, SecondaryButton, PrimaryButton, DangerButton, TextInputField, ResizeHandle } from "widgets.slint";
+import { Avatar, SecondaryButton, PrimaryButton, DangerButton, TextInputField, ResizeHandle, StatsChip } from "widgets.slint";
 import {
     ConversationRow, FriendRow, IncomingRequestRow, OutgoingRequestRow,
     PeopleHitRow, SuggestionRow, BlockedRow, ServerRow, ChannelRow, AdminUserRow,
@@ -115,8 +115,15 @@ export component Sidebar inherits Rectangle {
     in-out property <string> admin_search;
     in property <string> admin_status;
     in property <[AdminUserRow]> admin_users: [];
+
     in property <bool> is_admin: false;
 
+    in property <int> admin_total_users: 0;
+    in property <int> admin_online: 0;
+    in property <int> admin_banned: 0;
+    in property <int> admin_staff: 0;
+    in property <int> admin_bots: 0;
+    in property <int> admin_servers: 0;
     // Account footer
     in property <string> my_display_name;
     in property <string> my_initial;
@@ -257,11 +264,23 @@ export component Sidebar inherits Rectangle {
                                     height: parent.height;
                                     background: Theme.accent;
                                 }
+                                // Unread dot: positioned absolutely (like Avatar's
+                                // PresenceDot) so it's vertically centered on the
+                                // row instead of top-aligned inside the
+                                // HorizontalLayout, which read as a stray second
+                                // line above the title.
+                                if c.unread && !c.active: Rectangle {
+                                    x: 12px;
+                                    y: (parent.height - self.height) / 2;
+                                    width: 8px;
+                                    height: 8px;
+                                    background: Theme.accent;
+                                }
                                 HorizontalLayout {
-                                    padding-left: 12px;
-                                    spacing: 10px;
+                                    // Fixed regardless of unread state so the title
+                                    // doesn't shift horizontally when a chat is read.
+                                    padding-left: 30px;
                                     alignment: start;
-                                    if c.unread && !c.active: Rectangle { width: 8px; height: 8px; background: Theme.accent; vertical-stretch: 0; }
                                     Text {
                                         text: c.title;
                                         font-size: Theme.text-md;
@@ -551,6 +570,15 @@ export component Sidebar inherits Rectangle {
         animate opacity { duration: 140ms; }
                         padding: 12px;
                         spacing: 10px;
+                        HorizontalLayout {
+                            spacing: 6px;
+                            StatsChip { label: "Users"; value: root.admin_total_users; }
+                            StatsChip { label: "Online"; value: root.admin_online; }
+                            StatsChip { label: "Staff"; value: root.admin_staff; }
+                            StatsChip { label: "Banned"; value: root.admin_banned; }
+                            StatsChip { label: "Bots"; value: root.admin_bots; }
+                            StatsChip { label: "Servers"; value: root.admin_servers; }
+                        }
                         TextInputField { placeholder: "Search users..."; value <=> root.admin_search; edited(t) => { root.admin_search_changed(t); } }
                         if root.admin_status != "": Text { text: root.admin_status; font-size: 11px; color: Theme.text-muted; }
                         if root.admin_users.length == 0: EmptyState { text: "No users found."; box-height: 72px; }

@@ -38,24 +38,30 @@ component ToggleRow inherits Rectangle {
             Text { text: root.title; font-size: 13px; color: Theme.text-primary; }
             Text { text: root.description; font-size: 11px; color: Theme.text-muted; wrap: word-wrap; }
         }
-        Rectangle {
-            width: 44px;
-            height: 24px;
-            vertical-stretch: 0;
-            background: root.value ? Theme.accent-dim : Theme.bg-tertiary;
-            border-width: 1px;
-            border-color: root.value ? Theme.accent : Theme.border;
-            animate background { duration: 120ms; }
-            animate border-color { duration: 120ms; }
+        // Centered via a stretch VerticalLayout: the row's height is driven
+        // by the two-line title/description text, which is taller than the
+        // 24px switch, so a bare vertical-stretch:0 child top-aligns instead
+        // of centering (same fix as the sidebar unread dot / role swatch).
+        VerticalLayout {
+            alignment: center;
             Rectangle {
-                x: root.value ? parent.width - self.width - 3px : 3px;
-                y: 3px;
-                width: 16px;
-                height: 16px;
-                background: white;
-                animate x { duration: 120ms; }
+                width: 44px;
+                height: 24px;
+                background: root.value ? Theme.accent-dim : Theme.bg-tertiary;
+                border-width: 1px;
+                border-color: root.value ? Theme.accent : Theme.border;
+                animate background { duration: 120ms; }
+                animate border-color { duration: 120ms; }
+                Rectangle {
+                    x: root.value ? parent.width - self.width - 3px : 3px;
+                    y: 3px;
+                    width: 16px;
+                    height: 16px;
+                    background: white;
+                    animate x { duration: 120ms; }
+                }
+                TouchArea { clicked => { root.toggled(); } }
             }
-            TouchArea { clicked => { root.toggled(); } }
         }
     }
 }

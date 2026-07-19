@@ -166,6 +166,33 @@ export component Divider inherits Rectangle {
     background: Theme.border-hairline;
 }
 
+export component StatsChip inherits Rectangle {
+    in property <string> label;
+    in property <int> value: 0;
+    min-width: 52px;
+    height: 46px;
+    background: Theme.bg-tertiary;
+    border-width: 1px;
+    border-color: Theme.border;
+    padding: 6px;
+    VerticalLayout {
+        spacing: 2px;
+        Text {
+            text: root.label;
+            color: Theme.text-muted;
+            font-size: Theme.text-xs;
+            font-family: Theme.font-medium;
+            letter-spacing: 0.6px;
+        }
+        Text {
+            text: root.value;
+            color: Theme.text-primary;
+            font-size: Theme.text-lg;
+            font-family: Theme.font-medium;
+        }
+    }
+}
+
 export component Badge inherits Rectangle {
     in property <string> text;
     in property <color> bg: Theme.danger;

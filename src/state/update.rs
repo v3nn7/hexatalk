@@ -24,7 +24,7 @@ use crate::net::peer;
 use crate::tray;
 use crate::media::notify::{BEEP_CALL_CONNECTED, BEEP_FRIEND_REQUEST, BEEP_MESSAGE, notify_desktop, play_beep, ringtone_start, ringtone_stop};
 use crate::ui::mentions;
-use crate::net::convex_parse::{expect_null, expect_string, humanize_error, obj_f64, obj_str, obj_str_list, parse_clear_conversation_result, parse_me, parse_object_array, parse_profile_view, parse_session, value_as_bool};
+use crate::net::convex_parse::{expect_null, expect_string, humanize_error, obj_f64, obj_str, obj_str_list, parse_admin_stats, parse_admin_user_detail, parse_clear_conversation_result, parse_me, parse_object_array, parse_profile_view, parse_server_stats, parse_session, value_as_bool};
 use crate::net::subscriptions::{mark_read_task, typing_ping_task};
 use crate::state::app::App;
 use crate::state::message::Message;
@@ -912,6 +912,10 @@ impl App {
                 }
                 if tab != SidebarTab::Admin {
                     self.admin_search_input.clear();
+                }
+                // Load platform counters when entering the Admin dashboard.
+                if tab == SidebarTab::Admin {
+                    return Task::done(Message::LoadAdminStats);
                 }
                 Task::none()
             }
@@ -2096,17 +2100,22 @@ impl App {
                 self.server_settings_open = opening;
                 self.server_settings_category = ServerSettingsCategory::Overview;
                 self.confirm_delete_server = false;
+                self.confirm_transfer_owner_id = None;
                 self.renaming_channel_id = None;
                 self.rename_channel_input.clear();
                 self.server_status = None;
+                self.server_stats = None;
                 if opening {
                     if let Some(server) = &self.selected_server {
                         self.rename_server_input = server.name.clone();
                         self.custom_slug_input = server.custom_slug.clone();
+                        self.server_description_input = server.description.clone();
                     }
                     self.new_channel_open = false;
                     self.new_channel_name_input.clear();
                     self.new_channel_is_voice = false;
+                    // Pull the read-only stats card once, on open.
+                    return Task::done(Message::LoadServerStats);
                 }
                 Task::none()
             }
@@ -2171,6 +2180,250 @@ impl App {
                 self.server_status = Some(err);
                 Task::none()
             }
+
+            // ---- Server description ----
+            Message::ServerDescriptionInputChanged(value) => {
+                self.server_description_input = value;
+                Task::none()
+            }
+            Message::SaveServerDescription => {
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                let Some(server) = self.selected_server.clone() else {
+                    return Task::none();
+                };
+                if !server.is_owner {
+                    self.server_status =
+                        Some("Only the server owner can edit the description".into());
+                    return Task::none();
+                }
+                let description = self.server_description_input.trim().to_string();
+                let mut client = client;
+                Task::perform(
+                    async move {
+                        client
+                            .mutation(
+                                "servers:setServerDescription",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(session.token),
+                                    "serverId".to_string() => Value::String(server.server_id),
+                                    "description".to_string() => Value::String(description),
+                                },
+                            )
+                            .await
+                            .map_err(|err| humanize_error(&err.to_string()))
+                            .and_then(expect_null)
+                    },
+                    Message::SaveServerDescriptionFinished,
+                )
+            }
+            Message::SaveServerDescriptionFinished(Ok(())) => {
+                let desc = self.server_description_input.trim().to_string();
+                if let Some(s) = &mut self.selected_server {
+                    s.description = desc;
+                }
+                self.server_status = None;
+                self.show_toast("Description updated");
+                Task::none()
+            }
+            Message::SaveServerDescriptionFinished(Err(err)) => {
+                self.server_status = Some(err);
+                Task::none()
+            }
+
+            // ---- Transfer ownership ----
+            Message::ConfirmTransferOwnership(user_id) => {
+                // Empty string (or re-clicking the armed member) cancels.
+                self.confirm_transfer_owner_id =
+                    if user_id.is_empty() || self.confirm_transfer_owner_id.as_deref() == Some(user_id.as_str()) {
+                        None
+                    } else {
+                        Some(user_id)
+                    };
+                Task::none()
+            }
+            Message::TransferOwnership(user_id) => {
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                let Some(server) = self.selected_server.clone() else {
+                    return Task::none();
+                };
+                if !server.is_owner {
+                    self.server_status = Some("Only the owner can transfer the server".into());
+                    return Task::none();
+                }
+                self.confirm_transfer_owner_id = None;
+                let mut client = client;
+                Task::perform(
+                    async move {
+                        client
+                            .mutation(
+                                "servers:transferOwnership",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(session.token),
+                                    "serverId".to_string() => Value::String(server.server_id),
+                                    "newOwnerId".to_string() => Value::String(user_id),
+                                },
+                            )
+                            .await
+                            .map_err(|err| humanize_error(&err.to_string()))
+                            .and_then(expect_null)
+                    },
+                    Message::TransferOwnershipFinished,
+                )
+            }
+            Message::TransferOwnershipFinished(Ok(())) => {
+                // We're no longer the owner; the servers subscription will
+                // refresh is_owner, but flip it locally so the UI updates now.
+                if let Some(s) = &mut self.selected_server {
+                    s.is_owner = false;
+                }
+                self.server_status = None;
+                self.show_toast("Ownership transferred");
+                Task::none()
+            }
+            Message::TransferOwnershipFinished(Err(err)) => {
+                self.server_status = Some(err);
+                Task::none()
+            }
+
+            // ---- Defaults: welcome channel + invite pause ----
+            Message::SetWelcomeChannel(channel_id) => {
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                let Some(server) = self.selected_server.clone() else {
+                    return Task::none();
+                };
+                if !server.is_owner {
+                    return Task::none();
+                }
+                // Re-clicking the current welcome channel clears it.
+                let next = if server.welcome_channel_id == channel_id {
+                    String::new()
+                } else {
+                    channel_id
+                };
+                if let Some(s) = &mut self.selected_server {
+                    s.welcome_channel_id = next.clone();
+                }
+                let mut client = client;
+                Task::perform(
+                    async move {
+                        client
+                            .mutation(
+                                "servers:setWelcomeChannel",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(session.token),
+                                    "serverId".to_string() => Value::String(server.server_id),
+                                    "channelId".to_string() => Value::String(next),
+                                },
+                            )
+                            .await
+                            .map_err(|err| humanize_error(&err.to_string()))
+                            .and_then(expect_null)
+                    },
+                    Message::SetWelcomeChannelFinished,
+                )
+            }
+            Message::SetWelcomeChannelFinished(Ok(())) => {
+                self.server_status = None;
+                Task::none()
+            }
+            Message::SetWelcomeChannelFinished(Err(err)) => {
+                self.server_status = Some(err);
+                Task::none()
+            }
+            Message::ToggleInvitesPaused => {
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                let Some(server) = self.selected_server.clone() else {
+                    return Task::none();
+                };
+                if !server.is_owner {
+                    return Task::none();
+                }
+                let paused = !server.invites_paused;
+                if let Some(s) = &mut self.selected_server {
+                    s.invites_paused = paused;
+                }
+                let mut client = client;
+                Task::perform(
+                    async move {
+                        client
+                            .mutation(
+                                "servers:setInvitesPaused",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(session.token),
+                                    "serverId".to_string() => Value::String(server.server_id),
+                                    "paused".to_string() => Value::Boolean(paused),
+                                },
+                            )
+                            .await
+                            .map_err(|err| humanize_error(&err.to_string()))
+                            .and_then(expect_null)
+                    },
+                    Message::SetInvitesPausedFinished,
+                )
+            }
+            Message::SetInvitesPausedFinished(Ok(())) => {
+                self.server_status = None;
+                Task::none()
+            }
+            Message::SetInvitesPausedFinished(Err(err)) => {
+                self.server_status = Some(err);
+                Task::none()
+            }
+
+            // ---- Server stats (on-demand) ----
+            Message::LoadServerStats => {
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                let Some(server) = self.selected_server.clone() else {
+                    return Task::none();
+                };
+                let mut client = client;
+                Task::perform(
+                    async move {
+                        let result = client
+                            .query(
+                                "servers:serverStats",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(session.token),
+                                    "serverId".to_string() => Value::String(server.server_id),
+                                },
+                            )
+                            .await
+                            .ok();
+                        result.and_then(parse_server_stats)
+                    },
+                    Message::ServerStatsUpdated,
+                )
+            }
+            Message::ServerStatsUpdated(stats) => {
+                self.server_stats = stats;
+                Task::none()
+            }
+
             Message::RegenerateInviteCode => {
                 let Some(client) = self.client.clone() else {
                     return Task::none();
@@ -3811,6 +4064,36 @@ impl App {
             }
             Message::AdminSetBannedFinished(Ok(())) => Task::none(),
 
+            Message::LoadAdminStats => {
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                let mut client = client;
+                Task::perform(
+                    async move {
+                        let stats = client
+                            .query(
+                                "admin:adminStats",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(session.token),
+                                },
+                            )
+                            .await
+                            .ok()
+                            .and_then(parse_admin_stats);
+                        Message::AdminStatsUpdated(stats)
+                    },
+                    std::convert::identity,
+                )
+            }
+            Message::AdminStatsUpdated(stats) => {
+                self.admin_stats = stats;
+                Task::none()
+            }
+
             Message::ToggleMembersPanel => {
                 self.members_panel_open = !self.members_panel_open;
                 self.members_panel_target = if self.members_panel_open {
@@ -4883,6 +5166,84 @@ impl App {
             }
             Message::LoggedOut => {
                 self.reset_session();
+                Task::none()
+            }
+
+            Message::SetAdminFilter(filter) => {
+                self.admin_filter = filter;
+                Task::none()
+            }
+            Message::ToggleAdminUserDetail(user_id) => {
+                if self
+                    .admin_user_detail
+                    .as_ref()
+                    .map(|d| d.user_id == user_id)
+                    .unwrap_or(false)
+                {
+                    self.admin_user_detail = None;
+                    return Task::none();
+                }
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                let mut client = client;
+                Task::perform(
+                    async move {
+                        let detail = client
+                            .query(
+                                "admin:adminUserDetail",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(session.token),
+                                    "userId".to_string() => Value::String(user_id),
+                                },
+                            )
+                            .await
+                            .ok()
+                            .and_then(parse_admin_user_detail);
+                        Message::AdminUserDetailUpdated(detail)
+                    },
+                    std::convert::identity,
+                )
+            }
+            Message::AdminUserDetailUpdated(detail) => {
+                self.admin_user_detail = detail;
+                Task::none()
+            }
+            Message::AdminRevokeSessions(user_id) => {
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                let mut client = client;
+                Task::perform(
+                    async move {
+                        let res = client
+                            .mutation(
+                                "admin:adminRevokeSessions",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(session.token),
+                                    "userId".to_string() => Value::String(user_id),
+                                },
+                            )
+                            .await
+                            .map_err(|e| humanize_error(&e.to_string()))
+                            .and_then(expect_null);
+                        Message::AdminRevokeSessionsFinished(res)
+                    },
+                    std::convert::identity,
+                )
+            }
+            Message::AdminRevokeSessionsFinished(Err(err)) => {
+                self.admin_status = Some(err);
+                Task::none()
+            }
+            Message::AdminRevokeSessionsFinished(Ok(())) => {
+                self.show_toast("Sessions revoked");
                 Task::none()
             }
         }

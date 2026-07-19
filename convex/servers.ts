@@ -157,6 +157,13 @@ export const joinByInviteCode = mutation({
       return server._id;
     }
 
+    // Owner has paused invites: the code is intentionally dead for new
+    // members (checked after the existing-member early-return so people
+    // already in the server aren't affected).
+    if (server.invitesPaused) {
+      throw new Error("This server isn't accepting new members right now");
+    }
+
     await ctx.db.insert("serverMembers", {
       serverId: server._id,
       userId: me._id,
@@ -212,6 +219,10 @@ export const listMyServers = query({
         inviteCode: isOwner ? server.inviteCode : "",
         iconUrl: iconUrl ?? "",
         customSlug: server.customSlug ?? "",
+        description: server.description ?? "",
+        createdAt: server._creationTime,
+        welcomeChannelId: server.welcomeChannelId ?? "",
+        invitesPaused: server.invitesPaused ?? false,
       });
     }
     result.sort((a, b) => a.name.localeCompare(b.name));
@@ -525,6 +536,201 @@ export const regenerateInviteCode = mutation({
     const inviteCode = randomInviteCode();
     await ctx.db.patch("servers", args.serverId, { inviteCode });
     return inviteCode;
+  },
+});
+
+/** Owner-editable "about" blurb. Empty string clears it. */
+export const setServerDescription = mutation({
+  args: {
+    sessionToken: v.string(),
+    serverId: v.id("servers"),
+    description: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const me = await currentUser(ctx, args.sessionToken);
+    const server = await ctx.db.get("servers", args.serverId);
+    if (!server || server.ownerId !== me._id) {
+      throw new Error("Only the server owner can do that");
+    }
+    const description = args.description.trim().slice(0, 300);
+    await ctx.db.patch("servers", args.serverId, {
+      description: description.length > 0 ? description : undefined,
+    });
+    return null;
+  },
+});
+
+/**
+ * Hand the server to another member. Irreversible from the old owner's
+ * side (the new owner would have to hand it back). The new owner must be a
+ * non-bot member of this server.
+ */
+export const transferOwnership = mutation({
+  args: {
+    sessionToken: v.string(),
+    serverId: v.id("servers"),
+    newOwnerId: v.id("users"),
+  },
+  handler: async (ctx, args) => {
+    const me = await currentUser(ctx, args.sessionToken);
+    const server = await ctx.db.get("servers", args.serverId);
+    if (!server || server.ownerId !== me._id) {
+      throw new Error("Only the server owner can do that");
+    }
+    if (args.newOwnerId === me._id) {
+      throw new Error("You already own this server");
+    }
+    const target = await ctx.db.get("users", args.newOwnerId);
+    if (!target) throw new Error("User not found");
+    if (target.isBot) throw new Error("Bots can't own servers");
+    const membership = await ctx.db
+      .query("serverMembers")
+      .withIndex("by_server_and_user", (q) =>
+        q.eq("serverId", args.serverId).eq("userId", args.newOwnerId),
+      )
+      .unique();
+    if (!membership) {
+      throw new Error("That user isn't a member of this server");
+    }
+    await ctx.db.patch("servers", args.serverId, { ownerId: args.newOwnerId });
+    return null;
+  },
+});
+
+/**
+ * Channel a new member lands in first. Empty string clears it (falls back
+ * to the first text channel). The channel must belong to this server.
+ */
+export const setWelcomeChannel = mutation({
+  args: {
+    sessionToken: v.string(),
+    serverId: v.id("servers"),
+    channelId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const me = await currentUser(ctx, args.sessionToken);
+    const server = await ctx.db.get("servers", args.serverId);
+    if (!server || server.ownerId !== me._id) {
+      throw new Error("Only the server owner can do that");
+    }
+    if (args.channelId.trim() === "") {
+      await ctx.db.patch("servers", args.serverId, {
+        welcomeChannelId: undefined,
+      });
+      return null;
+    }
+    const channel = await ctx.db.get(
+      "conversations",
+      args.channelId as Id<"conversations">,
+    );
+    if (!channel || channel.serverId !== args.serverId) {
+      throw new Error("That channel isn't part of this server");
+    }
+    await ctx.db.patch("servers", args.serverId, {
+      welcomeChannelId: channel._id,
+    });
+    return null;
+  },
+});
+
+/** Toggle whether the public invite code accepts new members. */
+export const setInvitesPaused = mutation({
+  args: {
+    sessionToken: v.string(),
+    serverId: v.id("servers"),
+    paused: v.boolean(),
+  },
+  handler: async (ctx, args) => {
+    const me = await currentUser(ctx, args.sessionToken);
+    const server = await ctx.db.get("servers", args.serverId);
+    if (!server || server.ownerId !== me._id) {
+      throw new Error("Only the server owner can do that");
+    }
+    await ctx.db.patch("servers", args.serverId, {
+      invitesPaused: args.paused,
+    });
+    return null;
+  },
+});
+
+/**
+ * Read-only server stats for the Overview card. On-demand query (the
+ * client calls it once when opening settings, not as a live subscription)
+ * so the bounded message scan below never re-runs on every new message.
+ */
+export const serverStats = query({
+  args: { sessionToken: v.string(), serverId: v.id("servers") },
+  handler: async (ctx, args) => {
+    const me = await currentUser(ctx, args.sessionToken);
+    await requireServerMembership(ctx, args.serverId, me._id);
+
+    const channels = await ctx.db
+      .query("conversations")
+      .withIndex("by_server", (q) => q.eq("serverId", args.serverId))
+      .take(200);
+    let textChannels = 0;
+    let voiceChannels = 0;
+    for (const c of channels) {
+      if (c.channelType === "voice") voiceChannels++;
+      else textChannels++;
+    }
+
+    const members = await ctx.db
+      .query("serverMembers")
+      .withIndex("by_server", (q) => q.eq("serverId", args.serverId))
+      .take(1000);
+    // Oldest membership = the server's longest-standing member.
+    let oldestJoinedAt = 0;
+    let oldestName = "";
+    for (const m of members) {
+      if (oldestJoinedAt === 0 || m.joinedAt < oldestJoinedAt) {
+        const u = await ctx.db.get("users", m.userId);
+        if (u) {
+          oldestJoinedAt = m.joinedAt;
+          oldestName = u.displayName || u.username;
+        }
+      }
+    }
+
+    const roles = await ctx.db
+      .query("serverRoles")
+      .withIndex("by_server", (q) => q.eq("serverId", args.serverId))
+      .take(100);
+
+    // Bounded message count across channels: cap total scanned so a busy
+    // server can't turn this into an unbounded read. "capped" tells the UI
+    // to render "5000+".
+    const MESSAGE_CAP = 5000;
+    let messageCount = 0;
+    let capped = false;
+    for (const c of channels) {
+      if (messageCount >= MESSAGE_CAP) {
+        capped = true;
+        break;
+      }
+      const remaining = MESSAGE_CAP - messageCount + 1;
+      const msgs = await ctx.db
+        .query("messages")
+        .withIndex("by_conversation", (q) => q.eq("conversationId", c._id))
+        .take(remaining);
+      messageCount += msgs.length;
+    }
+    if (messageCount > MESSAGE_CAP) {
+      messageCount = MESSAGE_CAP;
+      capped = true;
+    }
+
+    return {
+      memberCount: members.length,
+      textChannels,
+      voiceChannels,
+      roleCount: roles.length,
+      messageCount,
+      messagesCapped: capped,
+      createdAt: (await ctx.db.get("servers", args.serverId))?._creationTime ?? 0,
+      oldestMemberName: oldestName,
+      oldestMemberJoinedAt: oldestJoinedAt,
+    };
   },
 });
 

@@ -80,6 +80,14 @@ pub(crate) struct App {
     pub(crate) admin_users: Vec<AdminUserRow>,
     pub(crate) admin_status: Option<String>,
     pub(crate) admin_search_input: String,
+    /// 0 = All, 1 = Users, 2 = Staff, 3 = Banned (client-side list filter).
+    pub(crate) admin_filter: i32,
+    /// Platform counters for the dashboard header (on-demand adminStats).
+    pub(crate) admin_stats: Option<crate::state::types::AdminStats>,
+    /// user_id whose expanded detail drawer is open in the admin list.
+    pub(crate) admin_detail_user_id: Option<String>,
+    /// Loaded detail for `admin_detail_user_id` (on-demand adminUserDetail).
+    pub(crate) admin_user_detail: Option<crate::state::types::AdminUserDetail>,
     pub(crate) sidebar_tab: SidebarTab,
     pub(crate) chat_filter_input: String,
     pub(crate) friends_filter_input: String,
@@ -115,6 +123,12 @@ pub(crate) struct App {
     pub(crate) server_settings_category: ServerSettingsCategory,
     pub(crate) rename_server_input: String,
     pub(crate) confirm_delete_server: bool,
+    /// Overview "about" editor buffer (seeded from the server on open).
+    pub(crate) server_description_input: String,
+    /// Member currently armed for the transfer-ownership confirm step.
+    pub(crate) confirm_transfer_owner_id: Option<String>,
+    /// Cached counts for the Overview stats card (on-demand serverStats).
+    pub(crate) server_stats: Option<crate::state::types::ServerStats>,
     pub(crate) server_members: Vec<ServerMemberRow>,
     pub(crate) server_roles: Vec<ServerRoleRow>,
     pub(crate) my_server_permissions: u32,
@@ -305,6 +319,10 @@ impl App {
                 admin_users: Vec::new(),
                 admin_status: None,
                 admin_search_input: String::new(),
+                admin_filter: 0,
+                admin_stats: None,
+                admin_detail_user_id: None,
+                admin_user_detail: None,
                 sidebar_tab: SidebarTab::Chats,
                 chat_filter_input: String::new(),
                 friends_filter_input: String::new(),
@@ -335,6 +353,9 @@ impl App {
                 server_settings_category: ServerSettingsCategory::Overview,
                 rename_server_input: String::new(),
                 confirm_delete_server: false,
+                server_description_input: String::new(),
+                confirm_transfer_owner_id: None,
+                server_stats: None,
                 server_members: Vec::new(),
                 server_roles: Vec::new(),
                 my_server_permissions: 0,
@@ -631,6 +652,10 @@ impl App {
         self.admin_users.clear();
         self.admin_status = None;
         self.admin_search_input.clear();
+        self.admin_filter = 0;
+        self.admin_stats = None;
+        self.admin_detail_user_id = None;
+        self.admin_user_detail = None;
         self.sidebar_tab = SidebarTab::Chats;
         self.chat_filter_input.clear();
         self.friends_filter_input.clear();
@@ -705,6 +730,9 @@ impl App {
         self.server_settings_open = false;
         self.server_settings_category = ServerSettingsCategory::Overview;
         self.confirm_delete_server = false;
+        self.server_description_input.clear();
+        self.confirm_transfer_owner_id = None;
+        self.server_stats = None;
         self.server_members.clear();
         self.renaming_channel_id = None;
         self.rename_channel_input.clear();

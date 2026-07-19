@@ -9,6 +9,10 @@ import {
   isPinnedOwnerUsername,
 } from "./session";
 
+// Same online window the friends/presence queries use, so "online now" in
+// the admin dashboard matches what users see elsewhere.
+const ONLINE_MS = 90_000;
+
 export const listUsers = query({
   args: { sessionToken: v.string() },
   handler: async (ctx, args) => {
@@ -109,5 +113,148 @@ export const setBanned = mutation({
       }
     }
     return null;
+  },
+});
+
+/**
+ * Platform-wide counters for the admin dashboard header. On-demand query
+ * (called when the Admin tab opens), read-only.
+ */
+export const adminStats = query({
+  args: { sessionToken: v.string() },
+  handler: async (ctx, args) => {
+    await requireStaff(ctx, args.sessionToken);
+    const users = await ctx.db.query("users").take(1000);
+
+    const presenceRows = await ctx.db.query("presence").take(2000);
+    const now = Date.now();
+    const onlineIds = new Set(
+      presenceRows
+        .filter((p) => now - p.lastSeenAt < ONLINE_MS)
+        .map((p) => String(p.userId)),
+    );
+
+    let totalUsers = 0;
+    let bots = 0;
+    let banned = 0;
+    let staff = 0;
+    let online = 0;
+    for (const u of users) {
+      if (u.isBot) {
+        bots++;
+        continue;
+      }
+      totalUsers++;
+      if (u.banned) banned++;
+      if (platformRank(u) >= 50) staff++;
+      if (onlineIds.has(String(u._id))) online++;
+    }
+
+    const servers = await ctx.db.query("servers").take(2000);
+
+    return {
+      totalUsers,
+      online,
+      banned,
+      staff,
+      bots,
+      servers: servers.length,
+    };
+  },
+});
+
+/**
+ * Expanded detail for one user, shown in the admin panel's per-user
+ * drawer. On-demand query. Staff only.
+ */
+export const adminUserDetail = query({
+  args: { sessionToken: v.string(), userId: v.id("users") },
+  handler: async (ctx, args) => {
+    await requireStaff(ctx, args.sessionToken);
+    const user = await ctx.db.get("users", args.userId);
+    if (!user) throw new Error("User not found");
+
+    const presence = await ctx.db
+      .query("presence")
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .unique();
+    const lastSeenAt = presence?.lastSeenAt ?? 0;
+    const online = lastSeenAt > 0 && Date.now() - lastSeenAt < ONLINE_MS;
+
+    const avatarImageUrl = user.avatarStorageId
+      ? (await ctx.storage.getUrl(user.avatarStorageId)) ?? ""
+      : "";
+
+    const memberships = await ctx.db
+      .query("serverMembers")
+      .withIndex("by_user", (q) => q.eq("userId", args.userId))
+      .take(50);
+    const serverNames: string[] = [];
+    for (const m of memberships) {
+      const server = await ctx.db.get("servers", m.serverId);
+      if (server) serverNames.push(server.name);
+    }
+
+    const friendsFrom = await ctx.db
+      .query("friendRequests")
+      .withIndex("by_from_and_status", (q) =>
+        q.eq("fromUserId", args.userId).eq("status", "accepted"),
+      )
+      .take(500);
+    const friendsTo = await ctx.db
+      .query("friendRequests")
+      .withIndex("by_to_and_status", (q) =>
+        q.eq("toUserId", args.userId).eq("status", "accepted"),
+      )
+      .take(500);
+
+    return {
+      userId: user._id,
+      username: user.username,
+      displayName: user.displayName,
+      role: platformRole(user),
+      banned: user.banned ?? false,
+      isBot: user.isBot ?? false,
+      bio: user.bio ?? "",
+      statusMessage: user.statusMessage ?? "",
+      avatarColor: user.avatarColor ?? "",
+      avatarImageUrl,
+      createdAt: user._creationTime,
+      online,
+      lastSeenAt,
+      serverNames,
+      friendCount: friendsFrom.length + friendsTo.length,
+    };
+  },
+});
+
+/**
+ * Force-logout: revoke every session for a user without banning them.
+ * Staff only, with the same rank guard as ban (can't revoke equal/higher
+ * rank or the pinned owner).
+ */
+export const adminRevokeSessions = mutation({
+  args: { sessionToken: v.string(), userId: v.id("users") },
+  handler: async (ctx, args) => {
+    const staff = await requireStaff(ctx, args.sessionToken);
+    if (args.userId === staff._id) {
+      throw new Error("Use the normal logout for your own account");
+    }
+    const target = await ctx.db.get("users", args.userId);
+    if (!target) throw new Error("User not found");
+    if (isPinnedOwner(target) || isPinnedOwnerUsername(target.username)) {
+      throw new Error("The platform owner can't be force-logged-out");
+    }
+    if (platformRank(target) >= platformRank(staff)) {
+      throw new Error("You can't force-logout someone of equal or higher rank");
+    }
+    const sessions = await ctx.db
+      .query("sessions")
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .take(100);
+    for (const session of sessions) {
+      await ctx.db.delete("sessions", session._id);
+    }
+    return sessions.length;
   },
 });

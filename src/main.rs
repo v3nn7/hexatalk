@@ -321,6 +321,7 @@ struct ChatRaw {
     admin_search_input: String,
     admin_status: Option<String>,
     admin_users: Vec<AdminUserRow>,
+    admin_stats: Option<crate::state::types::AdminStats>,
     active_conversation: Option<String>,
     active_conversation_kind: Option<String>,
     active_conversation_peer_id: Option<String>,
@@ -499,6 +500,7 @@ impl UiSnapshot {
             admin_search_input: app.admin_search_input.clone(),
             admin_status: app.admin_status.clone(),
             admin_users: app.admin_users.clone(),
+            admin_stats: app.admin_stats.clone(),
             active_conversation: app.active_conversation.clone(),
             active_conversation_kind: app.active_conversation_kind.clone(),
             active_conversation_peer_id: app.active_conversation_peer_id.clone(),
@@ -1209,6 +1211,13 @@ fn apply_chat(
             .as_slice()
             .into(),
     );
+    let stats = c.admin_stats.clone().unwrap_or_default();
+    ui.set_chat_admin_total_users(stats.total_users as i32);
+    ui.set_chat_admin_online(stats.online as i32);
+    ui.set_chat_admin_staff(stats.staff as i32);
+    ui.set_chat_admin_banned(stats.banned as i32);
+    ui.set_chat_admin_bots(stats.bots as i32);
+    ui.set_chat_admin_servers(stats.servers as i32);
     ui.set_chat_is_admin(session.is_admin);
     ui.set_chat_my_display_name(session.display_name.clone().into());
     ui.set_chat_my_initial(viewmodel::initial(&session.display_name));

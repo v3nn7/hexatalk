@@ -137,6 +137,15 @@ export default defineSchema({
     iconStorageId: v.optional(v.id("_storage")),
     // Vanity path e.g. "talkyss" — only Talkyss app admins may set this.
     customSlug: v.optional(v.string()),
+    // Short "about" blurb shown in server settings and the join preview.
+    // Optional so pre-existing servers validate unchanged.
+    description: v.optional(v.string()),
+    // Channel a newly-joined member lands in first (owner-configurable).
+    // Falls back to the first text channel when unset or stale.
+    welcomeChannelId: v.optional(v.id("conversations")),
+    // When true, the public invite code stops working — existing members
+    // stay, but nobody new can join by code until the owner re-opens it.
+    invitesPaused: v.optional(v.boolean()),
   })
     .index("by_inviteCode", ["inviteCode"])
     .index("by_customSlug", ["customSlug"]),
