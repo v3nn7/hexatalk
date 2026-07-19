@@ -58,7 +58,10 @@ async fn main() -> peerseal::Result<()> {
         cfg_media.fps,
         cfg_media.video_codec.name()
     );
-    println!("logical max frame = {} MiB", peerseal::HARD_MAX_FRAME / (1024 * 1024));
+    println!(
+        "logical max frame = {} MiB",
+        peerseal::HARD_MAX_FRAME / (1024 * 1024)
+    );
 
     let node_cfg = NodeConfig {
         force_relay: true,
@@ -157,9 +160,7 @@ async fn main() -> peerseal::Result<()> {
         .with_identity(Identity::generate()?)
         .with_relay(relay)?
         .with_config(node_cfg);
-    let mut g = guest
-        .join_invite(Invite::from_qr_string(&qr)?)
-        .await?;
+    let mut g = guest.join_invite(Invite::from_qr_string(&qr)?).await?;
     println!("guest SAS {}", g.info.sas_emojis());
 
     let mut call = VcCall::new(cfg_media.clone());
@@ -240,6 +241,9 @@ async fn main() -> peerseal::Result<()> {
     }
 
     let n = host_task.await.expect("join")?;
-    println!("VC DEMO OK — host received {n} video frames (profile {:?})", HdProfile::P1080);
+    println!(
+        "VC DEMO OK — host received {n} video frames (profile {:?})",
+        HdProfile::P1080
+    );
     Ok(())
 }

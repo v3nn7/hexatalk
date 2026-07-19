@@ -5,7 +5,9 @@
 //! cargo run --example transfer_demo
 //! ```
 
-use peerseal::{AppMessage, Identity, Invite, Node, NodeConfig, TransportKind, normalize_relay_url};
+use peerseal::{
+    AppMessage, Identity, Invite, Node, NodeConfig, TransportKind, normalize_relay_url,
+};
 use std::time::Duration;
 
 #[tokio::main]
@@ -65,7 +67,11 @@ async fn main() -> peerseal::Result<()> {
                 }
                 println!("host got photo {n} bytes");
             }
-            other => return Err(peerseal::Error::Protocol(format!("want MediaStart, got {other:?}"))),
+            other => {
+                return Err(peerseal::Error::Protocol(format!(
+                    "want MediaStart, got {other:?}"
+                )));
+            }
         }
         s.send_text("transfer-ok").await?;
         Ok::<_, peerseal::Error>(s.info.sas_emojis())
@@ -77,9 +83,7 @@ async fn main() -> peerseal::Result<()> {
         .with_identity(guest_id)
         .with_relay(relay)?
         .with_config(cfg);
-    let mut g = guest
-        .join_invite(Invite::from_qr_string(&qr)?)
-        .await?;
+    let mut g = guest.join_invite(Invite::from_qr_string(&qr)?).await?;
     println!("guest SAS {}", g.info.sas_emojis());
     assert_eq!(g.info.pattern, peerseal::NoisePattern::XxPsk3);
 

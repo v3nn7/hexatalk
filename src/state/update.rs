@@ -5,31 +5,43 @@
 //! files, and restructuring the dispatch into per-feature helper methods
 //! is a real behavioral refactor, not just a file move.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use convex::{FunctionResult, Value};
 use maplit::btreemap;
 
-use crate::net::rt::{Task, WindowAction};
 use crate::net::rt::write_clipboard_text;
+use crate::net::rt::{Task, WindowAction};
 
 use crate::{AVATAR_PALETTE, PEER_CLEAR_HISTORY_CTRL, scroll_chat_to_bottom};
 
 use crate::crypto;
 use crate::media::call;
+use crate::media::notify::{
+    BEEP_CALL_CONNECTED, BEEP_FRIEND_REQUEST, BEEP_MESSAGE, notify_desktop, play_beep,
+    ringtone_start, ringtone_stop,
+};
 use crate::media::screenshare;
+use crate::net::convex_parse::{
+    expect_null, expect_string, humanize_error, obj_f64, obj_str, obj_str_list, parse_admin_stats,
+    parse_admin_user_detail, parse_clear_conversation_result, parse_me, parse_object_array,
+    parse_profile_view, parse_server_stats, parse_session, value_as_bool,
+};
 use crate::net::peer;
-use crate::tray;
-use crate::media::notify::{BEEP_CALL_CONNECTED, BEEP_FRIEND_REQUEST, BEEP_MESSAGE, notify_desktop, play_beep, ringtone_start, ringtone_stop};
-use crate::ui::mentions;
-use crate::net::convex_parse::{expect_null, expect_string, humanize_error, obj_f64, obj_str, obj_str_list, parse_admin_stats, parse_admin_user_detail, parse_clear_conversation_result, parse_me, parse_object_array, parse_profile_view, parse_server_stats, parse_session, value_as_bool};
 use crate::net::subscriptions::{mark_read_task, typing_ping_task};
 use crate::state::app::App;
 use crate::state::message::Message;
-use crate::state::session_store::{clear_session_file, connect_task, save_panel_prefs, save_session_to_disk, talkyss_data_dir};
-use crate::state::types::{AttachmentPick, AuthMode, AvatarPick, BotSummary, CallRole, PendingAttachment, PeopleHit, ResizePanel, ServerSettingsCategory, SettingsCategory, SidebarTab};
+use crate::state::session_store::{
+    clear_session_file, connect_task, save_panel_prefs, save_session_to_disk, talkyss_data_dir,
+};
+use crate::state::types::{
+    AttachmentPick, AuthMode, AvatarPick, BotSummary, CallRole, PendingAttachment, PeopleHit,
+    ResizePanel, ServerSettingsCategory, SettingsCategory, SidebarTab,
+};
+use crate::tray;
+use crate::ui::mentions;
 use crate::ui::utils::{next_friend_request_privacy, next_presence_status};
 use crate::update_check::{UpdateOutcome, check_for_update_task, stage_exe_swap};
 
@@ -128,9 +140,8 @@ impl App {
             }
             Message::SubmitAuth => {
                 let Some(client) = self.client.clone() else {
-                    self.auth_error = Some(
-                        "Still connecting… wait a second, or press Retry.".to_string(),
-                    );
+                    self.auth_error =
+                        Some("Still connecting… wait a second, or press Retry.".to_string());
                     return Task::none();
                 };
                 if self.auth_busy {
@@ -152,9 +163,8 @@ impl App {
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
                     {
-                        self.auth_error = Some(
-                            "Username can only use letters, numbers, _ and -".to_string(),
-                        );
+                        self.auth_error =
+                            Some("Username can only use letters, numbers, _ and -".to_string());
                         return Task::none();
                     }
                     if password.len() < 6 {
@@ -277,9 +287,8 @@ impl App {
                 if self.pending_update_path.is_some() {
                     // Already downloaded -- no point re-downloading on
                     // every periodic tick; just remind the user.
-                    self.update_check_status = Some(
-                        "Update ready -- press Restart & install.".to_string(),
-                    );
+                    self.update_check_status =
+                        Some("Update ready -- press Restart & install.".to_string());
                     return Task::none();
                 }
                 self.update_check_status = Some("Checking...".to_string());
@@ -304,7 +313,9 @@ impl App {
                             "Update to v{version} downloaded — installs next time Talkyss restarts."
                         ));
                         self.pending_update_path = Some(path);
-                        self.show_toast(format!("Update ready (v{version}) — installs on next restart"));
+                        self.show_toast(format!(
+                            "Update ready (v{version}) — installs on next restart"
+                        ));
                     }
                     UpdateOutcome::Failed(err) => {
                         self.update_check_status = Some(format!("Update check failed: {err}"));
@@ -381,7 +392,9 @@ impl App {
             }
             Message::TrayEvent(tray::TrayEvent::Unavailable(reason)) => {
                 self.tray_ready = false;
-                self.show_toast(format!("Tray icon unavailable ({reason}) — closing will quit"));
+                self.show_toast(format!(
+                    "Tray icon unavailable ({reason}) — closing will quit"
+                ));
                 Task::none()
             }
             Message::WindowFocusChanged(focused) => {
@@ -400,8 +413,7 @@ impl App {
                 // Every online friend needs a DM conversation to
                 // background-connect over (rows are created lazily, only
                 // on first contact) — fire-and-forget, idempotent.
-                if let (Some(client), Some(session)) = (self.client.clone(), self.session.clone())
-                {
+                if let (Some(client), Some(session)) = (self.client.clone(), self.session.clone()) {
                     for friend in self.friends.iter().filter(|f| f.is_online_like()) {
                         let has_conversation = self.conversations.iter().any(|c| {
                             c.kind == "direct"
@@ -458,14 +470,12 @@ impl App {
                 Task::none()
             }
             Message::SuggestionsUpdated(list) => {
-                let urls: Vec<String> =
-                    list.iter().map(|s| s.avatar_image_url.clone()).collect();
+                let urls: Vec<String> = list.iter().map(|s| s.avatar_image_url.clone()).collect();
                 self.suggestions = list;
                 self.fetch_missing_avatars(urls)
             }
             Message::PeopleSearchFinished(Ok(hits)) => {
-                let urls: Vec<String> =
-                    hits.iter().map(|h| h.avatar_image_url.clone()).collect();
+                let urls: Vec<String> = hits.iter().map(|h| h.avatar_image_url.clone()).collect();
                 self.people_hits = hits;
                 self.fetch_missing_avatars(urls)
             }
@@ -500,10 +510,7 @@ impl App {
                             .map_err(|e| humanize_error(&e.to_string()))?;
                         match result {
                             FunctionResult::Value(Value::Object(obj)) => {
-                                let fav = obj
-                                    .get("favorite")
-                                    .map(value_as_bool)
-                                    .unwrap_or(false);
+                                let fav = obj.get("favorite").map(value_as_bool).unwrap_or(false);
                                 Ok((id_for_result, fav))
                             }
                             FunctionResult::ErrorMessage(err) => Err(humanize_error(&err)),
@@ -631,7 +638,8 @@ impl App {
             }
             Message::PeerInviteUpdated(_, None) => Task::none(),
             Message::PeerInvitePublished(peer_id, Err(err)) => {
-                self.peer_status.insert(peer_id.clone(), format!("Invite publish failed: {err}"));
+                self.peer_status
+                    .insert(peer_id.clone(), format!("Invite publish failed: {err}"));
                 if let Some(tx) = self.peer_cmd_txs.get(&peer_id) {
                     let _ = tx.send(peer::PeerCmd::InvitePublishFailed(err));
                 } else {
@@ -704,15 +712,15 @@ impl App {
                 let mut notify_title: Option<String> = None;
                 if self.conversations_loaded {
                     for conv in &list {
-                        if self.active_conversation.as_deref() != Some(conv.conversation_id.as_str())
+                        if self.active_conversation.as_deref()
+                            != Some(conv.conversation_id.as_str())
                         {
                             let prev = self
                                 .seen_last_message_at
                                 .get(&conv.conversation_id)
                                 .copied()
                                 .unwrap_or(0);
-                            if prev > 0 && conv.last_message_at > prev && notify_title.is_none()
-                            {
+                            if prev > 0 && conv.last_message_at > prev && notify_title.is_none() {
                                 notify_title = Some(conv.title.clone());
                             }
                         }
@@ -761,9 +769,9 @@ impl App {
                         })
                         .unwrap_or(false);
                     if needs_mark {
-                        let marked_at =
-                            active_row.map(|c| c.last_message_at).unwrap_or(0);
-                        self.last_marked_read_at.insert(active_id.clone(), marked_at);
+                        let marked_at = active_row.map(|c| c.last_message_at).unwrap_or(0);
+                        self.last_marked_read_at
+                            .insert(active_id.clone(), marked_at);
                         return mark_read_task(&self.client, &self.session, active_id);
                     }
                 }
@@ -1040,7 +1048,11 @@ impl App {
                 if self.friend_request_busy {
                     return Task::none();
                 }
-                let username = self.add_friend_input.trim().trim_start_matches('@').to_lowercase();
+                let username = self
+                    .add_friend_input
+                    .trim()
+                    .trim_start_matches('@')
+                    .to_lowercase();
                 if username.is_empty() {
                     self.add_friend_status = Some("Enter a username".to_string());
                     return Task::none();
@@ -1232,9 +1244,9 @@ impl App {
                             .and_then(expect_string)
                     },
                     move |result| {
-                        Message::SupportDmOpened(result.map(|id| {
-                            (peer_name.clone(), peer_id_for_result.clone(), id)
-                        }))
+                        Message::SupportDmOpened(
+                            result.map(|id| (peer_name.clone(), peer_id_for_result.clone(), id)),
+                        )
                     },
                 )
             }
@@ -1400,7 +1412,8 @@ impl App {
             Message::UnblockFinished => Task::none(),
 
             Message::OpenConversationWithFriend(user_id) => {
-                let Some(friend) = self.friends.iter().find(|f| f.user_id == user_id).cloned() else {
+                let Some(friend) = self.friends.iter().find(|f| f.user_id == user_id).cloned()
+                else {
                     return Task::none();
                 };
                 let Some(client) = self.client.clone() else {
@@ -1565,9 +1578,7 @@ impl App {
                             .and_then(expect_string)
                     },
                     move |result| {
-                        Message::GroupCreateFinished(
-                            result.map(|id| (name_for_result.clone(), id)),
-                        )
+                        Message::GroupCreateFinished(result.map(|id| (name_for_result.clone(), id)))
                     },
                 )
             }
@@ -1594,8 +1605,7 @@ impl App {
             Message::ServersUpdated(servers) => {
                 let urls: Vec<String> = servers.iter().map(|s| s.icon_url.clone()).collect();
                 if let Some(selected) = &self.selected_server {
-                    if let Some(fresh) =
-                        servers.iter().find(|s| s.server_id == selected.server_id)
+                    if let Some(fresh) = servers.iter().find(|s| s.server_id == selected.server_id)
                     {
                         // Never clobber in-progress Overview text fields while
                         // settings are open — that was wiping rename / vanity
@@ -1721,7 +1731,12 @@ impl App {
                 Task::none()
             }
             Message::SelectServer(server_id) => {
-                let Some(server) = self.servers.iter().find(|s| s.server_id == server_id).cloned() else {
+                let Some(server) = self
+                    .servers
+                    .iter()
+                    .find(|s| s.server_id == server_id)
+                    .cloned()
+                else {
                     return Task::none();
                 };
                 self.server_add_menu_open = false;
@@ -1757,13 +1772,8 @@ impl App {
                 if self.server_icon_busy {
                     return Task::none();
                 }
-                if !self
-                    .selected_server
-                    .as_ref()
-                    .is_some_and(|s| s.is_owner)
-                {
-                    self.server_status =
-                        Some("Only the server owner can change the icon".into());
+                if !self.selected_server.as_ref().is_some_and(|s| s.is_owner) {
+                    self.server_status = Some("Only the server owner can change the icon".into());
                     return Task::none();
                 }
                 Task::perform(
@@ -2180,8 +2190,7 @@ impl App {
                     return Task::none();
                 };
                 if !server.is_owner {
-                    self.server_status =
-                        Some("Only the server owner can rename the server".into());
+                    self.server_status = Some("Only the server owner can rename the server".into());
                     return Task::none();
                 }
                 let name = self.rename_server_input.trim().to_string();
@@ -2284,12 +2293,13 @@ impl App {
             // ---- Transfer ownership ----
             Message::ConfirmTransferOwnership(user_id) => {
                 // Empty string (or re-clicking the armed member) cancels.
-                self.confirm_transfer_owner_id =
-                    if user_id.is_empty() || self.confirm_transfer_owner_id.as_deref() == Some(user_id.as_str()) {
-                        None
-                    } else {
-                        Some(user_id)
-                    };
+                self.confirm_transfer_owner_id = if user_id.is_empty()
+                    || self.confirm_transfer_owner_id.as_deref() == Some(user_id.as_str())
+                {
+                    None
+                } else {
+                    Some(user_id)
+                };
                 Task::none()
             }
             Message::TransferOwnership(user_id) => {
@@ -2730,12 +2740,7 @@ impl App {
                 if due {
                     self.typing_active = true;
                     self.last_typing_ping = Some(Instant::now());
-                    return typing_ping_task(
-                        &self.client,
-                        &self.session,
-                        conversation_id,
-                        true,
-                    );
+                    return typing_ping_task(&self.client, &self.session, conversation_id, true);
                 }
                 Task::none()
             }
@@ -2798,8 +2803,7 @@ impl App {
                 let body = self.message_input.trim().to_string();
                 // Hard cap keeps UI snappy and matches typical chat limits.
                 if body.chars().count() > 4000 {
-                    self.chat_error =
-                        Some("Message is too long (max 4000 characters)".to_string());
+                    self.chat_error = Some("Message is too long (max 4000 characters)".to_string());
                     return Task::none();
                 }
                 let is_direct = self.active_conversation_kind.as_deref() == Some("direct");
@@ -2923,7 +2927,13 @@ impl App {
                     }
                     if !body.is_empty() {
                         let _ = tx.send(peer::PeerCmd::SendText(body.clone()));
-                        self.push_local_peer_message(&session, &peer_id, body.clone(), None, String::new());
+                        self.push_local_peer_message(
+                            &session,
+                            &peer_id,
+                            body.clone(),
+                            None,
+                            String::new(),
+                        );
                         // Durable shared history on Convex (unless storage disabled).
                         if !session.store_chat_history || !self.chat_store_enabled {
                             return scroll_chat_to_bottom();
@@ -2965,10 +2975,8 @@ impl App {
                         let kind = self.active_conversation_kind.as_deref().unwrap_or("");
                         let conv = self.active_conversation.clone().unwrap_or_default();
                         if matches!(kind, "group" | "channel" | "voice") {
-                            if let Some((epoch, key)) = self
-                                .group_key_store
-                                .as_ref()
-                                .and_then(|s| s.get(&conv))
+                            if let Some((epoch, key)) =
+                                self.group_key_store.as_ref().and_then(|s| s.get(&conv))
                             {
                                 let payload = crypto::MessagePayload::text_only(body_to_send);
                                 match crypto::encrypt_group_message(
@@ -2985,8 +2993,9 @@ impl App {
                                     }
                                 }
                             } else {
-                                self.chat_error =
-                                    Some("Group key not ready — wait a moment and try again".into());
+                                self.chat_error = Some(
+                                    "Group key not ready — wait a moment and try again".into(),
+                                );
                                 return Task::none();
                             }
                         }
@@ -3095,9 +3104,10 @@ impl App {
                 let mut client = client;
                 let send = Task::perform(
                     async move {
-                        let attachment_storage_id: Option<String> =
-                            if let Some(bytes) = upload_bytes {
-                                let upload_url = client
+                        let attachment_storage_id: Option<String> = if let Some(bytes) =
+                            upload_bytes
+                        {
+                            let upload_url = client
                                     .mutation(
                                         "messages:generateAttachmentUploadUrl",
                                         btreemap! {
@@ -3108,35 +3118,32 @@ impl App {
                                     .map_err(|err| humanize_error(&err.to_string()))
                                     .and_then(expect_string)?;
 
-                                let http = reqwest::Client::new();
-                                let response = http
-                                    .post(&upload_url)
-                                    .header("Content-Type", upload_content_type.as_str())
-                                    .body(bytes)
-                                    .send()
-                                    .await
-                                    .map_err(|err| format!("Upload failed: {err}"))?;
+                            let http = reqwest::Client::new();
+                            let response = http
+                                .post(&upload_url)
+                                .header("Content-Type", upload_content_type.as_str())
+                                .body(bytes)
+                                .send()
+                                .await
+                                .map_err(|err| format!("Upload failed: {err}"))?;
 
-                                if !response.status().is_success() {
-                                    return Err(format!(
-                                        "Upload failed (HTTP {})",
-                                        response.status()
-                                    ));
-                                }
+                            if !response.status().is_success() {
+                                return Err(format!("Upload failed (HTTP {})", response.status()));
+                            }
 
-                                #[derive(serde::Deserialize)]
-                                struct UploadResponse {
-                                    #[serde(rename = "storageId")]
-                                    storage_id: String,
-                                }
-                                let parsed: UploadResponse = response
-                                    .json()
-                                    .await
-                                    .map_err(|err| format!("Upload response invalid: {err}"))?;
-                                Some(parsed.storage_id)
-                            } else {
-                                None
-                            };
+                            #[derive(serde::Deserialize)]
+                            struct UploadResponse {
+                                #[serde(rename = "storageId")]
+                                storage_id: String,
+                            }
+                            let parsed: UploadResponse = response
+                                .json()
+                                .await
+                                .map_err(|err| format!("Upload response invalid: {err}"))?;
+                            Some(parsed.storage_id)
+                        } else {
+                            None
+                        };
 
                         let mut args = btreemap! {
                             "sessionToken".to_string() => Value::String(session.token),
@@ -3153,10 +3160,7 @@ impl App {
                             );
                         }
                         if let Some(reply_id) = reply_to_message_id {
-                            args.insert(
-                                "replyToMessageId".to_string(),
-                                Value::String(reply_id),
-                            );
+                            args.insert("replyToMessageId".to_string(), Value::String(reply_id));
                         }
 
                         client
@@ -3595,10 +3599,7 @@ impl App {
                             "sessionToken".to_string() => Value::String(session.token),
                         };
                         if let Some(id) = left_id {
-                            args.insert(
-                                "conversationId".to_string(),
-                                Value::String(id),
-                            );
+                            args.insert("conversationId".to_string(), Value::String(id));
                         }
                         client
                             .mutation("voice:leave", args)
@@ -3784,12 +3785,12 @@ impl App {
                 Task::none()
             }
             Message::ToggleMemberRolePicker(user_id) => {
-                self.member_role_picker_open = if self.member_role_picker_open.as_deref() == Some(user_id.as_str())
-                {
-                    None
-                } else {
-                    Some(user_id)
-                };
+                self.member_role_picker_open =
+                    if self.member_role_picker_open.as_deref() == Some(user_id.as_str()) {
+                        None
+                    } else {
+                        Some(user_id)
+                    };
                 Task::none()
             }
             Message::MyServerPermsUpdated(perms) => {
@@ -4240,7 +4241,9 @@ impl App {
                                 Ok((format!("{name} (@{uname})"), token))
                             }
                             FunctionResult::ErrorMessage(e) => Err(humanize_error(&e)),
-                            FunctionResult::ConvexError(e) => Err(humanize_error(&format!("{e:?}"))),
+                            FunctionResult::ConvexError(e) => {
+                                Err(humanize_error(&format!("{e:?}")))
+                            }
                             _ => Err("Unexpected response".into()),
                         }
                     },
@@ -4267,15 +4270,17 @@ impl App {
                                 )
                                 .await
                                 .ok();
-                            parse_object_array(result.unwrap_or(FunctionResult::Value(Value::Array(vec![]))))
-                                .into_iter()
-                                .map(|obj| BotSummary {
-                                    bot_id: obj_str(&obj, "botId"),
-                                    username: obj_str(&obj, "username"),
-                                    display_name: obj_str(&obj, "displayName"),
-                                    avatar_color: obj_str(&obj, "avatarColor"),
-                                })
-                                .collect::<Vec<_>>()
+                            parse_object_array(
+                                result.unwrap_or(FunctionResult::Value(Value::Array(vec![]))),
+                            )
+                            .into_iter()
+                            .map(|obj| BotSummary {
+                                bot_id: obj_str(&obj, "botId"),
+                                username: obj_str(&obj, "username"),
+                                display_name: obj_str(&obj, "displayName"),
+                                avatar_color: obj_str(&obj, "avatarColor"),
+                            })
+                            .collect::<Vec<_>>()
                         },
                         Message::MyBotsUpdated,
                     );
@@ -4394,7 +4399,9 @@ impl App {
                         match result {
                             FunctionResult::Value(Value::Object(obj)) => Ok(obj_str(&obj, "token")),
                             FunctionResult::ErrorMessage(e) => Err(humanize_error(&e)),
-                            FunctionResult::ConvexError(e) => Err(humanize_error(&format!("{e:?}"))),
+                            FunctionResult::ConvexError(e) => {
+                                Err(humanize_error(&format!("{e:?}")))
+                            }
                             _ => Err("Unexpected response".into()),
                         }
                     },
@@ -4658,9 +4665,11 @@ impl App {
                         // Always tear down the server-side call row. Without this,
                         // a timed-out/failed attempt leaves status=ringing|active and
                         // blocks the next call with "You're already in a call".
-                        if let (Some(call), Some(client), Some(session)) =
-                            (self.my_call.clone(), self.client.clone(), self.session.clone())
-                        {
+                        if let (Some(call), Some(client), Some(session)) = (
+                            self.my_call.clone(),
+                            self.client.clone(),
+                            self.session.clone(),
+                        ) {
                             let mut client = client;
                             return Task::perform(
                                 async move {
@@ -4970,7 +4979,8 @@ impl App {
                     self.confirm_delete_server = false;
                 } else if self.toast.is_some() {
                     self.toast = None;
-                } else if !self.chat_filter_input.is_empty() || !self.friends_filter_input.is_empty()
+                } else if !self.chat_filter_input.is_empty()
+                    || !self.friends_filter_input.is_empty()
                 {
                     self.chat_filter_input.clear();
                     self.friends_filter_input.clear();
@@ -5083,8 +5093,7 @@ impl App {
                 };
                 let display_name = self.settings_display_name_input.trim().to_string();
                 if display_name.is_empty() {
-                    self.settings_profile_status =
-                        Some("Display name can't be empty".to_string());
+                    self.settings_profile_status = Some("Display name can't be empty".to_string());
                     return Task::none();
                 }
                 let status_message = self.settings_status_input.trim().to_string();
@@ -5145,8 +5154,7 @@ impl App {
                     return Task::none();
                 };
                 if self.settings_current_password_input.is_empty() {
-                    self.settings_password_status =
-                        Some("Enter your current password".to_string());
+                    self.settings_password_status = Some("Enter your current password".to_string());
                     return Task::none();
                 }
                 if self.settings_new_password_input.len() < 6 {

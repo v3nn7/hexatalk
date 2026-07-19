@@ -17,9 +17,8 @@ async fn main() -> peerseal::Result<()> {
         )
         .init();
 
-    let relay_raw = std::env::var("PEERSEAL_RELAY").unwrap_or_else(|_| {
-        "relay-production-eb30.up.railway.app".into()
-    });
+    let relay_raw = std::env::var("PEERSEAL_RELAY")
+        .unwrap_or_else(|_| "relay-production-eb30.up.railway.app".into());
     let relay = normalize_relay_url(&relay_raw)?;
     println!("relay = {relay}");
 
@@ -58,9 +57,7 @@ async fn main() -> peerseal::Result<()> {
     tokio::time::sleep(Duration::from_millis(400)).await;
 
     let guest_invite = Invite::from_qr_string(&qr)?;
-    let guest = Node::guest()
-        .with_relay(relay)?
-        .with_config(cfg);
+    let guest = Node::guest().with_relay(relay)?.with_config(cfg);
     let mut g = guest.join_invite(guest_invite).await?;
     println!("guest transport={:?}", g.transport);
     assert_eq!(g.transport, TransportKind::Relay);

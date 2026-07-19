@@ -43,7 +43,9 @@ async fn e2e_over_configured_relay() {
         .expect("relay")
         .with_config(cfg.clone());
 
-    let invite = host.create_invite(Duration::from_secs(120)).expect("invite");
+    let invite = host
+        .create_invite(Duration::from_secs(120))
+        .expect("invite");
     let qr = invite.to_qr_string().unwrap();
 
     let inv_h = invite.clone();

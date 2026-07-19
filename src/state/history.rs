@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
-use base64::prelude::{Engine as _, BASE64_STANDARD};
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use hkdf::Hkdf;
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -84,10 +84,12 @@ fn media_path(owner_user_id: &str, conversation_id: &str, message_id: &str) -> P
         .collect();
     let safe_m: String = message_id
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-            c
-        } else {
-            '_'
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
         })
         .collect();
     vault_dir(owner_user_id)
@@ -130,9 +132,7 @@ fn encrypt_blob(key: &[u8; 32], plain: &[u8]) -> Option<Vec<u8>> {
     let mut nonce = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut nonce);
     let cipher = Aes256Gcm::new_from_slice(key).ok()?;
-    let ct = cipher
-        .encrypt(Nonce::from_slice(&nonce), plain)
-        .ok()?;
+    let ct = cipher.encrypt(Nonce::from_slice(&nonce), plain).ok()?;
     let mut out = Vec::with_capacity(1 + NONCE_LEN + ct.len());
     out.push(VAULT_VERSION);
     out.extend_from_slice(&nonce);
@@ -150,9 +150,7 @@ fn decrypt_blob(key: &[u8; 32], blob: &[u8]) -> Option<Vec<u8>> {
     let nonce = &blob[1..1 + NONCE_LEN];
     let ct = &blob[1 + NONCE_LEN..];
     let cipher = Aes256Gcm::new_from_slice(key).ok()?;
-    cipher
-        .decrypt(Nonce::from_slice(nonce), ct)
-        .ok()
+    cipher.decrypt(Nonce::from_slice(nonce), ct).ok()
 }
 
 /// Load decrypted message list for a conversation (empty if missing / wrong key).
@@ -280,10 +278,7 @@ pub(crate) fn talkyss_root() -> PathBuf {
 pub(crate) fn vault_key_fingerprint(vault_key: &[u8; 32]) -> String {
     use sha2::Digest;
     let d = Sha256::digest(vault_key);
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}",
-        d[0], d[1], d[2], d[3]
-    )
+    format!("{:02x}{:02x}{:02x}{:02x}", d[0], d[1], d[2], d[3])
 }
 
 /// Encode optional short note (unused helper for future export).

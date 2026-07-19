@@ -49,7 +49,10 @@ pub(super) fn obj_opt_str(obj: &BTreeMap<String, Value>, key: &str) -> Option<St
     }
 }
 
-pub(super) fn obj_object_array(obj: &BTreeMap<String, Value>, key: &str) -> Vec<BTreeMap<String, Value>> {
+pub(super) fn obj_object_array(
+    obj: &BTreeMap<String, Value>,
+    key: &str,
+) -> Vec<BTreeMap<String, Value>> {
     match obj.get(key) {
         Some(Value::Array(items)) => items
             .iter()
@@ -62,7 +65,10 @@ pub(super) fn obj_object_array(obj: &BTreeMap<String, Value>, key: &str) -> Vec<
     }
 }
 
-pub(super) fn obj_object(obj: &BTreeMap<String, Value>, key: &str) -> Option<BTreeMap<String, Value>> {
+pub(super) fn obj_object(
+    obj: &BTreeMap<String, Value>,
+    key: &str,
+) -> Option<BTreeMap<String, Value>> {
     match obj.get(key) {
         Some(Value::Object(o)) => Some(o.clone()),
         _ => None,
@@ -117,10 +123,7 @@ pub(crate) fn parse_session(result: FunctionResult) -> Result<Session, String> {
                 username: obj_str(&obj, "username"),
                 display_name: obj_str(&obj, "displayName"),
                 is_admin: platform_role == "admin" || platform_role == "owner",
-                is_moderator: matches!(
-                    platform_role.as_str(),
-                    "moderator" | "admin" | "owner"
-                ),
+                is_moderator: matches!(platform_role.as_str(), "moderator" | "admin" | "owner"),
                 platform_role,
                 avatar_color: obj_str(&obj, "avatarColor"),
                 status_message: obj_str(&obj, "statusMessage"),
@@ -173,10 +176,7 @@ pub(crate) fn parse_me(result: FunctionResult, token: String) -> Result<Session,
                 username: obj_str(&obj, "username"),
                 display_name: obj_str(&obj, "displayName"),
                 is_admin: platform_role == "admin" || platform_role == "owner",
-                is_moderator: matches!(
-                    platform_role.as_str(),
-                    "moderator" | "admin" | "owner"
-                ),
+                is_moderator: matches!(platform_role.as_str(), "moderator" | "admin" | "owner"),
                 platform_role,
                 avatar_color: obj_str(&obj, "avatarColor"),
                 status_message: obj_str(&obj, "statusMessage"),
@@ -226,8 +226,9 @@ pub(crate) fn value_as_bool(v: &Value) -> bool {
     }
 }
 
-
-pub(crate) fn parse_clear_conversation_result(result: FunctionResult) -> Result<(u64, bool), String> {
+pub(crate) fn parse_clear_conversation_result(
+    result: FunctionResult,
+) -> Result<(u64, bool), String> {
     match result {
         FunctionResult::Value(Value::Object(obj)) => {
             let purged = match obj.get("purged") {
@@ -294,11 +295,7 @@ pub(crate) fn parse_profile_view(result: FunctionResult) -> Result<ProfileView, 
             last_seen_at: obj_ms(&obj, "lastSeenAt"),
             presence: {
                 let p = obj_str(&obj, "presence");
-                if p.is_empty() {
-                    "offline".into()
-                } else {
-                    p
-                }
+                if p.is_empty() { "offline".into() } else { p }
             },
             is_staff: obj.get("isStaff").map(value_as_bool).unwrap_or(false),
             is_friend: obj.get("isFriend").map(value_as_bool).unwrap_or(false),
@@ -315,7 +312,6 @@ pub(crate) fn parse_profile_view(result: FunctionResult) -> Result<ProfileView, 
         FunctionResult::ConvexError(err) => Err(format!("{err:?}")),
     }
 }
-
 
 /// `servers:serverStats` → typed counts. `None` on any error (the caller
 /// just leaves the stats card in its "loading" state).

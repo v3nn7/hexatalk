@@ -7,8 +7,8 @@ use std::env;
 
 use convex::ConvexClient;
 
-use crate::net::rt::Task;
 use crate::crypto;
+use crate::net::rt::Task;
 use crate::state::message::Message;
 use crate::state::types::Session;
 
@@ -28,7 +28,9 @@ pub(super) fn connect_task(deployment_url: String) -> Task<Message> {
 
 fn session_file_path() -> std::path::PathBuf {
     let base = env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-    std::path::Path::new(&base).join("Talkyss").join("session.txt")
+    std::path::Path::new(&base)
+        .join("Talkyss")
+        .join("session.txt")
 }
 
 pub(super) fn save_session_to_disk(session: &Session) {
@@ -85,7 +87,10 @@ pub(super) fn save_panel_prefs(channel_list_width: f32, members_panel_preferred_
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(&path, format!("{channel_list_width},{members_panel_preferred_width}"));
+    let _ = std::fs::write(
+        &path,
+        format!("{channel_list_width},{members_panel_preferred_width}"),
+    );
 }
 
 /// Loads this account's local E2EE identity key from disk, generating and

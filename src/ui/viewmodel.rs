@@ -7,9 +7,13 @@
 //! default empty `slint::Image` for now -- see the image-handling pass
 //! (ports `image::Handle` -> `slint::Image`) that fills these in.
 
-use crate::slint_ui as ui;
 use crate::media::screenshare;
-use crate::state::types::{AdminUserRow, BlockedUser, ChannelSummary, ChatMessage, ConversationSummary, Friend, FriendSuggestion, IncomingRequest, OutgoingRequest, PeopleHit, ServerMemberRow, ServerSummary, is_online};
+use crate::slint_ui as ui;
+use crate::state::types::{
+    AdminUserRow, BlockedUser, ChannelSummary, ChatMessage, ConversationSummary, Friend,
+    FriendSuggestion, IncomingRequest, OutgoingRequest, PeopleHit, ServerMemberRow, ServerSummary,
+    is_online,
+};
 use crate::ui::mentions;
 use crate::ui::utils::{format_day, format_relative_time, format_time, presence_label};
 
@@ -32,7 +36,9 @@ pub(crate) fn initial(s: &str) -> slint::SharedString {
         .into()
 }
 
-pub(crate) fn badge_for_platform_role(role: &str) -> (slint::SharedString, slint::Color, slint::Color) {
+pub(crate) fn badge_for_platform_role(
+    role: &str,
+) -> (slint::SharedString, slint::Color, slint::Color) {
     match role {
         "owner" => (
             "OWNER".into(),
@@ -125,19 +131,16 @@ pub(crate) fn group_candidate_rows(
         .collect()
 }
 
-pub(crate) fn incoming_request_rows(incoming_requests: &[IncomingRequest]) -> Vec<ui::IncomingRequestRow> {
+pub(crate) fn incoming_request_rows(
+    incoming_requests: &[IncomingRequest],
+) -> Vec<ui::IncomingRequestRow> {
     incoming_requests
         .iter()
         .map(|r| ui::IncomingRequestRow {
             request_id: r.request_id.clone().into(),
             from_user_id: r.from_user_id.clone().into(),
             from_display_name: r.from_display_name.clone().into(),
-            sub: format!(
-                "@{} · {}",
-                r.from_username,
-                format_relative_time(r.sent_at)
-            )
-            .into(),
+            sub: format!("@{} · {}", r.from_username, format_relative_time(r.sent_at)).into(),
             note: r.note.clone().into(),
             status_message: r.from_status_message.clone().into(),
             initial: initial(&r.from_display_name),
@@ -149,7 +152,9 @@ pub(crate) fn incoming_request_rows(incoming_requests: &[IncomingRequest]) -> Ve
         .collect()
 }
 
-pub(crate) fn outgoing_request_rows(outgoing_requests: &[OutgoingRequest]) -> Vec<ui::OutgoingRequestRow> {
+pub(crate) fn outgoing_request_rows(
+    outgoing_requests: &[OutgoingRequest],
+) -> Vec<ui::OutgoingRequestRow> {
     outgoing_requests
         .iter()
         .map(|r| ui::OutgoingRequestRow {
@@ -229,7 +234,10 @@ pub(crate) fn blocked_rows(blocked: &[BlockedUser]) -> Vec<ui::BlockedRow> {
         .collect()
 }
 
-pub(crate) fn server_rows(servers: &[ServerSummary], selected_id: Option<&str>) -> Vec<ui::ServerRow> {
+pub(crate) fn server_rows(
+    servers: &[ServerSummary],
+    selected_id: Option<&str>,
+) -> Vec<ui::ServerRow> {
     servers
         .iter()
         .map(|s| ui::ServerRow {
@@ -508,7 +516,10 @@ pub(crate) fn chat_message_rows(
         let mentions_everyone =
             !msg.deleted && everyone_allowed && mentions::has_everyone(&msg.body);
         let ping_label = if mentions_me || mentions_everyone {
-            format!("pinged {}", format_relative_time(msg.sent_at).to_lowercase())
+            format!(
+                "pinged {}",
+                format_relative_time(msg.sent_at).to_lowercase()
+            )
         } else {
             String::new()
         };
@@ -518,10 +529,10 @@ pub(crate) fn chat_message_rows(
             author_id: msg.author_id.clone().into(),
             author_name: msg.author_name.clone().into(),
             author_initial: initial(&msg.author_name),
-                author_avatar_color: hex_color(&msg.author_avatar_color),
-                author_photo: Default::default(),
-                author_photo_url: msg.author_avatar_url.clone().into(),
-                attachment_url: msg.attachment_url.clone().into(),
+            author_avatar_color: hex_color(&msg.author_avatar_color),
+            author_photo: Default::default(),
+            author_photo_url: msg.author_avatar_url.clone().into(),
+            attachment_url: msg.attachment_url.clone().into(),
             is_bot: msg.author_is_bot,
             mine,
             encrypted: msg.encrypted,
@@ -563,7 +574,9 @@ pub(crate) fn chat_message_rows(
 /// `id` round-trips through `encode_share_target`/`decode_share_target`
 /// below since `ShareTarget` has no id of its own -- just a monitor/window
 /// name -- and the Slint side only ever hands the id back on click.
-pub(crate) fn share_target_rows(share_targets: &[screenshare::ShareTarget]) -> Vec<ui::ShareTargetRow> {
+pub(crate) fn share_target_rows(
+    share_targets: &[screenshare::ShareTarget],
+) -> Vec<ui::ShareTargetRow> {
     share_targets
         .iter()
         .map(|t| ui::ShareTargetRow {

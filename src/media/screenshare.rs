@@ -15,15 +15,15 @@
 //! (Stereo Mix / What U Hear / VB-Cable / WASAPI loopback names) via cpal
 //! and stream mono PCM chunks over the share data channel.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use webrtc::data_channel::RTCDataChannel;
 use xcap::image::codecs::jpeg::JpegEncoder;
-use xcap::image::{imageops::FilterType, DynamicImage, ExtendedColorType};
+use xcap::image::{DynamicImage, ExtendedColorType, imageops::FilterType};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ShareTarget {
@@ -153,7 +153,12 @@ fn capture_once(target: &ShareTarget) -> Option<Vec<u8>> {
     let mut buf = Vec::new();
     let mut encoder = JpegEncoder::new_with_quality(&mut buf, JPEG_QUALITY);
     encoder
-        .encode(rgb.as_raw(), rgb.width(), rgb.height(), ExtendedColorType::Rgb8)
+        .encode(
+            rgb.as_raw(),
+            rgb.width(),
+            rgb.height(),
+            ExtendedColorType::Rgb8,
+        )
         .ok()?;
     Some(buf)
 }

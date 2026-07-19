@@ -168,10 +168,7 @@ impl Invite {
 
     /// Remaining TTL, or `None` if already expired.
     pub fn remaining_ttl(&self) -> Option<Duration> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()?
-            .as_secs();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
         if now >= self.expires_at {
             None
         } else {
@@ -274,7 +271,9 @@ impl Invite {
         validate_credential("token", &self.token)?;
 
         if self.room_id.len() > u8::MAX as usize || self.token.len() > u8::MAX as usize {
-            return Err(Error::InvalidInvite("credential too long for v1 encoding".into()));
+            return Err(Error::InvalidInvite(
+                "credential too long for v1 encoding".into(),
+            ));
         }
         if self.addrs.len() > u8::MAX as usize {
             return Err(Error::InvalidInvite("too many addresses".into()));
@@ -433,10 +432,7 @@ impl Invite {
         let payload = self.to_qr_payload()?;
         let code = QrCode::new(payload.as_bytes())
             .map_err(|e| Error::InvalidInvite(format!("qr encode: {e}")))?;
-        let img = code
-            .render::<Luma<u8>>()
-            .min_dimensions(size, size)
-            .build();
+        let img = code.render::<Luma<u8>>().min_dimensions(size, size).build();
         let mut buf = Cursor::new(Vec::new());
         img.write_to(&mut buf, image::ImageFormat::Png)
             .map_err(|e| Error::Io(std::io::Error::other(e.to_string())))?;

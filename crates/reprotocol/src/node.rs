@@ -5,11 +5,11 @@ use crate::identity::{Identity, TofuCheck, TofuStore, fingerprint_of, short_fing
 use crate::invite::{Invite, InviteOptions};
 use crate::protocol::{AppMessage, DEFAULT_CHUNK};
 use crate::sas::{sas_emojis, sas_hex, sas_numbers};
-use crate::vc::{AudioFrame, VcCall, VcEvent, VideoFrame};
 use crate::session::{HandshakeOpts, NoisePattern, Role, SecureStream, SessionConfig};
 use crate::transfer::{recv_file_from_meta, send_bytes_as_file, send_file_on};
 use crate::transport::{TcpEndpoint, dial_direct};
 use crate::util::{env_relay_url, normalize_relay_url};
+use crate::vc::{AudioFrame, VcCall, VcEvent, VideoFrame};
 use std::path::Path;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -141,13 +141,10 @@ impl Session {
         }
     }
 
-    fn take_meta<S>(s: &SecureStream<S>) -> (NoisePattern, [u8; 32], Option<[u8; 32]>, Option<[u8; 32]>) {
-        (
-            s.pattern,
-            s.handshake_hash,
-            s.local_static,
-            s.remote_static,
-        )
+    fn take_meta<S>(
+        s: &SecureStream<S>,
+    ) -> (NoisePattern, [u8; 32], Option<[u8; 32]>, Option<[u8; 32]>) {
+        (s.pattern, s.handshake_hash, s.local_static, s.remote_static)
     }
 
     /// Send raw application plaintext (E2E encrypted). Prefer [`Self::send_app`].
@@ -210,11 +207,27 @@ impl Session {
         self.next_transfer_id = self.next_transfer_id.saturating_add(1);
         match &mut self.inner {
             SessionInner::Tcp(s) => {
-                send_file_on(s, path, id, content_type, DEFAULT_CHUNK, None::<fn(u64, u64)>).await?;
+                send_file_on(
+                    s,
+                    path,
+                    id,
+                    content_type,
+                    DEFAULT_CHUNK,
+                    None::<fn(u64, u64)>,
+                )
+                .await?;
             }
             #[cfg(feature = "relay")]
             SessionInner::Relay(s) => {
-                send_file_on(s, path, id, content_type, DEFAULT_CHUNK, None::<fn(u64, u64)>).await?;
+                send_file_on(
+                    s,
+                    path,
+                    id,
+                    content_type,
+                    DEFAULT_CHUNK,
+                    None::<fn(u64, u64)>,
+                )
+                .await?;
             }
         }
         Ok(id)
@@ -312,13 +325,9 @@ impl Session {
     /// Send one media frame on an open stream.
     pub async fn send_media_frame(&mut self, stream_id: u32, seq: u32, data: &[u8]) -> Result<()> {
         match &mut self.inner {
-            SessionInner::Tcp(s) => {
-                crate::media::send_media_frame(s, stream_id, seq, data).await
-            }
+            SessionInner::Tcp(s) => crate::media::send_media_frame(s, stream_id, seq, data).await,
             #[cfg(feature = "relay")]
-            SessionInner::Relay(s) => {
-                crate::media::send_media_frame(s, stream_id, seq, data).await
-            }
+            SessionInner::Relay(s) => crate::media::send_media_frame(s, stream_id, seq, data).await,
         }
     }
 
@@ -343,7 +352,11 @@ impl Session {
     }
 
     /// Answer a remote offer (updates `call`) and send answer.
-    pub async fn vc_send_answer(&mut self, call: &mut VcCall, offer: &crate::vc::VcConfig) -> Result<()> {
+    pub async fn vc_send_answer(
+        &mut self,
+        call: &mut VcCall,
+        offer: &crate::vc::VcConfig,
+    ) -> Result<()> {
         let ans = call.make_answer_for(offer);
         self.send_app(ans).await
     }

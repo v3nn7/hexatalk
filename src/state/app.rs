@@ -6,31 +6,50 @@
 //! function in the app by a wide margin.
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::time::{Duration, Instant};
 
 use convex::{ConvexClient, FunctionResult, Value};
 use maplit::btreemap;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::net::rt::{job, Job, Task, WindowAction};
+use crate::net::rt::{Job, Task, WindowAction, job};
 
-use crate::{AVATAR_PALETTE, MAX_BACKGROUND_PEER_SESSIONS, PEER_CLEAR_HISTORY_CTRL, scroll_chat_to_bottom};
 use crate::crypto;
 use crate::media::call;
-use crate::media::screenshare;
-use crate::net::peer;
-use crate::state::history;
-use crate::ui::mentions;
 use crate::media::notify::{BEEP_MESSAGE, notify_desktop, play_beep};
+use crate::media::screenshare;
 use crate::net::convex_parse::{expect_null, humanize_error, value_as_bool};
-use crate::net::subscriptions::{DECRYPT_FAILED_PLACEHOLDER, admin_users_subscription, apply_decrypted_payload, blocked_subscription, call_subscription, channels_subscription, conversations_subscription, friends_subscription, members_subscription, messages_subscription, my_call_subscription, my_perms_subscription, outgoing_requests_subscription, peer_invite_subscription, peer_session_subscription, pins_subscription, requests_subscription, roles_subscription, room_voice_subscription, servers_subscription, social_stats_subscription, suggestions_subscription, tray_subscription, typing_ping_task, typing_subscription, voice_users_subscription};
+use crate::net::peer;
+use crate::net::subscriptions::{
+    DECRYPT_FAILED_PLACEHOLDER, admin_users_subscription, apply_decrypted_payload,
+    blocked_subscription, call_subscription, channels_subscription, conversations_subscription,
+    friends_subscription, members_subscription, messages_subscription, my_call_subscription,
+    my_perms_subscription, outgoing_requests_subscription, peer_invite_subscription,
+    peer_session_subscription, pins_subscription, requests_subscription, roles_subscription,
+    room_voice_subscription, servers_subscription, social_stats_subscription,
+    suggestions_subscription, tray_subscription, typing_ping_task, typing_subscription,
+    voice_users_subscription,
+};
+use crate::state::history;
 use crate::state::message::Message;
-use crate::state::session_store::{connect_task, load_panel_prefs, load_session_token_from_disk, talkyss_data_dir};
+use crate::state::session_store::{
+    connect_task, load_panel_prefs, load_session_token_from_disk, talkyss_data_dir,
+};
 use crate::state::settings_store::{PersistedSettings, load_settings, save_settings};
-use crate::state::types::{AdminUserRow, AuthMode, BlockedUser, BotSummary, CallRole, ChannelSummary, ChatMessage, ConversationSummary, Friend, FriendSuggestion, FriendsFilter, IncomingRequest, MyCallInfo, OutgoingRequest, PendingAttachment, PeopleHit, ProfileView, ResizePanel, ServerMemberRow, ServerRoleRow, ServerSettingsCategory, ServerSummary, Session, SettingsCategory, SidebarTab, SocialStats, VoiceUserRow};
+use crate::state::types::{
+    AdminUserRow, AuthMode, BlockedUser, BotSummary, CallRole, ChannelSummary, ChatMessage,
+    ConversationSummary, Friend, FriendSuggestion, FriendsFilter, IncomingRequest, MyCallInfo,
+    OutgoingRequest, PendingAttachment, PeopleHit, ProfileView, ResizePanel, ServerMemberRow,
+    ServerRoleRow, ServerSettingsCategory, ServerSummary, Session, SettingsCategory, SidebarTab,
+    SocialStats, VoiceUserRow,
+};
+use crate::ui::mentions;
 use crate::update_check::check_for_update_task;
+use crate::{
+    AVATAR_PALETTE, MAX_BACKGROUND_PEER_SESSIONS, PEER_CLEAR_HISTORY_CTRL, scroll_chat_to_bottom,
+};
 
 pub(crate) struct App {
     pub(crate) deployment_url: String,
@@ -557,8 +576,7 @@ impl App {
     /// render-time highlight). Computed from the PLAINTEXT body, i.e. before
     /// any group/channel encryption happens.
     pub(crate) fn outgoing_mentions(&self, body: &str) -> (Vec<String>, bool) {
-        let (mut ids, everyone) =
-            mentions::resolve_mentions(body, &self.mention_id_candidates());
+        let (mut ids, everyone) = mentions::resolve_mentions(body, &self.mention_id_candidates());
         // Your own messages never count as pinging you.
         if let Some(session) = &self.session {
             ids.retain(|id| id != &session.user_id);
@@ -578,8 +596,7 @@ impl App {
             input_device: self.settings_input_device.clone(),
             output_device: self.settings_output_device.clone(),
             noise_gate: Some(f32::from_bits(
-                self.noise_gate
-                    .load(std::sync::atomic::Ordering::Relaxed),
+                self.noise_gate.load(std::sync::atomic::Ordering::Relaxed),
             )),
             voice_gains: self
                 .voice_gains
@@ -754,7 +771,10 @@ impl App {
         self.rename_channel_input.clear();
     }
 
-    pub(super) fn fetch_missing_avatars(&self, urls: impl IntoIterator<Item = String>) -> Task<Message> {
+    pub(super) fn fetch_missing_avatars(
+        &self,
+        urls: impl IntoIterator<Item = String>,
+    ) -> Task<Message> {
         self.fetch_missing_images(urls.into_iter().map(|url| (url, None, None)))
     }
 
@@ -918,7 +938,11 @@ impl App {
     /// `peer_id` is the friend this event is about — since sessions now run
     /// in the background for every online friend simultaneously, events can
     /// arrive for any of them, not just whichever DM is currently open.
-    pub(super) fn handle_peer_event(&mut self, peer_id: String, ev: peer::PeerEvent) -> Task<Message> {
+    pub(super) fn handle_peer_event(
+        &mut self,
+        peer_id: String,
+        ev: peer::PeerEvent,
+    ) -> Task<Message> {
         let is_viewing = self.active_conversation_peer_id.as_deref() == Some(peer_id.as_str());
         match ev {
             peer::PeerEvent::Status(s) => {
@@ -938,7 +962,9 @@ impl App {
                 let Some(conversation_id) = self
                     .conversations
                     .iter()
-                    .find(|c| c.kind == "direct" && c.peer_user_id.as_deref() == Some(peer_id.as_str()))
+                    .find(|c| {
+                        c.kind == "direct" && c.peer_user_id.as_deref() == Some(peer_id.as_str())
+                    })
                     .map(|c| c.conversation_id.clone())
                 else {
                     // Silently dropping this would strand the host worker in
@@ -950,7 +976,8 @@ impl App {
                         Err("no direct conversation yet".to_string()),
                     ));
                 };
-                self.peer_status.insert(peer_id.clone(), "Publishing invite…".into());
+                self.peer_status
+                    .insert(peer_id.clone(), "Publishing invite…".into());
                 let mut client = client;
                 Task::perform(
                     async move {
@@ -979,8 +1006,10 @@ impl App {
                 self.peer_connected.insert(peer_id.clone(), true);
                 self.peer_sas.insert(peer_id.clone(), sas_emojis);
                 self.peer_transport.insert(peer_id.clone(), transport);
-                self.peer_remote_fp.insert(peer_id.clone(), remote_fingerprint);
-                self.peer_status.insert(peer_id, "Secure channel ready".into());
+                self.peer_remote_fp
+                    .insert(peer_id.clone(), remote_fingerprint);
+                self.peer_status
+                    .insert(peer_id, "Secure channel ready".into());
                 if is_viewing {
                     self.chat_error = None;
                 }
@@ -1001,7 +1030,11 @@ impl App {
                     .find(|f| f.user_id == peer_id)
                     .map(|f| f.label().to_string())
                     .unwrap_or_else(|| "Peer".into());
-                let live_count = self.peer_live_messages.get(&peer_id).map(Vec::len).unwrap_or(0);
+                let live_count = self
+                    .peer_live_messages
+                    .get(&peer_id)
+                    .map(Vec::len)
+                    .unwrap_or(0);
                 let msg = ChatMessage {
                     id: format!(
                         "peer-in-{}-{}",
@@ -1038,7 +1071,10 @@ impl App {
                     }
                 }
                 self.persist_peer_message(&msg, None);
-                self.peer_live_messages.entry(peer_id).or_default().push(msg);
+                self.peer_live_messages
+                    .entry(peer_id)
+                    .or_default()
+                    .push(msg);
                 if is_viewing {
                     scroll_chat_to_bottom()
                 } else {
@@ -1089,7 +1125,10 @@ impl App {
                     notify_desktop("Talkyss", &format!("New message · {}", msg.author_name));
                 }
                 self.persist_peer_message(&msg, Some(&bytes));
-                self.peer_live_messages.entry(peer_id).or_default().push(msg);
+                self.peer_live_messages
+                    .entry(peer_id)
+                    .or_default()
+                    .push(msg);
                 if is_viewing {
                     scroll_chat_to_bottom()
                 } else {
@@ -1123,7 +1162,11 @@ impl App {
         photo: Option<Vec<u8>>,
         content_type: String,
     ) {
-        let live_count = self.peer_live_messages.get(peer_id).map(Vec::len).unwrap_or(0);
+        let live_count = self
+            .peer_live_messages
+            .get(peer_id)
+            .map(Vec::len)
+            .unwrap_or(0);
         let msg_id = format!(
             "peer-out-{}-{}",
             chrono::Local::now().timestamp_millis(),
@@ -1159,12 +1202,18 @@ impl App {
             pinned: false,
         };
         self.persist_peer_message(&msg, photo_for_vault.as_deref());
-        self.peer_live_messages.entry(peer_id.to_string()).or_default().push(msg);
+        self.peer_live_messages
+            .entry(peer_id.to_string())
+            .or_default()
+            .push(msg);
     }
 
     /// Decrypt group/channel TGK1 bodies (and legacy TKR3 DM blobs if any).
     /// Live DMs use peerseal and arrive via `peer_live_messages`.
-    pub(super) fn decrypt_incoming_messages(&mut self, messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    pub(super) fn decrypt_incoming_messages(
+        &mut self,
+        messages: Vec<ChatMessage>,
+    ) -> Vec<ChatMessage> {
         let Some(conversation_id) = self.active_conversation.clone() else {
             return messages;
         };
@@ -1492,10 +1541,7 @@ impl App {
         // close button can minimize to it instead of quitting outright. The
         // periodic update re-check also runs pre-login -- the app can update
         // itself even from the auth screen.
-        let mut subs = vec![
-            tray_subscription(tx.clone()),
-            update_check_job(tx.clone()),
-        ];
+        let mut subs = vec![tray_subscription(tx.clone()), update_check_job(tx.clone())];
 
         let (Some(client), Some(session)) = (self.client.clone(), self.session.clone()) else {
             return subs;
@@ -1554,18 +1600,14 @@ impl App {
 
         // Voice roster for the open room (server VC or group) and any room
         // we're still connected to after navigating away.
-        if let Some(conversation_id) = self
-            .active_voice_channel
-            .as_ref()
-            .or_else(|| {
-                matches!(
-                    self.active_conversation_kind.as_deref(),
-                    Some("voice") | Some("group")
-                )
-                .then(|| self.active_conversation.as_ref())
-                .flatten()
-            })
-        {
+        if let Some(conversation_id) = self.active_voice_channel.as_ref().or_else(|| {
+            matches!(
+                self.active_conversation_kind.as_deref(),
+                Some("voice") | Some("group")
+            )
+            .then(|| self.active_conversation.as_ref())
+            .flatten()
+        }) {
             subs.push(voice_users_subscription(
                 client.clone(),
                 session.token.clone(),
@@ -1624,7 +1666,8 @@ impl App {
         // require both sides to have the same chat open simultaneously to
         // ever connect at all). Capped defensively so a huge friends list
         // can't open unbounded concurrent Noise/relay sessions.
-        let mut scheduled_peers: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut scheduled_peers: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for friend in self
             .friends
             .iter()
