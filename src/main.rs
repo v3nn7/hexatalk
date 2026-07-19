@@ -143,11 +143,21 @@ async fn run_pump(
     sync_ui(&app, &ui_weak);
 
     while let Some(message) = rx.recv().await {
+        // Tick/HeartbeatFinished fire every few seconds for the whole app
+        // lifetime and, aside from clearing an expired toast, never touch
+        // any UI-visible state -- skip the full resync (property writes +
+        // repaint + accessibility tree rebuild) when that holds.
+        let is_pure_heartbeat = matches!(message, Message::Tick | Message::HeartbeatFinished);
+        let toast_before = app.toast.is_some();
+
         let task = app.update(message);
         task.spawn(&tx);
         registry.reconcile(app.subscription(tx.clone()));
         apply_window_action(&mut app, &ui_weak);
-        sync_ui(&app, &ui_weak);
+
+        if !is_pure_heartbeat || app.toast.is_some() != toast_before {
+            sync_ui(&app, &ui_weak);
+        }
     }
 }
 
@@ -918,6 +928,8 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
     static MSG_ROWS_CACHE: std::cell::RefCell<Vec<slint_ui::ChatMessageRow>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    static GROUP_CANDIDATE_ROWS_CACHE: std::cell::RefCell<Vec<slint_ui::GroupCandidateRow>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 fn rows_eq<T>(a: &[T], b: &[T], eq: impl Fn(&T, &T) -> bool) -> bool {
@@ -934,6 +946,10 @@ fn server_row_eq(a: &slint_ui::ServerRow, b: &slint_ui::ServerRow) -> bool {
         && a.initial == b.initial
         && a.icon_url == b.icon_url
         && a.active == b.active
+}
+
+fn group_candidate_row_eq(a: &slint_ui::GroupCandidateRow, b: &slint_ui::GroupCandidateRow) -> bool {
+    a.user_id == b.user_id && a.label == b.label && a.selected == b.selected
 }
 
 fn channel_row_eq(a: &slint_ui::ChannelRow, b: &slint_ui::ChannelRow) -> bool {
@@ -1094,10 +1110,11 @@ fn apply_chat(
     ui.set_chat_server_status(c.server_status.clone().unwrap_or_default().into());
     ui.set_chat_new_group_open(c.new_group_open);
     ui.set_chat_new_group_name(c.new_group_name_input.clone().into());
-    ui.set_chat_group_candidates(
-        viewmodel::group_candidate_rows(&c.friends, &c.new_group_selected)
-            .as_slice()
-            .into(),
+    set_rows_if_changed(
+        &GROUP_CANDIDATE_ROWS_CACHE,
+        viewmodel::group_candidate_rows(&c.friends, &c.new_group_selected),
+        group_candidate_row_eq,
+        |rows| ui.set_chat_group_candidates(rows.as_slice().into()),
     );
     ui.set_chat_group_create_status(c.group_create_status.clone().unwrap_or_default().into());
     set_rows_if_changed(
