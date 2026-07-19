@@ -2004,7 +2004,10 @@ fn wire_chat_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Message>) 
     on0!(on_chat_start_call, Message::StartCall);
     on0!(on_chat_toggle_store, Message::ToggleStoreHistoryThisChat);
     on0!(on_chat_toggle_channel_mute, Message::ToggleChannelMute);
-    on0!(on_chat_toggle_clear_confirm, Message::ToggleClearChatConfirm);
+    on0!(
+        on_chat_toggle_clear_confirm,
+        Message::ToggleClearChatConfirm
+    );
     on0!(on_chat_confirm_clear, Message::ConfirmClearChat);
     on0!(on_chat_join_voice, Message::JoinVoiceChannel);
     on0!(on_chat_leave_voice, Message::LeaveVoiceChannel);
@@ -2077,7 +2080,10 @@ fn wire_chat_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Message>) 
     });
     on0!(on_chat_toggle_share_size, Message::ToggleShareViewSize);
     on0!(on_chat_toggle_stream_mute, Message::ToggleStreamMute);
-    on0!(on_chat_toggle_share_system_audio, Message::ToggleShareSystemAudio);
+    on0!(
+        on_chat_toggle_share_system_audio,
+        Message::ToggleShareSystemAudio
+    );
 }
 
 /// Wires the `profile_*` Slint callbacks -- port of src/view/profile.rs's

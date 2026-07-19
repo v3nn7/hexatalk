@@ -1216,12 +1216,13 @@ fn attach_data_channel_handlers(dc: Arc<RTCDataChannel>, output: EventSender<Cal
                 // Compute stats before any await so MutexGuard isn't held
                 // across a yield (std::sync::MutexGuard is !Send).
                 let stats_evt = stats.lock().ok().and_then(|mut s| {
-                    s.note_frame(frame_len).map(|(fps, kbps)| CallEvent::ShareStats {
-                        fps,
-                        kbps,
-                        last_frame_bytes: frame_len,
-                        system_audio: false,
-                    })
+                    s.note_frame(frame_len)
+                        .map(|(fps, kbps)| CallEvent::ShareStats {
+                            fps,
+                            kbps,
+                            last_frame_bytes: frame_len,
+                            system_audio: false,
+                        })
                 });
                 Box::pin(async move {
                     let _ = tx.send(CallEvent::ScreenFrame(jpeg)).await;

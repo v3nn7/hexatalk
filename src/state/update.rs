@@ -220,11 +220,7 @@ impl App {
                 self.show_toast("Signed in");
                 let touch = if let Some(client) = self.client.clone() {
                     let mut client = client;
-                    let device = format!(
-                        "{} · {}",
-                        std::env::consts::OS,
-                        hostname_best_effort()
-                    );
+                    let device = format!("{} · {}", std::env::consts::OS, hostname_best_effort());
                     Task::perform(
                         async move {
                             let _ = client
@@ -736,13 +732,9 @@ impl App {
                     // Skip toast for muted channels (still show if not in channels list).
                     let muted = self.channels.iter().any(|c| {
                         c.muted
-                            && self
-                                .conversations
-                                .iter()
-                                .any(|conv| {
-                                    conv.title == title
-                                        && conv.conversation_id == c.conversation_id
-                                })
+                            && self.conversations.iter().any(|conv| {
+                                conv.title == title && conv.conversation_id == c.conversation_id
+                            })
                     });
                     if !muted {
                         play_beep(BEEP_MESSAGE);
@@ -4718,8 +4710,7 @@ impl App {
                         }
                         self.share_system_audio = !muted;
                         if muted {
-                            self.chat_error =
-                                Some("Peer muted your stream audio".into());
+                            self.chat_error = Some("Peer muted your stream audio".into());
                         }
                     }
                 }
@@ -4780,9 +4771,8 @@ impl App {
                 self.share_system_audio = !self.share_system_audio;
                 if self.is_sharing {
                     if let Some(tx) = &self.share_control_tx {
-                        let _ = tx.send(call::ShareCommand::SetSystemAudio(
-                            self.share_system_audio,
-                        ));
+                        let _ =
+                            tx.send(call::ShareCommand::SetSystemAudio(self.share_system_audio));
                     }
                 }
                 Task::none()
