@@ -18,7 +18,10 @@ import { CallBanner } from "call_banner.slint";
 import { ProfileScreen } from "profile.slint";
 import { SettingsScreen, SettingsCategory, BotRow, DeviceRow } from "settings.slint";
 import { ServerSettingsScreen, ServerSettingsCategory } from "server_settings.slint";
-import { SSChannelRow, SSMemberRow, SSRoleRow, SSPermRow } from "server_settings_types.slint";
+import {
+    SSChannelRow, SSMemberRow, SSRoleRow, SSPermRow,
+    SSChannelRolePick, SSChannelOverwritePermRow,
+} from "server_settings_types.slint";
 import {
     ServerRow, ConversationRow, FriendRow, IncomingRequestRow, OutgoingRequestRow,
     PeopleHitRow, SuggestionRow, BlockedRow, ChannelRow, AdminUserRow, GroupCandidateRow,
@@ -348,6 +351,10 @@ export component AppWindow inherits Window {
     in property <[SSChannelRow]> ss_channels: [];
     in property <bool> ss_can_delete_channel: false;
     in-out property <string> ss_rename_channel_input;
+    in property <string> ss_channel_perms_channel_id;
+    in property <string> ss_channel_perms_channel_name;
+    in property <[SSChannelRolePick]> ss_channel_perm_roles: [];
+    in property <[SSChannelOverwritePermRow]> ss_channel_overwrite_perms: [];
     in property <bool> ss_can_manage_roles: false;
     in property <bool> ss_can_kick: false;
     in property <[SSMemberRow]> ss_members: [];
@@ -379,6 +386,12 @@ export component AppWindow inherits Window {
     callback ss_save_rename_channel;
     callback ss_cancel_rename_channel;
     callback ss_delete_channel(string);
+    callback ss_move_channel_up(string);
+    callback ss_move_channel_down(string);
+    callback ss_edit_channel_perms(string);
+    callback ss_close_channel_perms;
+    callback ss_select_channel_perm_role(string);
+    callback ss_cycle_channel_overwrite_perm(int);
     callback ss_toggle_member_picker(string);
     callback ss_toggle_member_role(string, string);
     callback ss_kick_member(string);
@@ -422,6 +435,10 @@ export component AppWindow inherits Window {
         channels: root.ss_channels;
         can_delete_channel: root.ss_can_delete_channel;
         rename_channel_input <=> root.ss_rename_channel_input;
+        channel_perms_channel_id: root.ss_channel_perms_channel_id;
+        channel_perms_channel_name: root.ss_channel_perms_channel_name;
+        channel_perm_roles: root.ss_channel_perm_roles;
+        channel_overwrite_perms: root.ss_channel_overwrite_perms;
         can_manage_roles: root.ss_can_manage_roles;
         can_kick: root.ss_can_kick;
         members: root.ss_members;
@@ -453,6 +470,12 @@ export component AppWindow inherits Window {
         save_rename_channel => { root.ss_save_rename_channel(); }
         cancel_rename_channel => { root.ss_cancel_rename_channel(); }
         delete_channel(id) => { root.ss_delete_channel(id); }
+        move_channel_up(id) => { root.ss_move_channel_up(id); }
+        move_channel_down(id) => { root.ss_move_channel_down(id); }
+        edit_channel_perms(id) => { root.ss_edit_channel_perms(id); }
+        close_channel_perms => { root.ss_close_channel_perms(); }
+        select_channel_perm_role(id) => { root.ss_select_channel_perm_role(id); }
+        cycle_channel_overwrite_perm(bit) => { root.ss_cycle_channel_overwrite_perm(bit); }
         toggle_member_picker(id) => { root.ss_toggle_member_picker(id); }
         toggle_member_role(uid, rid) => { root.ss_toggle_member_role(uid, rid); }
         kick_member(id) => { root.ss_kick_member(id); }

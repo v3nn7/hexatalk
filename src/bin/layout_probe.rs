@@ -269,12 +269,22 @@ fn main() {
                         name: "general".into(),
                         is_voice: false,
                         is_renaming: false,
+                        is_editing_perms: false,
+                        is_system: false,
+                        is_announcement: false,
+                        can_move_up: false,
+                        can_move_down: true,
                     },
                     ui::SSChannelRow {
                         conversation_id: "c2".into(),
                         name: "general".into(),
                         is_voice: true,
                         is_renaming: false,
+                        is_editing_perms: false,
+                        is_system: false,
+                        is_announcement: false,
+                        can_move_up: false,
+                        can_move_down: false,
                     },
                 ]
                 .as_slice()
