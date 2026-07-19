@@ -23,12 +23,12 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use futures::channel::mpsc::Sender as EventSender;
 use futures::{SinkExt, StreamExt};
 use maplit::btreemap;
+use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
-use webrtc::api::APIBuilder;
+use webrtc::data_channel::RTCDataChannel;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::data_channel_state::RTCDataChannelState;
-use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::ice_transport::ice_server::RTCIceServer;
@@ -39,8 +39,8 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::rtp_transceiver::rtp_codec::{
     RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType,
 };
-use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_local::TrackLocal;
+use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_remote::TrackRemote;
 
 use super::adpcm;
@@ -128,8 +128,8 @@ impl JitterEstimator {
         }
         self.last_arrival = Some(now);
 
-        let target_ms =
-            (self.jitter_ms * 4.0 + JITTER_TARGET_MIN_MS).clamp(JITTER_TARGET_MIN_MS, JITTER_TARGET_MAX_MS);
+        let target_ms = (self.jitter_ms * 4.0 + JITTER_TARGET_MIN_MS)
+            .clamp(JITTER_TARGET_MIN_MS, JITTER_TARGET_MAX_MS);
         (target_ms * (adpcm::WIRE_SAMPLE_RATE as f32 / 1000.0)) as usize
     }
 }
@@ -305,8 +305,7 @@ fn find_input_device(name: &Option<String>) -> Option<cpal::Device> {
     let host = cpal::default_host();
     if let Some(name) = name {
         if let Ok(mut devices) = host.input_devices() {
-            if let Some(device) = devices.find(|d| d.name().map(|n| &n == name).unwrap_or(false))
-            {
+            if let Some(device) = devices.find(|d| d.name().map(|n| &n == name).unwrap_or(false)) {
                 return Some(device);
             }
         }
@@ -318,8 +317,7 @@ fn find_output_device(name: &Option<String>) -> Option<cpal::Device> {
     let host = cpal::default_host();
     if let Some(name) = name {
         if let Ok(mut devices) = host.output_devices() {
-            if let Some(device) = devices.find(|d| d.name().map(|n| &n == name).unwrap_or(false))
-            {
+            if let Some(device) = devices.find(|d| d.name().map(|n| &n == name).unwrap_or(false)) {
                 return Some(device);
             }
         }
@@ -738,17 +736,17 @@ impl CapturePipeline {
                 // Fraction of the current [prev → shaped] step where the
                 // wire-rate tick lands (phase crossed 1.0 during this sample).
                 let phase_before = self.phase - self.phase_step;
-                let alpha =
-                    ((1.0 - phase_before) / self.phase_step).clamp(0.0, 1.0);
+                let alpha = ((1.0 - phase_before) / self.phase_step).clamp(0.0, 1.0);
                 self.phase -= 1.0;
                 let lerped = self.prev_shaped + (shaped - self.prev_shaped) * alpha;
                 let dither = self.rng.triangular_dither() * (1.5 / i16::MAX as f32);
-                let sample_i16 =
-                    ((lerped + dither).clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                let sample_i16 = ((lerped + dither).clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
                 self.frame_pcm.push(sample_i16);
                 if self.frame_pcm.len() >= adpcm::FRAME_SAMPLES {
-                    let pcm =
-                        std::mem::replace(&mut self.frame_pcm, Vec::with_capacity(adpcm::FRAME_SAMPLES));
+                    let pcm = std::mem::replace(
+                        &mut self.frame_pcm,
+                        Vec::with_capacity(adpcm::FRAME_SAMPLES),
+                    );
                     let chunk = self.encoder.encode_frame(&pcm);
                     let _ = self.frame_tx.send(chunk);
                 }
@@ -783,8 +781,7 @@ pub(super) fn spawn_capture_thread(
 ) -> Result<(), String> {
     let Some(device) = find_input_device(&device_name) else {
         return Err(
-            "No microphone found. Plug one in or pick a different input in Settings."
-                .into(),
+            "No microphone found. Plug one in or pick a different input in Settings.".into(),
         );
     };
     let Ok(config) = device.default_input_config() else {
@@ -1040,9 +1037,7 @@ pub(super) fn spawn_playback_thread(
     stop_rx: std::sync::mpsc::Receiver<()>,
 ) -> Result<(), String> {
     let Some(device) = find_output_device(&device_name) else {
-        return Err(
-            "No speaker/headphones found. Check Windows sound settings.".into(),
-        );
+        return Err("No speaker/headphones found. Check Windows sound settings.".into());
     };
     let Ok(config) = device.default_output_config() else {
         return Err("Could not read speaker configuration.".into());
@@ -1055,9 +1050,7 @@ pub(super) fn spawn_playback_thread(
         | cpal::SampleFormat::I32
         | cpal::SampleFormat::F64 => {}
         other => {
-            return Err(format!(
-                "Speaker sample format {other:?} is not supported."
-            ));
+            return Err(format!("Speaker sample format {other:?} is not supported."));
         }
     }
     let stream_config: cpal::StreamConfig = config.into();
@@ -1071,8 +1064,7 @@ pub(super) fn spawn_playback_thread(
         };
         let stream = match sample_format {
             cpal::SampleFormat::F32 => {
-                let mut pipe =
-                    PlaybackPipeline::new(channels, output_rate, jitter, output_muted);
+                let mut pipe = PlaybackPipeline::new(channels, output_rate, jitter, output_muted);
                 device.build_output_stream(
                     &stream_config,
                     move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
@@ -1083,8 +1075,7 @@ pub(super) fn spawn_playback_thread(
                 )
             }
             cpal::SampleFormat::I16 => {
-                let mut pipe =
-                    PlaybackPipeline::new(channels, output_rate, jitter, output_muted);
+                let mut pipe = PlaybackPipeline::new(channels, output_rate, jitter, output_muted);
                 device.build_output_stream(
                     &stream_config,
                     move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
@@ -1095,8 +1086,7 @@ pub(super) fn spawn_playback_thread(
                 )
             }
             cpal::SampleFormat::U16 => {
-                let mut pipe =
-                    PlaybackPipeline::new(channels, output_rate, jitter, output_muted);
+                let mut pipe = PlaybackPipeline::new(channels, output_rate, jitter, output_muted);
                 device.build_output_stream(
                     &stream_config,
                     move |data: &mut [u16], _: &cpal::OutputCallbackInfo| {
@@ -1107,8 +1097,7 @@ pub(super) fn spawn_playback_thread(
                 )
             }
             cpal::SampleFormat::I32 => {
-                let mut pipe =
-                    PlaybackPipeline::new(channels, output_rate, jitter, output_muted);
+                let mut pipe = PlaybackPipeline::new(channels, output_rate, jitter, output_muted);
                 device.build_output_stream(
                     &stream_config,
                     move |data: &mut [i32], _: &cpal::OutputCallbackInfo| {
@@ -1119,8 +1108,7 @@ pub(super) fn spawn_playback_thread(
                 )
             }
             cpal::SampleFormat::F64 => {
-                let mut pipe =
-                    PlaybackPipeline::new(channels, output_rate, jitter, output_muted);
+                let mut pipe = PlaybackPipeline::new(channels, output_rate, jitter, output_muted);
                 device.build_output_stream(
                     &stream_config,
                     move |data: &mut [f64], _: &cpal::OutputCallbackInfo| {
@@ -1136,9 +1124,7 @@ pub(super) fn spawn_playback_thread(
         let stream = match stream {
             Ok(stream) => stream,
             Err(err) => {
-                let _ = ready_tx.send(Err(format!(
-                    "Could not open the speaker: {err}."
-                )));
+                let _ = ready_tx.send(Err(format!("Could not open the speaker: {err}.")));
                 return;
             }
         };
@@ -1356,40 +1342,42 @@ pub(crate) async fn run_call(params: CallParams, mut output: EventSender<CallEve
 
     let jitter_for_track = Arc::clone(&jitter);
     let gains_for_track = Arc::clone(&gains);
-    pc.on_track(Box::new(move |track: Arc<TrackRemote>, _receiver, _transceiver| {
-        let jitter = Arc::clone(&jitter_for_track);
-        let gains = Arc::clone(&gains_for_track);
-        Box::pin(async move {
-            let mut jitter_estimator = JitterEstimator::new();
-            loop {
-                match track.read_rtp().await {
-                    Ok((packet, _)) => {
-                        // Foreign payload (mismatched app version) — drop,
-                        // never decode. Negotiation should already prevent
-                        // this; the magic tag is the belt-and-braces check.
-                        let Some(mut samples) = adpcm::decode_frame(&packet.payload) else {
-                            continue;
-                        };
-                        // 1:1 call: the remote always uses the "*" gain key.
-                        let g = gains
-                            .lock()
-                            .ok()
-                            .and_then(|m| m.get("*").copied())
-                            .unwrap_or(1.0);
-                        apply_gain(&mut samples, g);
-                        let target = jitter_estimator.on_packet_arrival();
-                        if let Ok(mut buf) = jitter.lock() {
-                            buf.extend(samples);
-                            while buf.len() > target {
-                                buf.pop_front();
+    pc.on_track(Box::new(
+        move |track: Arc<TrackRemote>, _receiver, _transceiver| {
+            let jitter = Arc::clone(&jitter_for_track);
+            let gains = Arc::clone(&gains_for_track);
+            Box::pin(async move {
+                let mut jitter_estimator = JitterEstimator::new();
+                loop {
+                    match track.read_rtp().await {
+                        Ok((packet, _)) => {
+                            // Foreign payload (mismatched app version) — drop,
+                            // never decode. Negotiation should already prevent
+                            // this; the magic tag is the belt-and-braces check.
+                            let Some(mut samples) = adpcm::decode_frame(&packet.payload) else {
+                                continue;
+                            };
+                            // 1:1 call: the remote always uses the "*" gain key.
+                            let g = gains
+                                .lock()
+                                .ok()
+                                .and_then(|m| m.get("*").copied())
+                                .unwrap_or(1.0);
+                            apply_gain(&mut samples, g);
+                            let target = jitter_estimator.on_packet_arrival();
+                            if let Ok(mut buf) = jitter.lock() {
+                                buf.extend(samples);
+                                while buf.len() > target {
+                                    buf.pop_front();
+                                }
                             }
                         }
+                        Err(_) => break,
                     }
-                    Err(_) => break,
                 }
-            }
-        })
-    }));
+            })
+        },
+    ));
 
     // Screen share travels over a data channel rather than a video track
     // (see screenshare.rs). The caller creates it explicitly further down;
@@ -1408,13 +1396,9 @@ pub(crate) async fn run_call(params: CallParams, mut output: EventSender<CallEve
 
     let (frame_tx, mut frame_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     let (capture_stop_tx, capture_stop_rx) = std::sync::mpsc::channel::<()>();
-    if let Err(msg) = spawn_capture_thread(
-        input_device,
-        muted,
-        noise_gate,
-        frame_tx,
-        capture_stop_rx,
-    ) {
+    if let Err(msg) =
+        spawn_capture_thread(input_device, muted, noise_gate, frame_tx, capture_stop_rx)
+    {
         fail(&mut output, msg).await;
         let _ = playback_stop_tx.send(());
         let _ = pc.close().await;
@@ -1444,9 +1428,7 @@ pub(crate) async fn run_call(params: CallParams, mut output: EventSender<CallEve
             first_packet = false;
             sequence_number = sequence_number.wrapping_add(1);
             timestamp = timestamp.wrapping_add(adpcm::FRAME_SAMPLES as u32);
-            let _ = track_for_send
-                .write_rtp_with_extensions(&packet, &[])
-                .await;
+            let _ = track_for_send.write_rtp_with_extensions(&packet, &[]).await;
         }
     });
 
@@ -1892,7 +1874,11 @@ pub(crate) async fn run_call(params: CallParams, mut output: EventSender<CallEve
         // Both signaling subscriptions failed to even open -- without
         // this the engine just tears down silently and the banner
         // vanishes with no explanation.
-        fail(&mut output, "Could not watch call signaling -- check your connection.").await;
+        fail(
+            &mut output,
+            "Could not watch call signaling -- check your connection.",
+        )
+        .await;
     }
 
     if let Some(flag) = share_stop_flag.take() {

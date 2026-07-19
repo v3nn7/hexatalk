@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
-use base64::prelude::{Engine as _, BASE64_STANDARD};
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use hkdf::Hkdf;
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -174,9 +174,7 @@ pub(crate) fn encrypt_attachment(plain: &[u8]) -> (Vec<u8>, String, String) {
     OsRng.fill_bytes(&mut nonce_bytes);
     let cipher = Aes256Gcm::new_from_slice(&key).expect("32-byte key");
     let nonce = Nonce::from_slice(&nonce_bytes);
-    let ct = cipher
-        .encrypt(nonce, plain)
-        .expect("attachment encryption");
+    let ct = cipher.encrypt(nonce, plain).expect("attachment encryption");
     (
         ct,
         BASE64_STANDARD.encode(key),
@@ -185,7 +183,11 @@ pub(crate) fn encrypt_attachment(plain: &[u8]) -> (Vec<u8>, String, String) {
 }
 
 /// Decrypt attachment bytes produced by [`encrypt_attachment`].
-pub(crate) fn decrypt_attachment(key_b64: &str, nonce_b64: &str, ciphertext: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn decrypt_attachment(
+    key_b64: &str,
+    nonce_b64: &str,
+    ciphertext: &[u8],
+) -> Option<Vec<u8>> {
     let key = BASE64_STANDARD.decode(key_b64).ok()?;
     let nonce_bytes = BASE64_STANDARD.decode(nonce_b64).ok()?;
     if key.len() != 32 || nonce_bytes.len() != NONCE_LEN {
@@ -483,15 +485,7 @@ fn decrypt_with_mk(
 ) -> Option<String> {
     let cipher = Aes256Gcm::new_from_slice(mk).ok()?;
     let nonce = Nonce::from_slice(nonce_bytes);
-    let plain = cipher
-        .decrypt(
-            nonce,
-            Payload {
-                msg: ct,
-                aad,
-            },
-        )
-        .ok()?;
+    let plain = cipher.decrypt(nonce, Payload { msg: ct, aad }).ok()?;
     String::from_utf8(plain).ok()
 }
 
@@ -549,11 +543,7 @@ impl DecryptCache {
 
     fn ct_hash(ciphertext: &str) -> String {
         let digest = Sha256::digest(ciphertext.as_bytes());
-        digest
-            .iter()
-            .take(8)
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
     }
 
     fn entry_key(message_id: &str, ciphertext: &str) -> String {
@@ -568,9 +558,7 @@ impl DecryptCache {
     }
 
     pub(crate) fn get_by_ciphertext(&self, ciphertext: &str) -> Option<String> {
-        self.by_ciphertext
-            .get(&Self::ct_hash(ciphertext))
-            .cloned()
+        self.by_ciphertext.get(&Self::ct_hash(ciphertext)).cloned()
     }
 
     pub(crate) fn put(&mut self, message_id: &str, ciphertext: &str, plaintext: String) {
@@ -688,9 +676,7 @@ pub(crate) fn unseal_group_key(
         return None;
     }
     let (nonce_bytes, ct) = sealed.split_at(NONCE_LEN);
-    let shared = identity
-        .secret
-        .diffie_hellman(&PublicKey::from(eph_bytes));
+    let shared = identity.secret.diffie_hellman(&PublicKey::from(eph_bytes));
     let wrap_key = hkdf_32(shared.as_bytes(), None, HKDF_INFO_GROUP_WRAP);
     let cipher = Aes256Gcm::new_from_slice(&wrap_key).ok()?;
     let nonce = Nonce::from_slice(nonce_bytes);
@@ -756,15 +742,7 @@ pub(crate) fn decrypt_group_message(
     let cipher = Aes256Gcm::new_from_slice(&mk).ok()?;
     let nonce = Nonce::from_slice(&nonce_bytes);
     let aad = group_aad(conversation_id, epoch);
-    let plain = cipher
-        .decrypt(
-            nonce,
-            Payload {
-                msg: ct,
-                aad: &aad,
-            },
-        )
-        .ok()?;
+    let plain = cipher.decrypt(nonce, Payload { msg: ct, aad: &aad }).ok()?;
     String::from_utf8(plain).ok()
 }
 

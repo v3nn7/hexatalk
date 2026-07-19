@@ -33,7 +33,12 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<Image> {
     let raw = rgba.into_raw();
     let pixels: Vec<Rgba8Pixel> = raw
         .chunks_exact(4)
-        .map(|c| Rgba8Pixel { r: c[0], g: c[1], b: c[2], a: c[3] })
+        .map(|c| Rgba8Pixel {
+            r: c[0],
+            g: c[1],
+            b: c[2],
+            a: c[3],
+        })
         .collect();
     let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(w, h);
     buf.make_mut_slice().copy_from_slice(&pixels);
@@ -44,10 +49,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<Image> {
 /// cache carried in the snapshot. Returns `None` when there are no bytes yet
 /// for that URL, so the caller can fall back to the colored-initial
 /// placeholder.
-pub(crate) fn image_for(
-    byte_cache: &HashMap<String, Arc<[u8]>>,
-    url: &str,
-) -> Option<Image> {
+pub(crate) fn image_for(byte_cache: &HashMap<String, Arc<[u8]>>, url: &str) -> Option<Image> {
     if url.is_empty() {
         return None;
     }

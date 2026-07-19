@@ -45,7 +45,11 @@ async fn run_update_check() -> UpdateOutcome {
         Err(_) => None,
     };
 
-    let remote_size: Option<u64> = match reqwest::Client::new().head(UPDATE_DOWNLOAD_URL).send().await {
+    let remote_size: Option<u64> = match reqwest::Client::new()
+        .head(UPDATE_DOWNLOAD_URL)
+        .send()
+        .await
+    {
         Ok(resp) => resp.content_length(),
         Err(_) => None,
     };
@@ -131,9 +135,7 @@ pub(crate) fn stage_exe_swap(staged_path: &std::path::Path, relaunch: bool) {
     let staged = dos_path(staged_path);
     let exe = dos_path(&exe_path);
     let script = if relaunch {
-        format!(
-            "ping -n 2 127.0.0.1 >nul & move /Y \"{staged}\" \"{exe}\" & start \"\" \"{exe}\"",
-        )
+        format!("ping -n 2 127.0.0.1 >nul & move /Y \"{staged}\" \"{exe}\" & start \"\" \"{exe}\"",)
     } else {
         format!("ping -n 2 127.0.0.1 >nul & move /Y \"{staged}\" \"{exe}\"",)
     };

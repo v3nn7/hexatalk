@@ -10,22 +10,29 @@
 //! `SubscriptionRegistry::reconcile` call every update cycle -- same
 //! dedup-by-id semantics `Subscription::run_with_id` had, just explicit.
 
-use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32};
 
 use convex::{ConvexClient, FunctionResult, Value};
 use futures::StreamExt;
 use maplit::btreemap;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::net::rt::{job, Job, Task};
 use crate::crypto;
 use crate::media::call;
+use crate::net::convex_parse::{
+    expect_null, obj_bool, obj_f64, obj_ms, obj_object, obj_object_array, obj_opt_str, obj_str,
+    obj_str_list, parse_object_array, value_as_bool,
+};
 use crate::net::peer;
-use crate::tray;
-use crate::net::convex_parse::{expect_null, obj_bool, obj_f64, obj_ms, obj_object, obj_object_array, obj_opt_str, obj_str, obj_str_list, parse_object_array, value_as_bool};
+use crate::net::rt::{Job, Task, job};
 use crate::state::message::Message;
-use crate::state::types::{AdminUserRow, BlockedUser, CallRole, ChannelSummary, ChatMessage, ConversationSummary, Friend, FriendSuggestion, IncomingRequest, MemberRoleTag, MyCallInfo, OutgoingRequest, ServerMemberRow, ServerRoleRow, ServerSummary, Session, SocialStats, VoiceUserRow};
+use crate::state::types::{
+    AdminUserRow, BlockedUser, CallRole, ChannelSummary, ChatMessage, ConversationSummary, Friend,
+    FriendSuggestion, IncomingRequest, MemberRoleTag, MyCallInfo, OutgoingRequest, ServerMemberRow,
+    ServerRoleRow, ServerSummary, Session, SocialStats, VoiceUserRow,
+};
+use crate::tray;
 
 pub(crate) fn roles_subscription(
     client: ConvexClient,
@@ -256,11 +263,7 @@ pub(crate) fn friends_subscription(
                     last_seen_at: obj_ms(&obj, "lastSeenAt"),
                     presence: {
                         let p = obj_str(&obj, "presence");
-                        if p.is_empty() {
-                            "offline".into()
-                        } else {
-                            p
-                        }
+                        if p.is_empty() { "offline".into() } else { p }
                     },
                     avatar_color: obj_str(&obj, "avatarColor"),
                     avatar_image_url: obj_str(&obj, "avatarImageUrl"),
@@ -348,11 +351,7 @@ pub(crate) fn channels_subscription(
                     name: obj_str(&obj, "name"),
                     channel_type: {
                         let t = obj_str(&obj, "channelType");
-                        if t.is_empty() {
-                            "text".into()
-                        } else {
-                            t
-                        }
+                        if t.is_empty() { "text".into() } else { t }
                     },
                     // Absent pre-deploy -> 0 (badge hidden).
                     mention_count: obj_f64(&obj, "mentionCount") as u32,
@@ -398,11 +397,7 @@ pub(crate) fn members_subscription(
                     is_bot: obj_bool(&obj, "isBot"),
                     platform_role: {
                         let r = obj_str(&obj, "platformRole");
-                        if r.is_empty() {
-                            "user".into()
-                        } else {
-                            r
-                        }
+                        if r.is_empty() { "user".into() } else { r }
                     },
                     last_seen_at: obj_ms(&obj, "lastSeenAt"),
                     roles: obj_object_array(&obj, "roles")
@@ -466,11 +461,7 @@ pub(crate) fn requests_subscription(
                     mutual_servers: obj_str_list(&obj, "mutualServers"),
                     presence: {
                         let p = obj_str(&obj, "presence");
-                        if p.is_empty() {
-                            "offline".into()
-                        } else {
-                            p
-                        }
+                        if p.is_empty() { "offline".into() } else { p }
                     },
                     is_staff: obj.get("isStaff").map(value_as_bool).unwrap_or(false),
                 })
@@ -579,11 +570,7 @@ pub(crate) fn suggestions_subscription(
                     status_message: obj_str(&obj, "statusMessage"),
                     presence: {
                         let p = obj_str(&obj, "presence");
-                        if p.is_empty() {
-                            "offline".into()
-                        } else {
-                            p
-                        }
+                        if p.is_empty() { "offline".into() } else { p }
                     },
                     mutual_servers: obj_str_list(&obj, "mutualServers"),
                 })
@@ -656,7 +643,10 @@ pub(crate) fn conversations_subscription(
                     mention_count: obj_f64(&obj, "mentionCount") as u32,
                 })
                 .collect();
-            if tx.send(Message::ConversationsUpdated(conversations)).is_err() {
+            if tx
+                .send(Message::ConversationsUpdated(conversations))
+                .is_err()
+            {
                 break;
             }
         }
@@ -894,52 +884,49 @@ pub(crate) fn pins_subscription(
     conversation_id: String,
     tx: UnboundedSender<Message>,
 ) -> Job {
-    job(
-        format!("pins-subscription:{conversation_id}"),
-        async move {
-            let mut client = client;
-            let Ok(mut sub) = client
-                .subscribe(
-                    "messages:listPinned",
-                    btreemap! {
-                        "sessionToken".to_string() => Value::String(token),
-                        "conversationId".to_string() => Value::String(conversation_id),
-                    },
-                )
-                .await
-            else {
-                return;
-            };
-            while let Some(result) = sub.next().await {
-                let pinned = parse_object_array(result)
-                    .into_iter()
-                    .map(|obj| ChatMessage {
-                        id: obj_str(&obj, "id"),
-                        author_id: obj_str(&obj, "authorId"),
-                        author_name: obj_str(&obj, "authorName"),
-                        author_avatar_color: String::new(),
-                        author_avatar_url: String::new(),
-                        author_is_bot: false,
-                        body: obj_str(&obj, "snippet"),
-                        kind: "text".into(),
-                        attachment_url: String::new(),
-                        attachment_key: None,
-                        attachment_nonce: None,
-                        reactions: Vec::new(),
-                        reply_to: None,
-                        encrypted: obj_bool(&obj, "encrypted"),
-                        sent_at: obj_ms(&obj, "sentAt"),
-                        deleted: false,
-                        edited: false,
-                        pinned: true,
-                    })
-                    .collect();
-                if tx.send(Message::PinnedMessagesUpdated(pinned)).is_err() {
-                    break;
-                }
+    job(format!("pins-subscription:{conversation_id}"), async move {
+        let mut client = client;
+        let Ok(mut sub) = client
+            .subscribe(
+                "messages:listPinned",
+                btreemap! {
+                    "sessionToken".to_string() => Value::String(token),
+                    "conversationId".to_string() => Value::String(conversation_id),
+                },
+            )
+            .await
+        else {
+            return;
+        };
+        while let Some(result) = sub.next().await {
+            let pinned = parse_object_array(result)
+                .into_iter()
+                .map(|obj| ChatMessage {
+                    id: obj_str(&obj, "id"),
+                    author_id: obj_str(&obj, "authorId"),
+                    author_name: obj_str(&obj, "authorName"),
+                    author_avatar_color: String::new(),
+                    author_avatar_url: String::new(),
+                    author_is_bot: false,
+                    body: obj_str(&obj, "snippet"),
+                    kind: "text".into(),
+                    attachment_url: String::new(),
+                    attachment_key: None,
+                    attachment_nonce: None,
+                    reactions: Vec::new(),
+                    reply_to: None,
+                    encrypted: obj_bool(&obj, "encrypted"),
+                    sent_at: obj_ms(&obj, "sentAt"),
+                    deleted: false,
+                    edited: false,
+                    pinned: true,
+                })
+                .collect();
+            if tx.send(Message::PinnedMessagesUpdated(pinned)).is_err() {
+                break;
             }
-        },
-    )
+        }
+    })
 }
 
 pub(crate) fn typing_subscription(
@@ -1004,7 +991,10 @@ pub(crate) fn peer_session_subscription(
             return;
         }
         while let Some(ev) = event_rx.next().await {
-            if tx.send(Message::PeerEvent(peer_user_id.clone(), ev)).is_err() {
+            if tx
+                .send(Message::PeerEvent(peer_user_id.clone(), ev))
+                .is_err()
+            {
                 break;
             }
         }
@@ -1041,11 +1031,7 @@ pub(crate) fn peer_invite_subscription(
                         None
                     } else {
                         let p = obj_str(&obj, "invitePayload");
-                        if p.is_empty() {
-                            None
-                        } else {
-                            Some(p)
-                        }
+                        if p.is_empty() { None } else { Some(p) }
                     }
                 }
                 FunctionResult::Value(Value::Null) => None,
@@ -1057,7 +1043,10 @@ pub(crate) fn peer_invite_subscription(
                 Some(p) if p != &last_payload => {
                     last_payload = p.clone();
                     if tx
-                        .send(Message::PeerInviteUpdated(peer_user_id.clone(), Some(p.clone())))
+                        .send(Message::PeerInviteUpdated(
+                            peer_user_id.clone(),
+                            Some(p.clone()),
+                        ))
                         .is_err()
                     {
                         break;

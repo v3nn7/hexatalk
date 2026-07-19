@@ -106,9 +106,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (id, size, _name) = match meta {
-        AppMessage::FileMeta {
-            id, size, name, ..
-        } => (id, size, name),
+        AppMessage::FileMeta { id, size, name, .. } => (id, size, name),
         _ => {
             return Err(Error::Protocol(
                 "recv_file_from_meta expects FileMeta".into(),

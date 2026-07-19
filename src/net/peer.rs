@@ -7,9 +7,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use base64::prelude::{Engine as _, BASE64_STANDARD};
-use futures::channel::mpsc as futures_mpsc;
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use futures::SinkExt;
+use futures::channel::mpsc as futures_mpsc;
 use peerseal::{
     AppMessage, Identity, Invite, Node, NodeConfig, Session, TransportKind, normalize_relay_url,
 };
@@ -396,9 +396,7 @@ async fn guest_connect_with_retry(
         } else {
             let _ = emit(
                 event_tx,
-                PeerEvent::Status(
-                    "Waiting for host invite… (host must open this DM too)".into(),
-                ),
+                PeerEvent::Status("Waiting for host invite… (host must open this DM too)".into()),
             )
             .await;
             loop {

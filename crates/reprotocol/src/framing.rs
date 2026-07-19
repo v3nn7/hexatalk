@@ -49,7 +49,9 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
     }
     // Wire chunks stay small (Noise); hard cap slightly above NOISE_MAX_MESSAGE.
     if payload.len() > NOISE_MAX_MESSAGE + 64 {
-        return Err(Error::Framing("wire frame exceeds Noise-related maximum".into()));
+        return Err(Error::Framing(
+            "wire frame exceeds Noise-related maximum".into(),
+        ));
     }
     let len = payload.len() as u32;
     writer.write_all(&len.to_be_bytes()).await?;
@@ -59,10 +61,7 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
 }
 
 /// Read a length-prefixed wire frame.
-pub async fn read_frame<R: AsyncRead + Unpin>(
-    reader: &mut R,
-    max_frame: usize,
-) -> Result<Vec<u8>> {
+pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R, max_frame: usize) -> Result<Vec<u8>> {
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;
@@ -79,7 +78,11 @@ pub async fn read_frame<R: AsyncRead + Unpin>(
 }
 
 /// Split a logical plaintext into fragment payloads (each ≤ `chunk_plain_max`).
-pub fn split_logical(msg_id: u32, plaintext: &[u8], chunk_plain_max: usize) -> Result<Vec<Vec<u8>>> {
+pub fn split_logical(
+    msg_id: u32,
+    plaintext: &[u8],
+    chunk_plain_max: usize,
+) -> Result<Vec<Vec<u8>>> {
     if plaintext.len() > HARD_MAX_FRAME {
         return Err(Error::Framing(format!(
             "logical message {} exceeds hard max {}",
@@ -87,9 +90,7 @@ pub fn split_logical(msg_id: u32, plaintext: &[u8], chunk_plain_max: usize) -> R
             HARD_MAX_FRAME
         )));
     }
-    let data_max = chunk_plain_max
-        .saturating_sub(FRAG_HEADER_LEN)
-        .max(1024);
+    let data_max = chunk_plain_max.saturating_sub(FRAG_HEADER_LEN).max(1024);
     if plaintext.is_empty() {
         return Ok(vec![encode_fragment(msg_id, 0, 1, 0, true, &[])]);
     }
@@ -103,12 +104,7 @@ pub fn split_logical(msg_id: u32, plaintext: &[u8], chunk_plain_max: usize) -> R
     for (i, chunk) in chunks.iter().enumerate() {
         let last = i + 1 == chunks.len();
         out.push(encode_fragment(
-            msg_id,
-            i as u32,
-            count,
-            total_len,
-            last,
-            chunk,
+            msg_id, i as u32, count, total_len, last, chunk,
         ));
     }
     Ok(out)
@@ -148,7 +144,14 @@ pub fn parse_fragment(data: &[u8]) -> Result<(u32, u32, u32, u32, bool, &[u8])> 
     let count = u32::from_be_bytes(data[10..14].try_into().unwrap());
     let total_len = u32::from_be_bytes(data[14..18].try_into().unwrap());
     let last = flags & FLAG_LAST != 0;
-    Ok((msg_id, index, count, total_len, last, &data[FRAG_HEADER_LEN..]))
+    Ok((
+        msg_id,
+        index,
+        count,
+        total_len,
+        last,
+        &data[FRAG_HEADER_LEN..],
+    ))
 }
 
 /// Reassembly state for one logical message.

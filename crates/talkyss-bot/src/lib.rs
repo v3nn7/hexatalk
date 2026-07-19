@@ -44,11 +44,7 @@ pub struct Message {
 
 impl Bot {
     /// Headless login with bot username + one-time token from the desktop app.
-    pub async fn login(
-        deployment_url: &str,
-        username: &str,
-        token: &str,
-    ) -> Result<Self> {
+    pub async fn login(deployment_url: &str, username: &str, token: &str) -> Result<Self> {
         let mut client = ConvexClient::new(deployment_url)
             .await
             .context("connect to Convex")?;

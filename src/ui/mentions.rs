@@ -38,7 +38,10 @@ fn is_name_char(c: char) -> bool {
 }
 
 fn boundary_before(lower: &str, at: usize) -> bool {
-    lower[..at].chars().next_back().is_none_or(|c| !is_name_char(c))
+    lower[..at]
+        .chars()
+        .next_back()
+        .is_none_or(|c| !is_name_char(c))
 }
 
 fn boundary_after(lower: &str, at: usize) -> bool {
@@ -192,10 +195,7 @@ pub(crate) fn complete(input: &str, name: &str) -> String {
 /// Name matching is case-insensitive; when two members share a display
 /// name the first candidate wins (same ambiguity the highlight parser has).
 /// Unknown @names are ignored -- they never become ids.
-pub(crate) fn resolve_mentions(
-    text: &str,
-    candidates: &[(String, String)],
-) -> (Vec<String>, bool) {
+pub(crate) fn resolve_mentions(text: &str, candidates: &[(String, String)]) -> (Vec<String>, bool) {
     let names: Vec<String> = candidates.iter().map(|(name, _)| name.clone()).collect();
     let found = parse_mentions(text, &names);
     let mut ids: Vec<String> = Vec::new();
@@ -206,7 +206,10 @@ pub(crate) fn resolve_mentions(
             continue;
         }
         let lower = m.name.to_lowercase();
-        if let Some((_, id)) = candidates.iter().find(|(name, _)| name.to_lowercase() == lower) {
+        if let Some((_, id)) = candidates
+            .iter()
+            .find(|(name, _)| name.to_lowercase() == lower)
+        {
             if !ids.contains(id) {
                 ids.push(id.clone());
             }
@@ -221,10 +224,7 @@ pub(crate) fn snippet(body: &str, max_chars: usize) -> String {
     if one_line.chars().count() <= max_chars {
         one_line
     } else {
-        let mut s: String = one_line
-            .chars()
-            .take(max_chars.saturating_sub(1))
-            .collect();
+        let mut s: String = one_line.chars().take(max_chars.saturating_sub(1)).collect();
         s.push('…');
         s
     }
@@ -319,7 +319,8 @@ mod tests {
             ("Anna Maria".to_string(), "u2".to_string()),
             ("Bob".to_string(), "u3".to_string()),
         ];
-        let (ids, everyone) = resolve_mentions("hey @ratko and @Anna Maria, ping @everyone", &cands);
+        let (ids, everyone) =
+            resolve_mentions("hey @ratko and @Anna Maria, ping @everyone", &cands);
         assert_eq!(ids, vec!["u1".to_string(), "u2".to_string()]);
         assert!(everyone);
     }
@@ -359,7 +360,10 @@ mod tests {
     fn suggest_filters_and_caps() {
         let cands = names(&["Ratko", "Rita", "Anna", "everyone"]);
         assert_eq!(suggest("@r", &cands, 8), names(&["Ratko", "Rita"]));
-        assert_eq!(suggest("@", &cands, 8), names(&["Anna", "everyone", "Ratko", "Rita"]));
+        assert_eq!(
+            suggest("@", &cands, 8),
+            names(&["Anna", "everyone", "Ratko", "Rita"])
+        );
         assert_eq!(suggest("@", &cands, 2), names(&["Anna", "everyone"]));
         assert_eq!(suggest("@zzz", &cands, 8), Vec::<String>::new());
         assert_eq!(suggest("plain text", &cands, 8), Vec::<String>::new());
@@ -378,9 +382,6 @@ mod tests {
         assert_eq!(complete("@Ratko done", "Anna"), "@Anna ");
         // Prefix way too long to be a name: token is stale, append instead.
         let long_tail = format!("@{}", "x".repeat(40));
-        assert_eq!(
-            complete(&long_tail, "Anna"),
-            format!("{long_tail} @Anna ")
-        );
+        assert_eq!(complete(&long_tail, "Anna"), format!("{long_tail} @Anna "));
     }
 }

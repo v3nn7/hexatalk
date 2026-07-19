@@ -19,21 +19,21 @@ use convex::{ConvexClient, FunctionResult, Value};
 use futures::channel::mpsc::Sender as EventSender;
 use futures::{SinkExt, StreamExt};
 use maplit::btreemap;
+use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
-use webrtc::api::APIBuilder;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
+use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
-use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::rtp_transceiver::rtp_codec::{
     RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType,
 };
-use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_local::TrackLocal;
+use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_remote::TrackRemote;
 
 use super::adpcm;
@@ -138,7 +138,10 @@ fn parse_bool_field(obj: &std::collections::BTreeMap<String, Value>, key: &str) 
     matches!(obj.get(key), Some(Value::Boolean(true)))
 }
 
-pub(crate) async fn run_room_voice(params: RoomVoiceParams, mut output: EventSender<RoomVoiceEvent>) {
+pub(crate) async fn run_room_voice(
+    params: RoomVoiceParams,
+    mut output: EventSender<RoomVoiceEvent>,
+) {
     let RoomVoiceParams {
         mut client,
         session_token,
@@ -180,19 +183,14 @@ pub(crate) async fn run_room_voice(params: RoomVoiceParams, mut output: EventSen
     let (frame_tx, mut frame_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     let (capture_stop_tx, capture_stop_rx) = std::sync::mpsc::channel::<()>();
     let capture_stop_tx = StopOnDrop(Some(capture_stop_tx));
-    if let Err(msg) = spawn_capture_thread(
-        input_device,
-        muted,
-        noise_gate,
-        frame_tx,
-        capture_stop_rx,
-    ) {
+    if let Err(msg) =
+        spawn_capture_thread(input_device, muted, noise_gate, frame_tx, capture_stop_rx)
+    {
         fail(&mut output, msg).await;
         return;
     }
 
-    let local_tracks: Arc<Mutex<Vec<Arc<TrackLocalStaticRTP>>>> =
-        Arc::new(Mutex::new(Vec::new()));
+    let local_tracks: Arc<Mutex<Vec<Arc<TrackLocalStaticRTP>>>> = Arc::new(Mutex::new(Vec::new()));
     let tracks_for_send = Arc::clone(&local_tracks);
     tokio::spawn(async move {
         // One shared sequence/timestamp generator is fine: each track is a
@@ -765,4 +763,3 @@ fn start_ice_sender(
         }
     });
 }
-

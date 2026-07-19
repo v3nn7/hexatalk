@@ -10,24 +10,30 @@ mod tray;
 mod ui;
 mod update_check;
 
-
 use crate::media::img_cache;
 use crate::media::screenshare;
-use crate::state::history;
-use crate::ui::viewmodel;
 use crate::net::rt::{SubscriptionRegistry, Task, WindowAction};
 use crate::state::app::App;
+use crate::state::history;
 use crate::state::message::Message;
-use crate::state::types::{AdminUserRow, BlockedUser, BotSummary, ChannelSummary, ChatMessage, ConversationSummary, Friend, FriendSuggestion, FriendsFilter, IncomingRequest, MyCallInfo, OutgoingRequest, PERM_CONNECT_VOICE, PERM_KICK_MEMBERS, PERM_MANAGE_CHANNELS, PERM_MANAGE_ROLES, PERM_MANAGE_SERVER, PERM_SEND_MESSAGES, PERM_SPEAK, PERM_VIEW_CHANNELS, PeopleHit, ProfileView, ResizePanel, ServerMemberRow, ServerRoleRow, ServerSettingsCategory, ServerSummary, Session, SettingsCategory, SidebarTab, SocialStats, VoiceUserRow, is_online};
+use crate::state::types::{
+    AdminUserRow, BlockedUser, BotSummary, ChannelSummary, ChatMessage, ConversationSummary,
+    Friend, FriendSuggestion, FriendsFilter, IncomingRequest, MyCallInfo, OutgoingRequest,
+    PERM_CONNECT_VOICE, PERM_KICK_MEMBERS, PERM_MANAGE_CHANNELS, PERM_MANAGE_ROLES,
+    PERM_MANAGE_SERVER, PERM_SEND_MESSAGES, PERM_SPEAK, PERM_VIEW_CHANNELS, PeopleHit, ProfileView,
+    ResizePanel, ServerMemberRow, ServerRoleRow, ServerSettingsCategory, ServerSummary, Session,
+    SettingsCategory, SidebarTab, SocialStats, VoiceUserRow, is_online,
+};
 use crate::ui::utils::{friend_request_privacy_label, presence_label, typing_label};
+use crate::ui::viewmodel;
 use crate::update_check::CURRENT_APP_VERSION;
 use std::env;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use slint::Model;
 use slint::ComponentHandle;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use slint::Model;
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 // Generated Slint bindings, kept in their own module (not glob-exported at
 // crate root) so `slint_ui::AuthMode`/`slint_ui::Screen` never collide with
@@ -100,7 +106,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // initial resize. Setting the size explicitly here is a direct call
     // into the window adapter rather than a hint, so it doesn't depend on
     // that timing.
-    ui.window().set_size(slint::WindowSize::Logical(slint::LogicalSize::new(1180.0, 760.0)));
+    ui.window()
+        .set_size(slint::WindowSize::Logical(slint::LogicalSize::new(
+            1180.0, 760.0,
+        )));
 
     // Slint owns the main thread's event loop. A dedicated background
     // thread owns a tokio runtime and drives `App::update`/background jobs
@@ -378,30 +387,33 @@ impl UiSnapshot {
         } else {
             slint_ui::Screen::Chat
         };
-        let server_settings = app.selected_server.as_ref().map(|server| ServerSettingsRaw {
-            server: server.clone(),
-            server_icon_url: server.icon_url.clone(),
-            is_platform_admin: app.session.as_ref().is_some_and(|s| s.is_admin),
-            category: app.server_settings_category,
-            channels: app.channels.clone(),
-            server_members: app.server_members.clone(),
-            server_roles: app.server_roles.clone(),
-            my_server_permissions: app.my_server_permissions,
-            rename_server_input: app.rename_server_input.clone(),
-            custom_slug_input: app.custom_slug_input.clone(),
-            server_status: app.server_status.clone(),
-            server_icon_busy: app.server_icon_busy,
-            new_channel_name_input: app.new_channel_name_input.clone(),
-            new_channel_is_voice: app.new_channel_is_voice,
-            renaming_channel_id: app.renaming_channel_id.clone(),
-            rename_channel_input: app.rename_channel_input.clone(),
-            member_role_picker_open: app.member_role_picker_open.clone(),
-            new_role_name_input: app.new_role_name_input.clone(),
-            editing_role_id: app.editing_role_id.clone(),
-            role_name_edit_input: app.role_name_edit_input.clone(),
-            confirm_delete_role_id: app.confirm_delete_role_id.clone(),
-            confirm_delete_server: app.confirm_delete_server,
-        });
+        let server_settings = app
+            .selected_server
+            .as_ref()
+            .map(|server| ServerSettingsRaw {
+                server: server.clone(),
+                server_icon_url: server.icon_url.clone(),
+                is_platform_admin: app.session.as_ref().is_some_and(|s| s.is_admin),
+                category: app.server_settings_category,
+                channels: app.channels.clone(),
+                server_members: app.server_members.clone(),
+                server_roles: app.server_roles.clone(),
+                my_server_permissions: app.my_server_permissions,
+                rename_server_input: app.rename_server_input.clone(),
+                custom_slug_input: app.custom_slug_input.clone(),
+                server_status: app.server_status.clone(),
+                server_icon_busy: app.server_icon_busy,
+                new_channel_name_input: app.new_channel_name_input.clone(),
+                new_channel_is_voice: app.new_channel_is_voice,
+                renaming_channel_id: app.renaming_channel_id.clone(),
+                rename_channel_input: app.rename_channel_input.clone(),
+                member_role_picker_open: app.member_role_picker_open.clone(),
+                new_role_name_input: app.new_role_name_input.clone(),
+                editing_role_id: app.editing_role_id.clone(),
+                role_name_edit_input: app.role_name_edit_input.clone(),
+                confirm_delete_role_id: app.confirm_delete_role_id.clone(),
+                confirm_delete_server: app.confirm_delete_server,
+            });
         let settings = app.session.as_ref().map(|session| SettingsRaw {
             session: session.clone(),
             avatar_url: session.avatar_image_url.clone(),
@@ -449,7 +461,10 @@ impl UiSnapshot {
             confirm_block_user_id: app.confirm_block_user_id.clone(),
             selected_server_name: app.selected_server.as_ref().map(|s| s.name.clone()),
             member: app.viewing_profile.as_ref().and_then(|p| {
-                app.server_members.iter().find(|m| m.user_id == p.user_id).cloned()
+                app.server_members
+                    .iter()
+                    .find(|m| m.user_id == p.user_id)
+                    .cloned()
             }),
             my_server_permissions: app.my_server_permissions,
         });
@@ -676,7 +691,8 @@ fn apply_server_settings(
 
     ui.set_ss_can_manage_roles(can_manage_roles);
     ui.set_ss_can_kick(can_kick);
-    let assignable_roles: Vec<&ServerRoleRow> = s.server_roles.iter().filter(|r| r.position != 0).collect();
+    let assignable_roles: Vec<&ServerRoleRow> =
+        s.server_roles.iter().filter(|r| r.position != 0).collect();
     ui.set_ss_members(
         s.server_members
             .iter()
@@ -686,7 +702,11 @@ fn apply_server_settings(
                 } else if m.roles.is_empty() {
                     "Member".to_string()
                 } else {
-                    m.roles.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join(", ")
+                    m.roles
+                        .iter()
+                        .map(|r| r.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 };
                 slint_ui::SSMemberRow {
                     user_id: m.user_id.clone().into(),
@@ -732,7 +752,11 @@ fn apply_server_settings(
             .as_slice()
             .into(),
     );
-    if let Some(editing) = s.editing_role_id.as_deref().and_then(|id| s.server_roles.iter().find(|r| r.role_id == id)) {
+    if let Some(editing) = s
+        .editing_role_id
+        .as_deref()
+        .and_then(|id| s.server_roles.iter().find(|r| r.role_id == id))
+    {
         ui.set_ss_role_edit_color(editing.color.clone().into());
         ui.set_ss_editing_role_is_default(editing.position == 0);
         ui.set_ss_role_permissions(
@@ -789,7 +813,12 @@ fn apply_settings(
     ui.set_settings_current_password_input(s.settings_current_password_input.clone().into());
     ui.set_settings_new_password_input(s.settings_new_password_input.clone().into());
     ui.set_settings_confirm_password_input(s.settings_confirm_password_input.clone().into());
-    ui.set_settings_password_status(s.settings_password_status.clone().unwrap_or_default().into());
+    ui.set_settings_password_status(
+        s.settings_password_status
+            .clone()
+            .unwrap_or_default()
+            .into(),
+    );
     let (badge_text, badge_bg, badge_fg) = if session.platform_role == "owner" {
         viewmodel::badge_for_platform_role("owner")
     } else if session.is_admin {
@@ -831,26 +860,37 @@ fn apply_settings(
         name: "System default".into(),
         selected: s.settings_input_device.is_none(),
     }];
-    input_devices.extend(s.settings_input_devices.iter().map(|d| slint_ui::DeviceRow {
-        name: d.clone().into(),
-        selected: s.settings_input_device.as_deref() == Some(d.as_str()),
-    }));
+    input_devices.extend(
+        s.settings_input_devices
+            .iter()
+            .map(|d| slint_ui::DeviceRow {
+                name: d.clone().into(),
+                selected: s.settings_input_device.as_deref() == Some(d.as_str()),
+            }),
+    );
     ui.set_settings_input_devices(input_devices.as_slice().into());
     let mut output_devices = vec![slint_ui::DeviceRow {
         name: "System default".into(),
         selected: s.settings_output_device.is_none(),
     }];
-    output_devices.extend(s.settings_output_devices.iter().map(|d| slint_ui::DeviceRow {
-        name: d.clone().into(),
-        selected: s.settings_output_device.as_deref() == Some(d.as_str()),
-    }));
+    output_devices.extend(
+        s.settings_output_devices
+            .iter()
+            .map(|d| slint_ui::DeviceRow {
+                name: d.clone().into(),
+                selected: s.settings_output_device.as_deref() == Some(d.as_str()),
+            }),
+    );
     ui.set_settings_output_devices(output_devices.as_slice().into());
     ui.set_settings_noise_gate(s.noise_gate);
-    ui.set_settings_noise_gate_label(if s.noise_gate <= 0.0005 {
-        "Off".to_string()
-    } else {
-        format!("{:.3}", s.noise_gate)
-    }.into());
+    ui.set_settings_noise_gate_label(
+        if s.noise_gate <= 0.0005 {
+            "Off".to_string()
+        } else {
+            format!("{:.3}", s.noise_gate)
+        }
+        .into(),
+    );
     ui.set_settings_version_line(format!("Talkyss v{CURRENT_APP_VERSION}").into());
     ui.set_settings_vault_hint(history::vault_root_display(&session.user_id).into());
     ui.set_settings_update_check_status(s.update_check_status.clone().unwrap_or_default().into());
@@ -887,12 +927,17 @@ fn apply_profile(
     ui.set_profile_friend_request_busy(p.friend_request_busy);
     ui.set_profile_can_moderate(profile.relation != "self" && !viewing_self);
     ui.set_profile_is_blocked(p.blocked.iter().any(|b| b.user_id == profile.user_id));
-    ui.set_profile_confirm_block(p.confirm_block_user_id.as_deref() == Some(profile.user_id.as_str()));
-    ui.set_profile_mutual_servers_line(if profile.mutual_servers.is_empty() {
-        String::new()
-    } else {
-        format!("Servers in common: {}", profile.mutual_servers.join(", "))
-    }.into());
+    ui.set_profile_confirm_block(
+        p.confirm_block_user_id.as_deref() == Some(profile.user_id.as_str()),
+    );
+    ui.set_profile_mutual_servers_line(
+        if profile.mutual_servers.is_empty() {
+            String::new()
+        } else {
+            format!("Servers in common: {}", profile.mutual_servers.join(", "))
+        }
+        .into(),
+    );
     if let (Some(server_name), Some(member)) = (&p.selected_server_name, &p.member) {
         ui.set_profile_has_role_info(true);
         ui.set_profile_role_section_title(format!("Role in {server_name}").into());
@@ -950,7 +995,10 @@ fn server_row_eq(a: &slint_ui::ServerRow, b: &slint_ui::ServerRow) -> bool {
         && a.active == b.active
 }
 
-fn group_candidate_row_eq(a: &slint_ui::GroupCandidateRow, b: &slint_ui::GroupCandidateRow) -> bool {
+fn group_candidate_row_eq(
+    a: &slint_ui::GroupCandidateRow,
+    b: &slint_ui::GroupCandidateRow,
+) -> bool {
     a.user_id == b.user_id && a.label == b.label && a.selected == b.selected
 }
 
@@ -1060,8 +1108,10 @@ fn apply_chat(
         );
     let show_admin = session.is_admin || session.is_moderator;
     let effective_tab = if c.selected_server.is_some()
-        && !matches!(c.sidebar_tab, SidebarTab::Admin | SidebarTab::Friends | SidebarTab::Requests)
-    {
+        && !matches!(
+            c.sidebar_tab,
+            SidebarTab::Admin | SidebarTab::Friends | SidebarTab::Requests
+        ) {
         SidebarTab::Servers
     } else {
         c.sidebar_tab
@@ -1090,7 +1140,10 @@ fn apply_chat(
     ui.set_chat_unread_count(unread_count);
     set_rows_if_changed(
         &SERVER_ROWS_CACHE,
-        viewmodel::server_rows(&c.servers, c.selected_server.as_ref().map(|s| s.server_id.as_str())),
+        viewmodel::server_rows(
+            &c.servers,
+            c.selected_server.as_ref().map(|s| s.server_id.as_str()),
+        ),
         server_row_eq,
         |rows| ui.set_chat_servers(rows.as_slice().into()),
     );
@@ -1167,8 +1220,16 @@ fn apply_chat(
     ui.set_chat_blocked(viewmodel::blocked_rows(&c.blocked).as_slice().into());
     ui.set_chat_confirm_block_user_id(c.confirm_block_user_id.clone().unwrap_or_default().into());
     ui.set_chat_friend_request_busy(c.friend_request_busy);
-    ui.set_chat_incoming_requests(viewmodel::incoming_request_rows(&c.incoming_requests).as_slice().into());
-    ui.set_chat_outgoing_requests(viewmodel::outgoing_request_rows(&c.outgoing_requests).as_slice().into());
+    ui.set_chat_incoming_requests(
+        viewmodel::incoming_request_rows(&c.incoming_requests)
+            .as_slice()
+            .into(),
+    );
+    ui.set_chat_outgoing_requests(
+        viewmodel::outgoing_request_rows(&c.outgoing_requests)
+            .as_slice()
+            .into(),
+    );
     if let Some(server) = &c.selected_server {
         ui.set_chat_server_name(server.name.clone().into());
         ui.set_chat_server_meta(
@@ -1260,7 +1321,12 @@ fn apply_chat(
         .and_then(|id| c.friends.iter().find(|f| &f.user_id == id));
     let is_channel_icon = peer_friend.is_none();
     ui.set_chat_is_channel_icon(is_channel_icon);
-    ui.set_chat_peer_title(c.active_peer_name.clone().unwrap_or_else(|| "Chat".into()).into());
+    ui.set_chat_peer_title(
+        c.active_peer_name
+            .clone()
+            .unwrap_or_else(|| "Chat".into())
+            .into(),
+    );
     if let Some(friend) = peer_friend {
         ui.set_chat_peer_initial(viewmodel::initial(friend.label()));
         ui.set_chat_peer_avatar_color(viewmodel::hex_color(&friend.avatar_color));
@@ -1281,8 +1347,14 @@ fn apply_chat(
     ui.set_chat_peer_connected(peer_connected_now);
     if is_direct {
         let label = if peer_connected_now {
-            let fp = cur_peer_id.and_then(|id| c.peer_remote_fp.get(id)).map(String::as_str).unwrap_or("…");
-            let tr = cur_peer_id.and_then(|id| c.peer_transport.get(id)).map(String::as_str).unwrap_or("?");
+            let fp = cur_peer_id
+                .and_then(|id| c.peer_remote_fp.get(id))
+                .map(String::as_str)
+                .unwrap_or("…");
+            let tr = cur_peer_id
+                .and_then(|id| c.peer_transport.get(id))
+                .map(String::as_str)
+                .unwrap_or("?");
             format!("peerseal · {tr} · {fp}")
         } else {
             cur_peer_id
@@ -1292,26 +1364,42 @@ fn apply_chat(
         };
         ui.set_chat_connection_label(label.into());
         ui.set_chat_sas_label(
-            cur_peer_id.and_then(|id| c.peer_sas.get(id)).cloned().unwrap_or_default().into(),
+            cur_peer_id
+                .and_then(|id| c.peer_sas.get(id))
+                .cloned()
+                .unwrap_or_default()
+                .into(),
         );
     } else {
         ui.set_chat_connection_label("".into());
         ui.set_chat_sas_label("".into());
     }
     ui.set_chat_show_call_button(is_direct && c.my_call.is_none());
-    let is_server_channel = matches!(c.active_conversation_kind.as_deref(), Some("channel") | Some("voice"));
+    let is_server_channel = matches!(
+        c.active_conversation_kind.as_deref(),
+        Some("channel") | Some("voice")
+    );
     ui.set_chat_is_server_channel(is_server_channel);
     ui.set_chat_store_enabled(c.chat_store_enabled);
     ui.set_chat_store_allowed(c.chat_store_allowed);
     ui.set_chat_clear_chat_busy(c.clear_chat_busy);
     ui.set_chat_clear_chat_confirm(c.clear_chat_confirm);
-    let can_voice = matches!(c.active_conversation_kind.as_deref(), Some("voice") | Some("group"));
+    let can_voice = matches!(
+        c.active_conversation_kind.as_deref(),
+        Some("voice") | Some("group")
+    );
     ui.set_chat_can_voice(can_voice);
-    let in_voice = c.active_voice_channel.as_deref() == c.active_conversation.as_deref() && can_voice;
+    let in_voice =
+        c.active_voice_channel.as_deref() == c.active_conversation.as_deref() && can_voice;
     ui.set_chat_in_voice(in_voice);
     ui.set_chat_room_voice_status(c.room_voice_status.clone().unwrap_or_default().into());
     ui.set_chat_voice_users_label(
-        c.voice_users.iter().map(|u| u.display_name.as_str()).collect::<Vec<_>>().join(", ").into(),
+        c.voice_users
+            .iter()
+            .map(|u| u.display_name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+            .into(),
     );
     let volume_rows: Vec<slint_ui::VoiceUserVolumeRow> = {
         let gains = c.voice_gains.lock().ok();
@@ -1335,12 +1423,18 @@ fn apply_chat(
         v.retain(|s| !s.trim().is_empty());
         v
     };
-    let everyone_allowed = matches!(c.active_conversation_kind.as_deref(), Some("channel") | Some("group"));
+    let everyone_allowed = matches!(
+        c.active_conversation_kind.as_deref(),
+        Some("channel") | Some("group")
+    );
     set_rows_if_changed(
         &MSG_ROWS_CACHE,
         viewmodel::chat_message_rows(
             &c.messages,
-            c.active_conversation_peer_id.as_ref().and_then(|id| c.peer_live_messages.get(id)).map(Vec::as_slice),
+            c.active_conversation_peer_id
+                .as_ref()
+                .and_then(|id| c.peer_live_messages.get(id))
+                .map(Vec::as_slice),
             &session.user_id,
             session.is_admin,
             &my_mention_names,
@@ -1349,10 +1443,22 @@ fn apply_chat(
         msg_row_eq,
         |rows| ui.set_chat_messages(rows.as_slice().into()),
     );
-    ui.set_chat_quick_emojis(QUICK_REACT_EMOJIS.iter().map(|e| slint::SharedString::from(*e)).collect::<Vec<_>>().as_slice().into());
+    ui.set_chat_quick_emojis(
+        QUICK_REACT_EMOJIS
+            .iter()
+            .map(|e| slint::SharedString::from(*e))
+            .collect::<Vec<_>>()
+            .as_slice()
+            .into(),
+    );
     let is_editing = c.editing_message_id.is_some();
     ui.set_chat_is_editing(is_editing);
-    let mut placeholder = if is_editing { "Edit message..." } else { "Type a message..." }.to_string();
+    let mut placeholder = if is_editing {
+        "Edit message..."
+    } else {
+        "Type a message..."
+    }
+    .to_string();
     if is_direct && !peer_connected_now {
         placeholder = "Waiting for secure channel…".to_string();
     }
@@ -1406,11 +1512,24 @@ fn apply_chat(
     ui.set_chat_members_collapsed(w <= 32.0);
     ui.set_chat_members_width(w);
     ui.set_chat_members_total(c.server_members.len() as i32);
-    let online_members: Vec<ServerMemberRow> =
-        c.server_members.iter().filter(|m| !m.is_bot && is_online(m.last_seen_at)).cloned().collect();
-    let offline_members: Vec<ServerMemberRow> =
-        c.server_members.iter().filter(|m| !m.is_bot && !is_online(m.last_seen_at)).cloned().collect();
-    let bot_members: Vec<ServerMemberRow> = c.server_members.iter().filter(|m| m.is_bot).cloned().collect();
+    let online_members: Vec<ServerMemberRow> = c
+        .server_members
+        .iter()
+        .filter(|m| !m.is_bot && is_online(m.last_seen_at))
+        .cloned()
+        .collect();
+    let offline_members: Vec<ServerMemberRow> = c
+        .server_members
+        .iter()
+        .filter(|m| !m.is_bot && !is_online(m.last_seen_at))
+        .cloned()
+        .collect();
+    let bot_members: Vec<ServerMemberRow> = c
+        .server_members
+        .iter()
+        .filter(|m| m.is_bot)
+        .cloned()
+        .collect();
     ui.set_chat_members_online(online_members.len() as i32);
     ui.set_chat_members_online_list(viewmodel::member_rows(&online_members).as_slice().into());
     ui.set_chat_members_offline_list(viewmodel::member_rows(&offline_members).as_slice().into());
@@ -1431,7 +1550,9 @@ fn apply_chat(
         ui.set_chat_call_incoming(is_ringing && !call.is_caller);
         ui.set_chat_call_active(call.status == "active");
         let label = match call.status.as_str() {
-            "ringing" if !call.is_caller => format!("Incoming call from {}", call.peer_display_name),
+            "ringing" if !call.is_caller => {
+                format!("Incoming call from {}", call.peer_display_name)
+            }
             "ringing" => format!("Calling {}…", call.peer_display_name),
             "active" => c
                 .call_status_text
@@ -1444,7 +1565,11 @@ fn apply_chat(
         ui.set_chat_call_all_muted(c.call_muted && c.call_output_muted);
         ui.set_chat_is_sharing(c.is_sharing);
         ui.set_chat_share_picker_open(c.share_picker_open);
-        ui.set_chat_share_targets(viewmodel::share_target_rows(&c.share_targets).as_slice().into());
+        ui.set_chat_share_targets(
+            viewmodel::share_target_rows(&c.share_targets)
+                .as_slice()
+                .into(),
+        );
         // The actual remote share image: decode the JPEG here on the UI
         // thread (memoized -- see below) and hand it to the banner. Without
         // this the banner showed "peer's screen" with a permanently blank
@@ -1666,44 +1791,92 @@ fn wire_chat_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Message>) 
 
     // ---- Rail ----
     on0!(on_chat_go_home, Message::GoHome);
-    on1!(on_chat_select_server, |id: slint::SharedString| Message::SelectServer(id.to_string()));
+    on1!(on_chat_select_server, |id: slint::SharedString| {
+        Message::SelectServer(id.to_string())
+    });
     on0!(on_chat_toggle_add_menu, Message::ToggleServerAddMenu);
-    on0!(on_chat_open_friends, Message::SidebarTabChanged(SidebarTab::Friends));
-    on0!(on_chat_open_requests, Message::SidebarTabChanged(SidebarTab::Requests));
-    on0!(on_chat_open_admin, Message::SidebarTabChanged(SidebarTab::Admin));
+    on0!(
+        on_chat_open_friends,
+        Message::SidebarTabChanged(SidebarTab::Friends)
+    );
+    on0!(
+        on_chat_open_requests,
+        Message::SidebarTabChanged(SidebarTab::Requests)
+    );
+    on0!(
+        on_chat_open_admin,
+        Message::SidebarTabChanged(SidebarTab::Admin)
+    );
 
     // ---- Sidebar: add-server / join-server ----
-    on1!(on_chat_new_server_name_changed, |t: slint::SharedString| Message::NewServerNameChanged(t.to_string()));
+    on1!(on_chat_new_server_name_changed, |t: slint::SharedString| {
+        Message::NewServerNameChanged(t.to_string())
+    });
     on0!(on_chat_create_server, Message::CreateServer);
-    on1!(on_chat_join_server_code_changed, |t: slint::SharedString| Message::JoinServerCodeChanged(t.to_string()));
+    on1!(
+        on_chat_join_server_code_changed,
+        |t: slint::SharedString| Message::JoinServerCodeChanged(t.to_string())
+    );
     on0!(on_chat_join_server, Message::JoinServer);
 
     // ---- Sidebar: Chats tab ----
     on0!(on_chat_toggle_group_panel, Message::ToggleGroupPanel);
-    on1!(on_chat_group_name_changed, |t: slint::SharedString| Message::GroupNameInputChanged(t.to_string()));
-    on1!(on_chat_toggle_group_member, |id: slint::SharedString| Message::ToggleGroupMember(id.to_string()));
+    on1!(on_chat_group_name_changed, |t: slint::SharedString| {
+        Message::GroupNameInputChanged(t.to_string())
+    });
+    on1!(on_chat_toggle_group_member, |id: slint::SharedString| {
+        Message::ToggleGroupMember(id.to_string())
+    });
     on0!(on_chat_create_group, Message::CreateGroup);
-    on1!(on_chat_open_conversation, |id: slint::SharedString| Message::OpenConversationDirect(id.to_string()));
+    on1!(on_chat_open_conversation, |id: slint::SharedString| {
+        Message::OpenConversationDirect(id.to_string())
+    });
 
     // ---- Sidebar: Friends tab ----
-    on1!(on_chat_add_friend_input_changed, |t: slint::SharedString| Message::AddFriendInputChanged(t.to_string()));
-    on1!(on_chat_add_friend_note_changed, |t: slint::SharedString| Message::AddFriendNoteChanged(t.to_string()));
+    on1!(
+        on_chat_add_friend_input_changed,
+        |t: slint::SharedString| Message::AddFriendInputChanged(t.to_string())
+    );
+    on1!(on_chat_add_friend_note_changed, |t: slint::SharedString| {
+        Message::AddFriendNoteChanged(t.to_string())
+    });
     on0!(on_chat_send_friend_request, Message::SendFriendRequest);
-    on1!(on_chat_set_friends_filter, |i: i32| Message::SetFriendsFilter(match i {
-        1 => FriendsFilter::Online,
-        2 => FriendsFilter::Favorites,
-        _ => FriendsFilter::All,
-    }));
-    on1!(on_chat_friends_filter_input_changed, |t: slint::SharedString| Message::FriendsFilterChanged(t.to_string()));
-    on1!(on_chat_open_profile, |id: slint::SharedString| Message::OpenProfile(id.to_string()));
-    on1!(on_chat_send_friend_request_to, |u: slint::SharedString| Message::SendFriendRequestToUser(u.to_string()));
-    on1!(on_chat_message_friend, |id: slint::SharedString| Message::OpenConversationWithFriend(id.to_string()));
-    on1!(on_chat_toggle_favorite, |id: slint::SharedString| Message::ToggleFavorite(id.to_string()));
-    on1!(on_chat_remove_friend, |id: slint::SharedString| Message::RemoveFriend(id.to_string()));
-    on1!(on_chat_confirm_block, |id: slint::SharedString| Message::ConfirmBlockUser(id.to_string()));
+    on1!(on_chat_set_friends_filter, |i: i32| {
+        Message::SetFriendsFilter(match i {
+            1 => FriendsFilter::Online,
+            2 => FriendsFilter::Favorites,
+            _ => FriendsFilter::All,
+        })
+    });
+    on1!(
+        on_chat_friends_filter_input_changed,
+        |t: slint::SharedString| Message::FriendsFilterChanged(t.to_string())
+    );
+    on1!(on_chat_open_profile, |id: slint::SharedString| {
+        Message::OpenProfile(id.to_string())
+    });
+    on1!(on_chat_send_friend_request_to, |u: slint::SharedString| {
+        Message::SendFriendRequestToUser(u.to_string())
+    });
+    on1!(on_chat_message_friend, |id: slint::SharedString| {
+        Message::OpenConversationWithFriend(id.to_string())
+    });
+    on1!(on_chat_toggle_favorite, |id: slint::SharedString| {
+        Message::ToggleFavorite(id.to_string())
+    });
+    on1!(on_chat_remove_friend, |id: slint::SharedString| {
+        Message::RemoveFriend(id.to_string())
+    });
+    on1!(on_chat_confirm_block, |id: slint::SharedString| {
+        Message::ConfirmBlockUser(id.to_string())
+    });
     on0!(on_chat_cancel_block, Message::CancelBlockUser);
-    on1!(on_chat_block_user, |id: slint::SharedString| Message::BlockUser(id.to_string()));
-    on1!(on_chat_unblock_user, |id: slint::SharedString| Message::UnblockUser(id.to_string()));
+    on1!(on_chat_block_user, |id: slint::SharedString| {
+        Message::BlockUser(id.to_string())
+    });
+    on1!(on_chat_unblock_user, |id: slint::SharedString| {
+        Message::UnblockUser(id.to_string())
+    });
 
     // ---- Sidebar: Requests tab ----
     {
@@ -1714,65 +1887,122 @@ fn wire_chat_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Message>) 
     }
     on0!(on_chat_accept_all, Message::RespondAllIncoming(true));
     on0!(on_chat_decline_all, Message::RespondAllIncoming(false));
-    on1!(on_chat_cancel_outgoing, |id: slint::SharedString| Message::CancelOutgoingRequest(id.to_string()));
+    on1!(on_chat_cancel_outgoing, |id: slint::SharedString| {
+        Message::CancelOutgoingRequest(id.to_string())
+    });
 
     // ---- Sidebar: Servers tab ----
-    on0!(on_chat_toggle_server_settings, Message::ToggleServerSettings);
-    on1!(on_chat_copy_invite_link, |code: slint::SharedString| Message::CopyInviteLink(code.to_string()));
+    on0!(
+        on_chat_toggle_server_settings,
+        Message::ToggleServerSettings
+    );
+    on1!(on_chat_copy_invite_link, |code: slint::SharedString| {
+        Message::CopyInviteLink(code.to_string())
+    });
     on0!(on_chat_toggle_new_channel, Message::ToggleNewChannelInput);
-    on1!(on_chat_new_channel_name_changed, |t: slint::SharedString| Message::NewChannelNameChanged(t.to_string()));
+    on1!(
+        on_chat_new_channel_name_changed,
+        |t: slint::SharedString| Message::NewChannelNameChanged(t.to_string())
+    );
     on0!(on_chat_create_channel, Message::CreateChannel);
-    on0!(on_chat_toggle_new_channel_voice, Message::ToggleNewChannelIsVoice);
-    on1!(on_chat_open_channel, |id: slint::SharedString| Message::OpenChannel(id.to_string()));
+    on0!(
+        on_chat_toggle_new_channel_voice,
+        Message::ToggleNewChannelIsVoice
+    );
+    on1!(on_chat_open_channel, |id: slint::SharedString| {
+        Message::OpenChannel(id.to_string())
+    });
 
     // ---- Sidebar: Admin tab ----
-    on1!(on_chat_admin_search_changed, |t: slint::SharedString| Message::AdminSearchInputChanged(t.to_string()));
-    on2!(on_chat_admin_set_role, |id: slint::SharedString, role: slint::SharedString| {
-        Message::AdminSetPlatformRole(id.to_string(), role.to_string())
+    on1!(on_chat_admin_search_changed, |t: slint::SharedString| {
+        Message::AdminSearchInputChanged(t.to_string())
     });
-    on2!(on_chat_admin_set_banned, |id: slint::SharedString, banned: bool| {
-        Message::AdminSetBanned(id.to_string(), banned)
-    });
+    on2!(
+        on_chat_admin_set_role,
+        |id: slint::SharedString, role: slint::SharedString| {
+            Message::AdminSetPlatformRole(id.to_string(), role.to_string())
+        }
+    );
+    on2!(
+        on_chat_admin_set_banned,
+        |id: slint::SharedString, banned: bool| { Message::AdminSetBanned(id.to_string(), banned) }
+    );
 
     // ---- Sidebar: account footer + resize ----
     on0!(on_chat_open_settings, Message::OpenSettings);
-    on0!(on_chat_sidebar_resize_started, Message::PanelResizeStarted(ResizePanel::ChannelList));
-    on1!(on_chat_sidebar_resize_moved, |x: f32| Message::PanelResizeMoved(x));
+    on0!(
+        on_chat_sidebar_resize_started,
+        Message::PanelResizeStarted(ResizePanel::ChannelList)
+    );
+    on1!(on_chat_sidebar_resize_moved, |x: f32| {
+        Message::PanelResizeMoved(x)
+    });
     on0!(on_chat_sidebar_resize_ended, Message::PanelResizeEnded);
 
     // ---- Chat area ----
     on0!(on_chat_start_call, Message::StartCall);
     on0!(on_chat_toggle_store, Message::ToggleStoreHistoryThisChat);
-    on0!(on_chat_toggle_clear_confirm, Message::ToggleClearChatConfirm);
+    on0!(
+        on_chat_toggle_clear_confirm,
+        Message::ToggleClearChatConfirm
+    );
     on0!(on_chat_confirm_clear, Message::ConfirmClearChat);
     on0!(on_chat_join_voice, Message::JoinVoiceChannel);
     on0!(on_chat_leave_voice, Message::LeaveVoiceChannel);
-    on1!(on_chat_message_input_edited, |t: slint::SharedString| Message::MessageInputChanged(t.to_string()));
-    on1!(on_chat_mention_pick, |name: slint::SharedString| Message::MentionSuggestionPicked(name.to_string()));
+    on1!(on_chat_message_input_edited, |t: slint::SharedString| {
+        Message::MessageInputChanged(t.to_string())
+    });
+    on1!(on_chat_mention_pick, |name: slint::SharedString| {
+        Message::MentionSuggestionPicked(name.to_string())
+    });
     on0!(on_chat_send, Message::SendMessage);
     on0!(on_chat_pick_attachment, Message::PickAttachmentImage);
     on0!(on_chat_remove_attachment, Message::RemovePendingAttachment);
     on0!(on_chat_cancel_edit, Message::CancelEdit);
     on0!(on_chat_cancel_reply, Message::CancelReply);
-    on2!(on_chat_react, |id: slint::SharedString, emoji: slint::SharedString| {
-        Message::ToggleReaction(id.to_string(), emoji.to_string())
-    });
-    on3!(on_chat_reply, |id: slint::SharedString, author: slint::SharedString, snippet: slint::SharedString| {
-        Message::ReplyToMessage(id.to_string(), author.to_string(), snippet.to_string())
-    });
-    on1!(on_chat_copy, |t: slint::SharedString| Message::CopyMessage(t.to_string()));
-    on3!(on_chat_edit, |id: slint::SharedString, body: slint::SharedString, enc: bool| {
+    on2!(
+        on_chat_react,
+        |id: slint::SharedString, emoji: slint::SharedString| {
+            Message::ToggleReaction(id.to_string(), emoji.to_string())
+        }
+    );
+    on3!(
+        on_chat_reply,
+        |id: slint::SharedString, author: slint::SharedString, snippet: slint::SharedString| {
+            Message::ReplyToMessage(id.to_string(), author.to_string(), snippet.to_string())
+        }
+    );
+    on1!(on_chat_copy, |t: slint::SharedString| Message::CopyMessage(
+        t.to_string()
+    ));
+    on3!(on_chat_edit, |id: slint::SharedString,
+                        body: slint::SharedString,
+                        enc: bool| {
         Message::EditMessage(id.to_string(), body.to_string(), enc)
     });
-    on1!(on_chat_delete, |id: slint::SharedString| Message::DeleteMessage(id.to_string()));
-    on1!(on_chat_purge, |id: slint::SharedString| Message::PurgeMessage(id.to_string()));
-    on1!(on_chat_open_attachment, |url: slint::SharedString| Message::OpenAttachmentPreview(url.to_string()));
-    on2!(on_chat_voice_volume_changed, |id: slint::SharedString, v: f32| Message::VoiceVolumeChanged(id.to_string(), v));
+    on1!(on_chat_delete, |id: slint::SharedString| {
+        Message::DeleteMessage(id.to_string())
+    });
+    on1!(on_chat_purge, |id: slint::SharedString| {
+        Message::PurgeMessage(id.to_string())
+    });
+    on1!(on_chat_open_attachment, |url: slint::SharedString| {
+        Message::OpenAttachmentPreview(url.to_string())
+    });
+    on2!(
+        on_chat_voice_volume_changed,
+        |id: slint::SharedString, v: f32| Message::VoiceVolumeChanged(id.to_string(), v)
+    );
 
     // ---- Members drawer ----
     on0!(on_chat_toggle_members, Message::ToggleMembersPanel);
-    on0!(on_chat_members_resize_started, Message::PanelResizeStarted(ResizePanel::Members));
-    on1!(on_chat_members_resize_moved, |x: f32| Message::PanelResizeMoved(x));
+    on0!(
+        on_chat_members_resize_started,
+        Message::PanelResizeStarted(ResizePanel::Members)
+    );
+    on1!(on_chat_members_resize_moved, |x: f32| {
+        Message::PanelResizeMoved(x)
+    });
     on0!(on_chat_members_resize_ended, Message::PanelResizeEnded);
 
     // ---- Call banner ----
@@ -1783,7 +2013,9 @@ fn wire_chat_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Message>) 
     on0!(on_chat_call_toggle_mute_all, Message::ToggleMuteAll);
     on0!(on_chat_toggle_share_picker, Message::ToggleSharePicker);
     on0!(on_chat_stop_share, Message::StopShare);
-    on1!(on_chat_start_share, |id: slint::SharedString| Message::StartShare(id.to_string()));
+    on1!(on_chat_start_share, |id: slint::SharedString| {
+        Message::StartShare(id.to_string())
+    });
     on0!(on_chat_toggle_share_size, Message::ToggleShareViewSize);
 }
 
@@ -1808,14 +2040,30 @@ fn wire_profile_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Message
     }
 
     on0!(on_profile_back, Message::CloseProfile);
-    on1!(on_profile_support_dm, |id: slint::SharedString| Message::OpenSupportDm(id.to_string()));
-    on1!(on_profile_message_friend, |id: slint::SharedString| Message::OpenConversationWithFriend(id.to_string()));
-    on1!(on_profile_toggle_favorite, |id: slint::SharedString| Message::ToggleFavorite(id.to_string()));
-    on1!(on_profile_respond_request, |id: slint::SharedString| Message::RespondRequest(id.to_string(), true));
-    on1!(on_profile_send_friend_request, |u: slint::SharedString| Message::SendFriendRequestToUser(u.to_string()));
-    on1!(on_profile_unblock, |id: slint::SharedString| Message::UnblockUser(id.to_string()));
-    on1!(on_profile_confirm_block_click, |id: slint::SharedString| Message::ConfirmBlockUser(id.to_string()));
-    on1!(on_profile_block, |id: slint::SharedString| Message::BlockUser(id.to_string()));
+    on1!(on_profile_support_dm, |id: slint::SharedString| {
+        Message::OpenSupportDm(id.to_string())
+    });
+    on1!(on_profile_message_friend, |id: slint::SharedString| {
+        Message::OpenConversationWithFriend(id.to_string())
+    });
+    on1!(on_profile_toggle_favorite, |id: slint::SharedString| {
+        Message::ToggleFavorite(id.to_string())
+    });
+    on1!(on_profile_respond_request, |id: slint::SharedString| {
+        Message::RespondRequest(id.to_string(), true)
+    });
+    on1!(on_profile_send_friend_request, |u: slint::SharedString| {
+        Message::SendFriendRequestToUser(u.to_string())
+    });
+    on1!(on_profile_unblock, |id: slint::SharedString| {
+        Message::UnblockUser(id.to_string())
+    });
+    on1!(on_profile_confirm_block_click, |id: slint::SharedString| {
+        Message::ConfirmBlockUser(id.to_string())
+    });
+    on1!(on_profile_block, |id: slint::SharedString| {
+        Message::BlockUser(id.to_string())
+    });
     on0!(on_profile_cancel_block, Message::CancelBlockUser);
 }
 
@@ -1855,35 +2103,84 @@ fn wire_settings_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Messag
     }
     on0!(on_settings_pick_avatar, Message::PickAvatarImage);
     on0!(on_settings_remove_avatar, Message::RemoveAvatarImage);
-    on1!(on_settings_display_name_changed, |t: slint::SharedString| Message::SettingsDisplayNameChanged(t.to_string()));
-    on1!(on_settings_status_changed, |t: slint::SharedString| Message::SettingsStatusChanged(t.to_string()));
-    on1!(on_settings_bio_changed, |t: slint::SharedString| Message::SettingsBioChanged(t.to_string()));
-    on1!(on_settings_avatar_color_selected, |c: slint::SharedString| Message::SettingsAvatarColorSelected(c.to_string()));
+    on1!(
+        on_settings_display_name_changed,
+        |t: slint::SharedString| Message::SettingsDisplayNameChanged(t.to_string())
+    );
+    on1!(on_settings_status_changed, |t: slint::SharedString| {
+        Message::SettingsStatusChanged(t.to_string())
+    });
+    on1!(on_settings_bio_changed, |t: slint::SharedString| {
+        Message::SettingsBioChanged(t.to_string())
+    });
+    on1!(
+        on_settings_avatar_color_selected,
+        |c: slint::SharedString| Message::SettingsAvatarColorSelected(c.to_string())
+    );
     on0!(on_settings_save_profile, Message::SaveProfile);
-    on1!(on_settings_current_password_changed, |t: slint::SharedString| Message::SettingsCurrentPasswordChanged(t.to_string()));
-    on1!(on_settings_new_password_changed, |t: slint::SharedString| Message::SettingsNewPasswordChanged(t.to_string()));
-    on1!(on_settings_confirm_password_changed, |t: slint::SharedString| Message::SettingsConfirmPasswordChanged(t.to_string()));
+    on1!(
+        on_settings_current_password_changed,
+        |t: slint::SharedString| Message::SettingsCurrentPasswordChanged(t.to_string())
+    );
+    on1!(
+        on_settings_new_password_changed,
+        |t: slint::SharedString| Message::SettingsNewPasswordChanged(t.to_string())
+    );
+    on1!(
+        on_settings_confirm_password_changed,
+        |t: slint::SharedString| Message::SettingsConfirmPasswordChanged(t.to_string())
+    );
     on0!(on_settings_change_password, Message::ChangePassword);
     on0!(on_settings_log_out, Message::LogOut);
-    on0!(on_settings_toggle_store_history, Message::ToggleStoreHistoryGlobal);
+    on0!(
+        on_settings_toggle_store_history,
+        Message::ToggleStoreHistoryGlobal
+    );
     on0!(on_settings_toggle_hide_online, Message::ToggleHideOnline);
-    on0!(on_settings_toggle_friends_only_dms, Message::ToggleFriendsOnlyDms);
+    on0!(
+        on_settings_toggle_friends_only_dms,
+        Message::ToggleFriendsOnlyDms
+    );
     on0!(on_settings_toggle_discoverable, Message::ToggleDiscoverable);
-    on0!(on_settings_cycle_friend_request_privacy, Message::CycleFriendRequestPrivacy);
+    on0!(
+        on_settings_cycle_friend_request_privacy,
+        Message::CycleFriendRequestPrivacy
+    );
     on0!(on_settings_cycle_presence, Message::CyclePresenceStatus);
     on0!(on_settings_sign_out_others, Message::SignOutOtherSessions);
-    on1!(on_settings_new_bot_name_changed, |t: slint::SharedString| Message::NewBotNameChanged(t.to_string()));
+    on1!(
+        on_settings_new_bot_name_changed,
+        |t: slint::SharedString| Message::NewBotNameChanged(t.to_string())
+    );
     on0!(on_settings_create_bot, Message::CreateBot);
     on0!(on_settings_refresh_bots, Message::RefreshMyBots);
-    on1!(on_settings_copy_token, |t: slint::SharedString| Message::CopyMessage(t.to_string()));
+    on1!(on_settings_copy_token, |t: slint::SharedString| {
+        Message::CopyMessage(t.to_string())
+    });
     on0!(on_settings_dismiss_token, Message::DismissBotToken);
-    on1!(on_settings_regenerate_bot_token, |id: slint::SharedString| Message::RegenerateBotToken(id.to_string()));
-    on1!(on_settings_delete_bot, |id: slint::SharedString| Message::DeleteBot(id.to_string()));
-    on1!(on_settings_bot_invite_username_changed, |t: slint::SharedString| Message::BotInviteUsernameChanged(t.to_string()));
+    on1!(
+        on_settings_regenerate_bot_token,
+        |id: slint::SharedString| Message::RegenerateBotToken(id.to_string())
+    );
+    on1!(on_settings_delete_bot, |id: slint::SharedString| {
+        Message::DeleteBot(id.to_string())
+    });
+    on1!(
+        on_settings_bot_invite_username_changed,
+        |t: slint::SharedString| Message::BotInviteUsernameChanged(t.to_string())
+    );
     on0!(on_settings_invite_bot, Message::InviteBotToServer);
-    on1!(on_settings_input_device_selected, |d: slint::SharedString| Message::SettingsInputDeviceSelected(d.to_string()));
-    on1!(on_settings_output_device_selected, |d: slint::SharedString| Message::SettingsOutputDeviceSelected(d.to_string()));
-    on1!(on_settings_noise_gate_changed, |v: f32| Message::NoiseGateChanged(v));
+    on1!(
+        on_settings_input_device_selected,
+        |d: slint::SharedString| Message::SettingsInputDeviceSelected(d.to_string())
+    );
+    on1!(
+        on_settings_output_device_selected,
+        |d: slint::SharedString| Message::SettingsOutputDeviceSelected(d.to_string())
+    );
+    on1!(on_settings_noise_gate_changed, |v: f32| {
+        Message::NoiseGateChanged(v)
+    });
     on0!(on_settings_check_for_update, Message::CheckForUpdate);
     on0!(on_settings_restart_update, Message::RestartAndUpdate);
     on0!(on_settings_measure_ping, Message::MeasurePing);
@@ -1934,48 +2231,96 @@ fn wire_server_settings_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender
     }
     on0!(on_ss_pick_icon, Message::PickServerIcon);
     on0!(on_ss_remove_icon, Message::RemoveServerIcon);
-    on1!(on_ss_rename_server_input_changed, |t: slint::SharedString| Message::RenameServerInputChanged(t.to_string()));
+    on1!(
+        on_ss_rename_server_input_changed,
+        |t: slint::SharedString| Message::RenameServerInputChanged(t.to_string())
+    );
     on0!(on_ss_rename_server, Message::RenameServer);
-    on1!(on_ss_custom_slug_changed, |t: slint::SharedString| Message::CustomSlugInputChanged(t.to_string()));
+    on1!(on_ss_custom_slug_changed, |t: slint::SharedString| {
+        Message::CustomSlugInputChanged(t.to_string())
+    });
     on0!(on_ss_save_custom_slug, Message::SaveCustomSlug);
     on0!(on_ss_clear_custom_slug, Message::ClearCustomSlug);
-    on1!(on_ss_new_channel_name_changed, |t: slint::SharedString| Message::NewChannelNameChanged(t.to_string()));
-    on0!(on_ss_toggle_new_channel_voice, Message::ToggleNewChannelIsVoice);
-    on0!(on_ss_create_channel, Message::CreateChannel);
-    on2!(on_ss_start_rename_channel, |id: slint::SharedString, name: slint::SharedString| {
-        Message::StartRenameChannel(id.to_string(), name.to_string())
+    on1!(on_ss_new_channel_name_changed, |t: slint::SharedString| {
+        Message::NewChannelNameChanged(t.to_string())
     });
-    on1!(on_ss_rename_channel_input_changed, |t: slint::SharedString| Message::RenameChannelInputChanged(t.to_string()));
+    on0!(
+        on_ss_toggle_new_channel_voice,
+        Message::ToggleNewChannelIsVoice
+    );
+    on0!(on_ss_create_channel, Message::CreateChannel);
+    on2!(
+        on_ss_start_rename_channel,
+        |id: slint::SharedString, name: slint::SharedString| {
+            Message::StartRenameChannel(id.to_string(), name.to_string())
+        }
+    );
+    on1!(
+        on_ss_rename_channel_input_changed,
+        |t: slint::SharedString| Message::RenameChannelInputChanged(t.to_string())
+    );
     on0!(on_ss_save_rename_channel, Message::RenameChannel);
     on0!(on_ss_cancel_rename_channel, Message::CancelRenameChannel);
-    on1!(on_ss_delete_channel, |id: slint::SharedString| Message::DeleteChannel(id.to_string()));
-    on1!(on_ss_toggle_member_picker, |id: slint::SharedString| Message::ToggleMemberRolePicker(id.to_string()));
-    on2!(on_ss_toggle_member_role, |uid: slint::SharedString, rid: slint::SharedString| {
-        Message::ToggleMemberRole(uid.to_string(), rid.to_string())
+    on1!(on_ss_delete_channel, |id: slint::SharedString| {
+        Message::DeleteChannel(id.to_string())
     });
-    on1!(on_ss_kick_member, |id: slint::SharedString| Message::KickMember(id.to_string()));
-    on1!(on_ss_open_profile, |id: slint::SharedString| Message::OpenProfile(id.to_string()));
-    on1!(on_ss_new_role_name_changed, |t: slint::SharedString| Message::NewRoleNameChanged(t.to_string()));
+    on1!(on_ss_toggle_member_picker, |id: slint::SharedString| {
+        Message::ToggleMemberRolePicker(id.to_string())
+    });
+    on2!(
+        on_ss_toggle_member_role,
+        |uid: slint::SharedString, rid: slint::SharedString| {
+            Message::ToggleMemberRole(uid.to_string(), rid.to_string())
+        }
+    );
+    on1!(on_ss_kick_member, |id: slint::SharedString| {
+        Message::KickMember(id.to_string())
+    });
+    on1!(on_ss_open_profile, |id: slint::SharedString| {
+        Message::OpenProfile(id.to_string())
+    });
+    on1!(on_ss_new_role_name_changed, |t: slint::SharedString| {
+        Message::NewRoleNameChanged(t.to_string())
+    });
     on0!(on_ss_create_role, Message::CreateRole);
-    on1!(on_ss_select_role_for_edit, |id: slint::SharedString| Message::SelectRoleForEdit(id.to_string()));
-    on0!(on_ss_close_role_editor, Message::CloseRoleEditor);
-    on1!(on_ss_role_name_edit_changed, |t: slint::SharedString| Message::RoleNameEditChanged(t.to_string()));
-    on0!(on_ss_save_role_name, Message::SaveRoleName);
-    on2!(on_ss_set_role_color, |id: slint::SharedString, hex: slint::SharedString| {
-        Message::SetRoleColor(id.to_string(), hex.to_string())
+    on1!(on_ss_select_role_for_edit, |id: slint::SharedString| {
+        Message::SelectRoleForEdit(id.to_string())
     });
+    on0!(on_ss_close_role_editor, Message::CloseRoleEditor);
+    on1!(on_ss_role_name_edit_changed, |t: slint::SharedString| {
+        Message::RoleNameEditChanged(t.to_string())
+    });
+    on0!(on_ss_save_role_name, Message::SaveRoleName);
+    on2!(
+        on_ss_set_role_color,
+        |id: slint::SharedString, hex: slint::SharedString| {
+            Message::SetRoleColor(id.to_string(), hex.to_string())
+        }
+    );
     {
         let t = tx.clone();
         ui.on_ss_toggle_role_permission(move |id, bit| {
             let _ = t.send(Message::ToggleRolePermission(id.to_string(), bit as u32));
         });
     }
-    on1!(on_ss_confirm_delete_role_click, |id: slint::SharedString| Message::ConfirmDeleteRole(id.to_string()));
+    on1!(
+        on_ss_confirm_delete_role_click,
+        |id: slint::SharedString| Message::ConfirmDeleteRole(id.to_string())
+    );
     on0!(on_ss_cancel_delete_role, Message::CancelDeleteRole);
-    on1!(on_ss_delete_role, |id: slint::SharedString| Message::DeleteRole(id.to_string()));
-    on1!(on_ss_copy_invite_code, |code: slint::SharedString| Message::CopyInviteCode(code.to_string()));
-    on1!(on_ss_copy_invite_link, |code: slint::SharedString| Message::CopyInviteLink(code.to_string()));
+    on1!(on_ss_delete_role, |id: slint::SharedString| {
+        Message::DeleteRole(id.to_string())
+    });
+    on1!(on_ss_copy_invite_code, |code: slint::SharedString| {
+        Message::CopyInviteCode(code.to_string())
+    });
+    on1!(on_ss_copy_invite_link, |code: slint::SharedString| {
+        Message::CopyInviteLink(code.to_string())
+    });
     on0!(on_ss_regenerate_invite_code, Message::RegenerateInviteCode);
-    on0!(on_ss_toggle_confirm_delete_server, Message::ToggleConfirmDeleteServer);
+    on0!(
+        on_ss_toggle_confirm_delete_server,
+        Message::ToggleConfirmDeleteServer
+    );
     on0!(on_ss_delete_server, Message::DeleteServer);
 }

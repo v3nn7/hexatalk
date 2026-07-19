@@ -54,8 +54,7 @@ fn build_icon() -> Result<Icon, String> {
     }
     // `from_rgba` validates the dimensions/length; fallibly handle it so a
     // failure can't panic the tray OS thread and make the app unreachable.
-    Icon::from_rgba(rgba, SIZE, SIZE)
-        .map_err(|err| format!("tray icon bitmap: {err}"))
+    Icon::from_rgba(rgba, SIZE, SIZE).map_err(|err| format!("tray icon bitmap: {err}"))
 }
 
 /// Builds the "Show Talkyss" / "Quit" menu shared by both backends.
@@ -94,7 +93,9 @@ pub(crate) fn spawn(event_tx: UnboundedSender<TrayEvent>) {
                 .or_else(|| panic.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "unknown panic".to_string());
             eprintln!("[tray] thread PANICKED: {msg}");
-            let _ = event_tx.send(TrayEvent::Unavailable(format!("tray thread panicked: {msg}")));
+            let _ = event_tx.send(TrayEvent::Unavailable(format!(
+                "tray thread panicked: {msg}"
+            )));
         }
     });
 }
@@ -151,41 +152,41 @@ fn run_tray_thread(event_tx: UnboundedSender<TrayEvent>) {
     let tray_rx = TrayIconEvent::receiver();
     let menu_rx = MenuEvent::receiver();
 
-        // Required for the tray icon's hidden window to actually receive
-        // its Shell_NotifyIcon callback messages; also doubles as our
-        // polling cadence for the two event channels above.
-        unsafe {
-            use windows_sys::Win32::UI::WindowsAndMessaging::{
-                DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
-            };
-            loop {
-                let mut msg: MSG = std::mem::zeroed();
-                while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
-                    TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                }
-
-                if let Ok(event) = tray_rx.try_recv() {
-                    if matches!(event, TrayIconEvent::DoubleClick { .. })
-                        && event_tx.send(TrayEvent::Show).is_err()
-                    {
-                        return;
-                    }
-                }
-                if let Ok(event) = menu_rx.try_recv() {
-                    if event.id == "show" {
-                        if event_tx.send(TrayEvent::Show).is_err() {
-                            return;
-                        }
-                    } else if event.id == "quit" {
-                        let _ = event_tx.send(TrayEvent::Quit);
-                        return;
-                    }
-                }
-
-                std::thread::sleep(std::time::Duration::from_millis(50));
+    // Required for the tray icon's hidden window to actually receive
+    // its Shell_NotifyIcon callback messages; also doubles as our
+    // polling cadence for the two event channels above.
+    unsafe {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
+        };
+        loop {
+            let mut msg: MSG = std::mem::zeroed();
+            while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
             }
+
+            if let Ok(event) = tray_rx.try_recv() {
+                if matches!(event, TrayIconEvent::DoubleClick { .. })
+                    && event_tx.send(TrayEvent::Show).is_err()
+                {
+                    return;
+                }
+            }
+            if let Ok(event) = menu_rx.try_recv() {
+                if event.id == "show" {
+                    if event_tx.send(TrayEvent::Show).is_err() {
+                        return;
+                    }
+                } else if event.id == "quit" {
+                    let _ = event_tx.send(TrayEvent::Quit);
+                    return;
+                }
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
+    }
 }
 
 /// Linux backend: tray-icon's StatusNotifierItem/libappindicator support
@@ -275,5 +276,7 @@ pub(crate) fn spawn(event_tx: UnboundedSender<TrayEvent>) {
 
 #[cfg(not(any(windows, target_os = "linux")))]
 pub(crate) fn spawn(event_tx: UnboundedSender<TrayEvent>) {
-    let _ = event_tx.send(TrayEvent::Unavailable("not implemented on this platform".into()));
+    let _ = event_tx.send(TrayEvent::Unavailable(
+        "not implemented on this platform".into(),
+    ));
 }

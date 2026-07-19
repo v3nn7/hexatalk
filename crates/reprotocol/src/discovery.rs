@@ -98,7 +98,8 @@ pub async fn advertise_and_scan(
 
     while Instant::now() < deadline {
         let _ = sock.send_to(&payload, bcast).await;
-        let wait = Duration::from_millis(400).min(deadline.saturating_duration_since(Instant::now()));
+        let wait =
+            Duration::from_millis(400).min(deadline.saturating_duration_since(Instant::now()));
         if wait.is_zero() {
             break;
         }
@@ -165,10 +166,7 @@ mod tests {
         let adv = decode_beacon(&raw, from).unwrap();
         assert_eq!(adv.name, "alice");
         assert_eq!(adv.tcp_addr.as_deref(), Some("192.168.1.2:9"));
-        assert_eq!(
-            adv.relay_url.as_deref(),
-            Some("wss://relay.example")
-        );
+        assert_eq!(adv.relay_url.as_deref(), Some("wss://relay.example"));
         assert_eq!(adv.fingerprint.as_deref(), Some("abcd"));
     }
 }

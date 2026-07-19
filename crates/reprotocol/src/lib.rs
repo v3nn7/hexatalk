@@ -60,6 +60,7 @@ pub mod vc;
 
 pub use discovery::{DISCOVERY_PORT, PeerAdvert, advertise_and_scan};
 pub use error::{Error, Result};
+pub use framing::{DEFAULT_MAX_FRAME, HARD_MAX_FRAME, MAX_WIRE_CHUNK};
 pub use identity::{Identity, TofuCheck, TofuStore, fingerprint_of, short_fingerprint_of};
 pub use invite::{
     DEFAULT_INVITE_TTL, INVITE_SCHEME, Invite, InviteOptions, MIN_CRED_LEN, random_credential,
@@ -77,4 +78,3 @@ pub use vc::{
     VideoFrame, VideoJitterBuffer, generate_hd_test_pattern_rgb, minimal_jpeg_bytes,
     video_frame_from_payload,
 };
-pub use framing::{DEFAULT_MAX_FRAME, HARD_MAX_FRAME, MAX_WIRE_CHUNK};

@@ -48,7 +48,10 @@ fn main() {
 
     println!("cargo:rustc-env=CONVEX_URL={}", env_value("CONVEX_URL"));
     println!("cargo:rustc-env=TURN_URL={}", env_value("TURN_URL"));
-    println!("cargo:rustc-env=TURN_USERNAME={}", env_value("TURN_USERNAME"));
+    println!(
+        "cargo:rustc-env=TURN_USERNAME={}",
+        env_value("TURN_USERNAME")
+    );
     println!(
         "cargo:rustc-env=TURN_CREDENTIAL={}",
         env_value("TURN_CREDENTIAL")
@@ -84,15 +87,16 @@ fn embed_app_icon() {
     let sizes = [256u32, 128, 64, 48, 32, 16];
     let mut frames = Vec::new();
     for size in sizes {
-        let resized = image::imageops::resize(
-            &source,
-            size,
-            size,
-            image::imageops::FilterType::Lanczos3,
-        );
+        let resized =
+            image::imageops::resize(&source, size, size, image::imageops::FilterType::Lanczos3);
         frames.push(
-            image::codecs::ico::IcoFrame::as_png(&resized, size, size, image::ColorType::Rgba8.into())
-                .expect("failed to encode ICO frame"),
+            image::codecs::ico::IcoFrame::as_png(
+                &resized,
+                size,
+                size,
+                image::ColorType::Rgba8.into(),
+            )
+            .expect("failed to encode ICO frame"),
         );
     }
 
@@ -106,7 +110,10 @@ fn embed_app_icon() {
     let rc_path = std::path::Path::new(&out_dir).join("app_icon.rc");
     std::fs::write(
         &rc_path,
-        format!("IDI_ICON1 ICON \"{}\"\n", ico_path.display().to_string().replace('\\', "\\\\")),
+        format!(
+            "IDI_ICON1 ICON \"{}\"\n",
+            ico_path.display().to_string().replace('\\', "\\\\")
+        ),
     )
     .expect("failed to write .rc file");
 

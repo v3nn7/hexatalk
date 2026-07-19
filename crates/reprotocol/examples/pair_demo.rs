@@ -127,7 +127,14 @@ async fn run_host(args: Args) -> peerseal::Result<()> {
         "  relay: {}",
         invite.relay_url.as_deref().unwrap_or("(none)")
     );
-    println!("  mode:  {}", if args.relay_only { "RELAY-ONLY" } else { "direct-first" });
+    println!(
+        "  mode:  {}",
+        if args.relay_only {
+            "RELAY-ONLY"
+        } else {
+            "direct-first"
+        }
+    );
     println!("──────────────────────────────────────────────");
     println!("  invite:\n\n  {qr}\n");
     println!("  short: {}", invite.to_short_code());
@@ -145,7 +152,10 @@ async fn run_guest(args: Args) -> peerseal::Result<()> {
     print!("paste invite: ");
     io::stdout().flush().ok();
     let mut line = String::new();
-    io::stdin().lock().read_line(&mut line).map_err(peerseal::Error::Io)?;
+    io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(peerseal::Error::Io)?;
     let line = line.trim();
     if line.is_empty() {
         return Err(peerseal::Error::InvalidInvite("empty".into()));

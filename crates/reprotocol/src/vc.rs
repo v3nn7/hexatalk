@@ -705,12 +705,18 @@ mod tests {
     fn pack_video_large_payload() {
         let mut c = VcCall::new(VcConfig::hd_1080p30());
         let rgb = generate_hd_test_pattern_rgb(320, 180, 0); // smaller for unit test speed
-        let frame = video_frame_from_payload(320, 180, VideoCodec::RawRgb24, true, 0, 0, rgb.clone());
+        let frame =
+            video_frame_from_payload(320, 180, VideoCodec::RawRgb24, true, 0, 0, rgb.clone());
         let msg = c.pack_video(frame);
         let encoded = msg.encode().unwrap();
         let decoded = AppMessage::decode(&encoded).unwrap();
         match decoded {
-            AppMessage::VcVideo { data, width, height, .. } => {
+            AppMessage::VcVideo {
+                data,
+                width,
+                height,
+                ..
+            } => {
                 assert_eq!(data, rgb);
                 assert_eq!(width, 320);
                 assert_eq!(height, 180);

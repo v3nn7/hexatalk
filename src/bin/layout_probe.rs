@@ -41,8 +41,18 @@ fn apply_full(ui: &ui::AppWindow, nasty: bool) {
     ui.set_chat_unread_count(3);
     ui.set_chat_servers(
         vec![
-            ui::ServerRow { server_id: "s1".into(), name: "Server One".into(), initial: "S".into(), ..Default::default() },
-            ui::ServerRow { server_id: "s2".into(), name: "Server Two".into(), initial: "T".into(), ..Default::default() },
+            ui::ServerRow {
+                server_id: "s1".into(),
+                name: "Server One".into(),
+                initial: "S".into(),
+                ..Default::default()
+            },
+            ui::ServerRow {
+                server_id: "s2".into(),
+                name: "Server Two".into(),
+                initial: "T".into(),
+                ..Default::default()
+            },
         ]
         .as_slice()
         .into(),
@@ -61,7 +71,11 @@ fn apply_full(ui: &ui::AppWindow, nasty: bool) {
         (0..8)
             .map(|i| ui::ConversationRow {
                 id: format!("c{i}").into(),
-                title: if nasty && i == 0 { long.into() } else { format!("friend{i}").into() },
+                title: if nasty && i == 0 {
+                    long.into()
+                } else {
+                    format!("friend{i}").into()
+                },
                 unread: i == 2,
                 active: i == 0,
             })
@@ -79,7 +93,14 @@ fn apply_full(ui: &ui::AppWindow, nasty: bool) {
 
     // ---- Chat area: empty direct conversation, secure channel pending ----
     ui.set_chat_has_conversation(true);
-    ui.set_chat_peer_title(if nasty { "🔥💀 Ẕ̸̢a̴l̷g̶o̸ peer 🔥💀" } else { "djfranek23" }.into());
+    ui.set_chat_peer_title(
+        if nasty {
+            "🔥💀 Ẕ̸̢a̴l̷g̶o̸ peer 🔥💀"
+        } else {
+            "djfranek23"
+        }
+        .into(),
+    );
     ui.set_chat_peer_initial("D".into());
     ui.set_chat_peer_online(true);
     ui.set_chat_is_channel_icon(false);
@@ -93,19 +114,44 @@ fn apply_full(ui: &ui::AppWindow, nasty: bool) {
     ui.set_chat_store_allowed(true);
     ui.set_chat_can_voice(false);
     ui.set_chat_quick_emojis(
-        ["👍", "❤️", "😂", "😮", "😢", "🎉"].iter().map(|e| slint::SharedString::from(*e)).collect::<Vec<_>>().as_slice().into(),
+        ["👍", "❤️", "😂", "😮", "😢", "🎉"]
+            .iter()
+            .map(|e| slint::SharedString::from(*e))
+            .collect::<Vec<_>>()
+            .as_slice()
+            .into(),
     );
     let msgs = if nasty {
         let megaword = "A".repeat(4000);
         vec![
             fake_msg(0, false, false, &megaword),
-            fake_msg(1, true, false, "🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉"),
-            ui::ChatMessageRow { id: "d0".into(), is_call_log: true, body: "Friday, July 18".into(), ..Default::default() },
-            fake_msg(2, false, true, "https://example.com/some/extremely/long/unbroken/url/path/that/never/wraps/because/it/has/no/spaces/anywhere/in/it/at/all/1234567890"),
+            fake_msg(
+                1,
+                true,
+                false,
+                "🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉",
+            ),
+            ui::ChatMessageRow {
+                id: "d0".into(),
+                is_call_log: true,
+                body: "Friday, July 18".into(),
+                ..Default::default()
+            },
+            fake_msg(
+                2,
+                false,
+                true,
+                "https://example.com/some/extremely/long/unbroken/url/path/that/never/wraps/because/it/has/no/spaces/anywhere/in/it/at/all/1234567890",
+            ),
         ]
     } else {
         vec![
-            ui::ChatMessageRow { id: "d0".into(), is_call_log: true, body: "Friday, July 18".into(), ..Default::default() },
+            ui::ChatMessageRow {
+                id: "d0".into(),
+                is_call_log: true,
+                body: "Friday, July 18".into(),
+                ..Default::default()
+            },
             fake_msg(0, false, false, "hello"),
             fake_msg(1, true, false, "hi there"),
         ]
@@ -147,7 +193,12 @@ fn main() {
             ui.set_chat_is_direct(true);
             ui.set_chat_input_placeholder("Type a message...".into());
             ui.set_chat_quick_emojis(
-                ["👍", "❤️"].iter().map(|e| slint::SharedString::from(*e)).collect::<Vec<_>>().as_slice().into(),
+                ["👍", "❤️"]
+                    .iter()
+                    .map(|e| slint::SharedString::from(*e))
+                    .collect::<Vec<_>>()
+                    .as_slice()
+                    .into(),
             );
             let msgs: Vec<ui::ChatMessageRow> = match mode.as_str() {
                 "chat0" => vec![],
@@ -180,8 +231,22 @@ fn main() {
             ui.set_chat_friends_summary("4 friends · 2 online · 1 in · 0 out".into());
             ui.set_chat_friends(
                 vec![
-                    ui::FriendRow { user_id: "u1".into(), label: "djfranek23".into(), subtitle: "Online".into(), initial: "D".into(), online: true, ..Default::default() },
-                    ui::FriendRow { user_id: "u2".into(), label: "Xeni".into(), subtitle: "Offline".into(), initial: "X".into(), online: false, ..Default::default() },
+                    ui::FriendRow {
+                        user_id: "u1".into(),
+                        label: "djfranek23".into(),
+                        subtitle: "Online".into(),
+                        initial: "D".into(),
+                        online: true,
+                        ..Default::default()
+                    },
+                    ui::FriendRow {
+                        user_id: "u2".into(),
+                        label: "Xeni".into(),
+                        subtitle: "Offline".into(),
+                        initial: "X".into(),
+                        online: false,
+                        ..Default::default()
+                    },
                 ]
                 .as_slice()
                 .into(),
@@ -199,8 +264,18 @@ fn main() {
             ui.set_ss_can_delete_channel(true);
             ui.set_ss_channels(
                 vec![
-                    ui::SSChannelRow { conversation_id: "c1".into(), name: "general".into(), is_voice: false, is_renaming: false },
-                    ui::SSChannelRow { conversation_id: "c2".into(), name: "general".into(), is_voice: true, is_renaming: false },
+                    ui::SSChannelRow {
+                        conversation_id: "c1".into(),
+                        name: "general".into(),
+                        is_voice: false,
+                        is_renaming: false,
+                    },
+                    ui::SSChannelRow {
+                        conversation_id: "c2".into(),
+                        name: "general".into(),
+                        is_voice: true,
+                        is_renaming: false,
+                    },
                 ]
                 .as_slice()
                 .into(),

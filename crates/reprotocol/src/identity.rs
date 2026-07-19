@@ -156,10 +156,7 @@ impl TofuStore {
                 }
                 let mut parts = line.split_whitespace();
                 let Some(fp) = parts.next() else { continue };
-                let ts = parts
-                    .next()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
+                let ts = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
                 entries.insert(fp.to_string(), ts);
             }
         }

@@ -72,8 +72,7 @@ impl Friend {
     }
 
     pub(crate) fn is_online_like(&self) -> bool {
-        matches!(self.presence.as_str(), "online" | "idle" | "dnd")
-            || is_online(self.last_seen_at)
+        matches!(self.presence.as_str(), "online" | "idle" | "dnd") || is_online(self.last_seen_at)
     }
 }
 
