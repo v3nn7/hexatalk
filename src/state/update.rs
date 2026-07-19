@@ -12,21 +12,37 @@ use std::time::{Duration, Instant};
 use convex::{FunctionResult, Value};
 use maplit::btreemap;
 
-use crate::rt::{Task, WindowAction};
-use crate::rt::write_clipboard_text;
+use crate::net::rt::{Task, WindowAction};
+use crate::net::rt::write_clipboard_text;
 
-use crate::*;
+use crate::{AVATAR_PALETTE, PEER_CLEAR_HISTORY_CTRL, scroll_chat_to_bottom};
+
+use crate::crypto;
+use crate::media::call;
+use crate::media::screenshare;
+use crate::net::peer;
+use crate::tray;
+use crate::media::notify::{BEEP_CALL_CONNECTED, BEEP_FRIEND_REQUEST, BEEP_MESSAGE, notify_desktop, play_beep, ringtone_start, ringtone_stop};
+use crate::ui::mentions;
+use crate::net::convex_parse::{expect_null, expect_string, humanize_error, obj_f64, obj_str, obj_str_list, parse_clear_conversation_result, parse_me, parse_object_array, parse_profile_view, parse_session, value_as_bool};
+use crate::net::subscriptions::{mark_read_task, typing_ping_task};
+use crate::state::app::App;
+use crate::state::message::Message;
+use crate::state::session_store::{clear_session_file, connect_task, save_panel_prefs, save_session_to_disk, talkyss_data_dir};
+use crate::state::types::{AttachmentPick, AuthMode, AvatarPick, BotSummary, CallRole, PendingAttachment, PeopleHit, ResizePanel, ServerSettingsCategory, SettingsCategory, SidebarTab};
+use crate::ui::utils::{next_friend_request_privacy, next_presence_status};
+use crate::update_check::{UpdateOutcome, check_for_update_task, stage_exe_swap};
 
 /// `talkyss://invite/<code>` -- shareable alongside (or instead of) the bare
 /// invite code; `extract_invite_code` accepts either form pasted back in.
-pub(crate) fn build_invite_link(code: &str) -> String {
+fn build_invite_link(code: &str) -> String {
     format!("talkyss://invite/{code}")
 }
 
 /// Pulls the invite code out of a pasted `talkyss://invite/<code>` (or
 /// `https://.../invite/<code>`) link, falling back to treating the whole
 /// trimmed input as a bare code if it doesn't look like a link.
-pub(crate) fn extract_invite_code(input: &str) -> String {
+fn extract_invite_code(input: &str) -> String {
     let trimmed = input.trim();
     let code = match trimmed.rsplit_once("invite/") {
         Some((_, rest)) => rest,
@@ -225,8 +241,25 @@ impl App {
             Message::PublicKeyUploaded => Task::none(),
 
             Message::CheckForUpdate => {
+                if self.pending_update_path.is_some() {
+                    // Already downloaded -- no point re-downloading on
+                    // every periodic tick; just remind the user.
+                    self.update_check_status = Some(
+                        "Update ready -- press Restart & install.".to_string(),
+                    );
+                    return Task::none();
+                }
                 self.update_check_status = Some("Checking...".to_string());
                 check_for_update_task()
+            }
+            Message::RestartAndUpdate => {
+                // Explicit "Restart & install": swap the exe and relaunch
+                // it (unlike tray-quit, which stays off).
+                if let Some(path) = &self.pending_update_path {
+                    stage_exe_swap(path, true);
+                    self.pending_window_action = Some(WindowAction::Exit);
+                }
+                Task::none()
             }
             Message::UpdateCheckFinished(outcome) => {
                 match outcome {
@@ -291,7 +324,7 @@ impl App {
                     // No tray to hide into and no way back — quit for real
                     // instead of trapping the user with an invisible process.
                     if let Some(path) = &self.pending_update_path {
-                        stage_exe_swap(path);
+                        stage_exe_swap(path, false);
                     }
                     self.pending_window_action = Some(WindowAction::Exit);
                 }
@@ -304,7 +337,7 @@ impl App {
             }
             Message::TrayEvent(tray::TrayEvent::Quit) => {
                 if let Some(path) = &self.pending_update_path {
-                    stage_exe_swap(path);
+                    stage_exe_swap(path, false);
                 }
                 self.pending_window_action = Some(WindowAction::Exit);
                 Task::none()
@@ -644,8 +677,8 @@ impl App {
                                 .seen_last_message_at
                                 .get(&conv.conversation_id)
                                 .copied()
-                                .unwrap_or(0.0);
-                            if prev > 0.0 && conv.last_message_at > prev && notify_title.is_none()
+                                .unwrap_or(0);
+                            if prev > 0 && conv.last_message_at > prev && notify_title.is_none()
                             {
                                 notify_title = Some(conv.title.clone());
                             }
@@ -677,13 +710,13 @@ impl App {
                                 .last_marked_read_at
                                 .get(&c.conversation_id)
                                 .copied()
-                                .unwrap_or(0.0);
+                                .unwrap_or(0);
                             c.unread && c.last_message_at > already_marked
                         })
                         .unwrap_or(false);
                     if needs_mark {
                         let marked_at =
-                            active_row.map(|c| c.last_message_at).unwrap_or(0.0);
+                            active_row.map(|c| c.last_message_at).unwrap_or(0);
                         self.last_marked_read_at.insert(active_id.clone(), marked_at);
                         return mark_read_task(&self.client, &self.session, active_id);
                     }
@@ -696,6 +729,68 @@ impl App {
             }
             Message::MessagesUpdated(messages) => {
                 let messages = self.decrypt_incoming_messages(messages);
+                // Mention ping (Discord-style): mention toast + message
+                // beep when a genuinely new, recent message pings us (by
+                // name, or @everyone in a channel/group). Skips our own
+                // messages, live peerseal echoes (already notified on the
+                // peer path), and history older than 2 min (opening a
+                // conversation loads history through this same arm). When
+                // the window is focused the highlighted row is signal
+                // enough -- matches the peer path's focus rule.
+                let mention_ping: Option<(String, String)> = if self.window_focused {
+                    None
+                } else {
+                    let now = chrono::Utc::now().timestamp_millis();
+                    let my_id = self
+                        .session
+                        .as_ref()
+                        .map(|s| s.user_id.as_str())
+                        .unwrap_or("");
+                    let my_names = self.my_mention_names();
+                    let everyone_ok = matches!(
+                        self.active_conversation_kind.as_deref(),
+                        Some("channel") | Some("group")
+                    );
+                    let live = self
+                        .active_conversation_peer_id
+                        .as_ref()
+                        .and_then(|pid| self.peer_live_messages.get(pid));
+                    let mut ping = None;
+                    for m in &messages {
+                        if m.author_id == my_id || m.kind == "call" || m.deleted {
+                            continue;
+                        }
+                        if (now - m.sent_at).abs() > 120_000 {
+                            continue;
+                        }
+                        if self.messages.iter().any(|old| old.id == m.id) {
+                            continue;
+                        }
+                        if live.is_some_and(|l| {
+                            l.iter().any(|e| {
+                                e.author_id == m.author_id
+                                    && e.body == m.body
+                                    && (e.sent_at - m.sent_at).abs() < 120_000
+                            })
+                        }) {
+                            continue;
+                        }
+                        if mentions::mentions_any(&m.body, &my_names)
+                            || (everyone_ok && mentions::has_everyone(&m.body))
+                        {
+                            ping = Some((m.author_name.clone(), m.body.clone()));
+                            break;
+                        }
+                    }
+                    ping
+                };
+                if let Some((author, body)) = mention_ping {
+                    play_beep(BEEP_MESSAGE);
+                    notify_desktop(
+                        &format!("{author} mentioned you"),
+                        &mentions::snippet(&body, 140),
+                    );
+                }
                 let grew = messages.len() > self.messages.len();
                 let image_jobs: Vec<(String, Option<String>, Option<String>)> = messages
                     .iter()
@@ -724,7 +819,7 @@ impl App {
                                         == live.attachment_url.is_empty()
                                         || !live.attachment_url.is_empty()
                                             && !m.attachment_url.is_empty())
-                                    && (m.sent_at - live.sent_at).abs() < 120_000.0
+                                    && (m.sent_at - live.sent_at).abs() < 120_000
                             })
                         });
                     }
@@ -735,6 +830,75 @@ impl App {
                 } else {
                     fetch
                 }
+            }
+            Message::PinnedMessagesUpdated(pinned) => {
+                // Same decrypt path as history: encrypted snippets from
+                // `messages:listPinned` arrive as ciphertext and need the
+                // group key (or stay as-is for plain DMs).
+                self.pinned_messages = self.decrypt_incoming_messages(pinned);
+                Task::none()
+            }
+            Message::TogglePinsPanel => {
+                self.pins_panel_open = !self.pins_panel_open;
+                Task::none()
+            }
+            Message::PinMessage(message_id) => {
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                let mut client = client;
+                Task::perform(
+                    async move {
+                        client
+                            .mutation(
+                                "messages:pinMessage",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(session.token),
+                                    "messageId".to_string() => Value::String(message_id),
+                                },
+                            )
+                            .await
+                            .map_err(|err| humanize_error(&err.to_string()))
+                            .and_then(expect_null)
+                    },
+                    Message::PinToggled,
+                )
+            }
+            Message::UnpinMessage(message_id) => {
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                let mut client = client;
+                Task::perform(
+                    async move {
+                        client
+                            .mutation(
+                                "messages:unpinMessage",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(session.token),
+                                    "messageId".to_string() => Value::String(message_id),
+                                },
+                            )
+                            .await
+                            .map_err(|err| humanize_error(&err.to_string()))
+                            .and_then(expect_null)
+                    },
+                    Message::PinToggled,
+                )
+            }
+            Message::PinToggled(Ok(())) => {
+                self.chat_error = None;
+                Task::none()
+            }
+            Message::PinToggled(Err(err)) => {
+                self.chat_error = Some(err);
+                Task::none()
             }
 
             Message::SidebarTabChanged(tab) => {
@@ -1035,12 +1199,15 @@ impl App {
                 self.active_conversation_peer_id = Some(peer_id);
                 self.active_peer_name = Some(title);
                 self.messages.clear();
+                self.pinned_messages.clear();
+                self.pins_panel_open = false;
                 self.chat_error = None;
                 self.editing_message_id = None;
                 self.hovered_message_id = None;
                 self.clear_chat_confirm = false;
                 self.clear_chat_busy = false;
                 self.message_input.clear();
+                self.mention_suggestions.clear();
                 self.pending_attachment = None;
                 self.pending_reply = None;
                 self.typing_names.clear();
@@ -1230,17 +1397,22 @@ impl App {
                     return Task::none();
                 };
                 let stop = self.stop_typing_task();
+                self.sidebar_tab = SidebarTab::Chats;
+                self.selected_server = None;
                 self.active_conversation = Some(summary.conversation_id.clone());
                 self.active_conversation_kind = Some(summary.kind.clone());
                 self.active_conversation_peer_id = summary.peer_user_id.clone();
                 self.active_peer_name = Some(summary.title.clone());
                 self.messages.clear();
+                self.pinned_messages.clear();
+                self.pins_panel_open = false;
                 self.chat_error = None;
                 self.editing_message_id = None;
                 self.hovered_message_id = None;
                 self.clear_chat_confirm = false;
                 self.clear_chat_busy = false;
                 self.message_input.clear();
+                self.mention_suggestions.clear();
                 self.pending_attachment = None;
                 self.pending_reply = None;
                 self.typing_names.clear();
@@ -1258,17 +1430,22 @@ impl App {
             }
             Message::ConversationOpened(Ok((title, peer_id, conversation_id))) => {
                 let stop = self.stop_typing_task();
+                self.sidebar_tab = SidebarTab::Chats;
+                self.selected_server = None;
                 self.active_conversation = Some(conversation_id.clone());
                 self.active_conversation_kind = Some("direct".to_string());
                 self.active_conversation_peer_id = peer_id;
                 self.active_peer_name = Some(title);
                 self.messages.clear();
+                self.pinned_messages.clear();
+                self.pins_panel_open = false;
                 self.chat_error = None;
                 self.editing_message_id = None;
                 self.hovered_message_id = None;
                 self.clear_chat_confirm = false;
                 self.clear_chat_busy = false;
                 self.message_input.clear();
+                self.mention_suggestions.clear();
                 self.pending_attachment = None;
                 self.pending_reply = None;
                 self.typing_names.clear();
@@ -1354,6 +1531,8 @@ impl App {
                 self.active_conversation_peer_id = None;
                 self.active_peer_name = Some(title);
                 self.messages.clear();
+                self.pinned_messages.clear();
+                self.pins_panel_open = false;
                 self.sidebar_tab = SidebarTab::Chats;
                 self.ensure_group_key()
             }
@@ -1821,21 +2000,35 @@ impl App {
                     format!("#{}", channel.name)
                 });
                 self.messages.clear();
+                self.pinned_messages.clear();
+                self.pins_panel_open = false;
                 self.chat_error = None;
                 self.editing_message_id = None;
                 self.hovered_message_id = None;
                 self.clear_chat_confirm = false;
                 self.clear_chat_busy = false;
                 self.message_input.clear();
+                self.mention_suggestions.clear();
                 self.pending_attachment = None;
                 self.pending_reply = None;
                 self.typing_names.clear();
-                Task::batch([
+                // Clicking a voice channel joins it straight away (Discord
+                // behavior) instead of dropping the user into a text view
+                // with a separate Join button. JoinVoiceChannel reads the
+                // freshly-set active_conversation above.
+                let auto_join = channel.channel_type == "voice"
+                    && self.active_voice_channel.as_deref()
+                        != Some(channel.conversation_id.as_str());
+                let mut tasks = vec![
                     stop,
                     self.load_conversation_store_pref(),
-                    mark_read_task(&self.client, &self.session, channel.conversation_id),
+                    mark_read_task(&self.client, &self.session, channel.conversation_id.clone()),
                     self.ensure_group_key(),
-                ])
+                ];
+                if auto_join {
+                    tasks.push(Task::done(Message::JoinVoiceChannel));
+                }
+                Task::batch(tasks)
             }
             Message::ToggleNewChannelInput => {
                 self.new_channel_open = !self.new_channel_open;
@@ -2179,6 +2372,8 @@ impl App {
                     self.active_conversation_kind = None;
                     self.active_peer_name = None;
                     self.messages.clear();
+                    self.pinned_messages.clear();
+                    self.pins_panel_open = false;
                 }
                 let mut client = client;
                 Task::perform(
@@ -2210,6 +2405,7 @@ impl App {
             Message::MessageInputChanged(value) => {
                 let now_empty = value.trim().is_empty();
                 self.message_input = value;
+                self.mention_suggestions = self.compute_mention_suggestions();
                 let Some(conversation_id) = self.active_conversation.clone() else {
                     return Task::none();
                 };
@@ -2242,6 +2438,11 @@ impl App {
                         true,
                     );
                 }
+                Task::none()
+            }
+            Message::MentionSuggestionPicked(name) => {
+                self.message_input = mentions::complete(&self.message_input, &name);
+                self.mention_suggestions.clear();
                 Task::none()
             }
             Message::PickAttachmentImage => Task::perform(
@@ -2338,6 +2539,7 @@ impl App {
                         return Task::none();
                     };
                     self.message_input.clear();
+                    self.mention_suggestions.clear();
                     self.pending_reply = None;
                     self.chat_error = None;
 
@@ -2491,6 +2693,7 @@ impl App {
                         }
                     }
                     self.message_input.clear();
+                    self.mention_suggestions.clear();
                     self.send_busy = true;
                     let mut client = client;
                     return Task::perform(
@@ -2580,6 +2783,7 @@ impl App {
 
                 let reply_to_message_id = reply_to.map(|(id, _, _)| id);
                 self.message_input.clear();
+                self.mention_suggestions.clear();
                 self.chat_error = None;
                 self.send_busy = true;
                 let stop_typing = if self.typing_active {
@@ -2686,6 +2890,7 @@ impl App {
             Message::CancelEdit => {
                 self.editing_message_id = None;
                 self.message_input.clear();
+                self.mention_suggestions.clear();
                 Task::none()
             }
             Message::EditFinished(Err(err)) => {
@@ -3112,6 +3317,13 @@ impl App {
                 self.voice_users = users;
                 Task::none()
             }
+            Message::VoiceVolumeChanged(user_id, volume) => {
+                if let Ok(mut gains) = self.voice_gains.lock() {
+                    gains.insert(user_id, volume.clamp(0.0, 2.0));
+                }
+                self.persist_settings();
+                Task::none()
+            }
             Message::VoiceActionFinished(Ok(Some(channel_id))) => {
                 self.active_voice_channel = Some(channel_id);
                 self.room_voice_status = Some("Connecting voice…".into());
@@ -3134,7 +3346,7 @@ impl App {
                 Task::none()
             }
             Message::RoomVoiceEngineEvent(ev) => {
-                use crate::room_voice::RoomVoiceEvent;
+                use crate::media::room_voice::RoomVoiceEvent;
                 match ev {
                     RoomVoiceEvent::Connecting => {
                         self.room_voice_status = Some("Connecting voice…".into());
@@ -3945,12 +4157,16 @@ impl App {
                     .map(|c| c.status == "ringing" && !c.is_caller)
                     .unwrap_or(false);
                 if !was_ringing && now_ringing {
+                    ringtone_start();
                     if let Some(call) = &info {
                         notify_desktop(
                             "Incoming call",
                             &format!("{} is calling you", call.peer_display_name),
                         );
                     }
+                }
+                if was_ringing && !now_ringing {
+                    ringtone_stop();
                 }
                 if info.is_none() {
                     self.call_role = None;
@@ -4167,7 +4383,7 @@ impl App {
                 Task::none()
             }
             Message::StartShare(encoded) => {
-                let Some(target) = crate::viewmodel::decode_share_target(&encoded) else {
+                let Some(target) = crate::ui::viewmodel::decode_share_target(&encoded) else {
                     return Task::none();
                 };
                 self.share_picker_open = false;
@@ -4197,7 +4413,9 @@ impl App {
                 Task::none()
             }
             Message::EscapePressed => {
-                if self.attachment_preview_url.is_some() {
+                if !self.mention_suggestions.is_empty() {
+                    self.mention_suggestions.clear();
+                } else if self.attachment_preview_url.is_some() {
                     self.attachment_preview_url = None;
                 } else if self.clear_chat_confirm {
                     self.clear_chat_confirm = false;
@@ -4206,6 +4424,7 @@ impl App {
                 } else if self.editing_message_id.is_some() {
                     self.editing_message_id = None;
                     self.message_input.clear();
+                    self.mention_suggestions.clear();
                 } else if self.pending_reply.is_some() {
                     self.pending_reply = None;
                 } else if self.pending_attachment.is_some() {
@@ -4455,14 +4674,17 @@ impl App {
             }
             Message::SettingsInputDeviceSelected(name) => {
                 self.settings_input_device = if name.is_empty() { None } else { Some(name) };
+                self.persist_settings();
                 Task::none()
             }
             Message::SettingsOutputDeviceSelected(name) => {
                 self.settings_output_device = if name.is_empty() { None } else { Some(name) };
+                self.persist_settings();
                 Task::none()
             }
             Message::NoiseGateChanged(value) => {
                 self.noise_gate.store(value.to_bits(), Ordering::Relaxed);
+                self.persist_settings();
                 Task::none()
             }
 
@@ -4622,9 +4844,13 @@ impl App {
             Message::TypingPingFinished => Task::none(),
 
             Message::RingTick => {
+                // Windows plays the looping callsound.mp3 ringtone via
+                // ringtone_start/stop in MyCallUpdated; the periodic beep
+                // remains as the fallback on other platforms.
+                #[cfg(not(windows))]
                 if let Some(call) = &self.my_call {
                     if call.status == "ringing" && !call.is_caller {
-                        play_beep(BEEP_INCOMING_CALL);
+                        play_beep(crate::media::notify::BEEP_INCOMING_CALL);
                     }
                 }
                 Task::none()

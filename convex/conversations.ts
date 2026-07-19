@@ -237,6 +237,33 @@ export const listMyConversations = query({
 
       const lastMessageAt = conversation.lastMessageAt ?? 0;
       const lastReadAt = membership.lastReadAt ?? 0;
+      const unread = lastMessageAt > lastReadAt;
+
+      // Unread @-mention badge: messages newer than my read marker whose
+      // stored mention metadata pings me (directly, or @everyone). Only
+      // computed when the conversation is unread at all -- the messages
+      // scan is skipped otherwise. Older messages without metadata simply
+      // don't count.
+      let mentionCount = 0;
+      if (unread) {
+        const recent = await ctx.db
+          .query("messages")
+          .withIndex("by_conversation", (q) =>
+            q.eq("conversationId", conversation._id),
+          )
+          .order("desc")
+          .take(100);
+        for (const message of recent) {
+          if (message._creationTime <= lastReadAt) break;
+          if (message.authorId === me._id || message.deleted) continue;
+          const pingsMe =
+            message.mentionEveryone === true ||
+            (message.mentionUserIds?.includes(me._id) ?? false);
+          if (pingsMe) {
+            mentionCount += 1;
+          }
+        }
+      }
 
       result.push({
         conversationId: conversation._id,
@@ -244,7 +271,8 @@ export const listMyConversations = query({
         title,
         peerUserId,
         lastMessageAt,
-        unread: lastMessageAt > lastReadAt,
+        unread,
+        mentionCount,
       });
     }
 

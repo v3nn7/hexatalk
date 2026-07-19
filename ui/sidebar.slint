@@ -22,9 +22,17 @@ component SmallButton inherits Rectangle {
     width: label.preferred-width + 16px;
     background: root.bg;
     border-width: 1px;
-    border-color: root.border_c;
+    border-color: touch.has-hover ? Theme.border-strong : root.border_c;
+    animate background { duration: 120ms; }
+    animate border-color { duration: 120ms; }
     touch := TouchArea { clicked => { root.clicked(); } }
     label := Text { text: root.text; font-size: 11px; color: root.fg; horizontal-alignment: center; vertical-alignment: center; }
+    // Square tint overlay: works over any configured `bg` (accent, danger,
+    // success) without losing the base color on hover.
+    Rectangle {
+        background: touch.pressed ? #0000002e : (touch.has-hover ? #ffffff0d : transparent);
+        animate background { duration: 120ms; }
+    }
 }
 
 component PersonCard inherits Rectangle {
@@ -32,6 +40,25 @@ component PersonCard inherits Rectangle {
     border-width: 1px;
     border-color: Theme.border;
     VerticalLayout { padding: 10px; spacing: 8px; @children }
+}
+
+// Centered, muted placeholder for empty lists -- deliberately sized and
+// spaced so it reads as a designed state, not a stray label.
+component EmptyState inherits Rectangle {
+    in property <string> text;
+    in property <length> box-height: 120px;
+    height: root.box-height;
+    Text {
+        x: 12px;
+        width: parent.width - 24px;
+        height: parent.height;
+        text: root.text;
+        font-size: Theme.text-md;
+        color: Theme.text-muted;
+        wrap: word-wrap;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
 }
 
 export component Sidebar inherits Rectangle {
@@ -163,17 +190,19 @@ export component Sidebar inherits Rectangle {
                 // ---- Header ----
                 Rectangle {
                     height: 56px;
+                    border-width: 0px;
                     VerticalLayout {
                         padding: 14px;
                         spacing: 2px;
                         alignment: center;
-                        Text { text: root.tab_title.to-uppercase(); font-size: 10px; font-family: Theme.font-medium; color: Theme.text-muted; }
-                        Text { text: root.tab_title; font-size: 16px; color: Theme.text-primary; }
+                        Text { text: root.tab_title.to-uppercase(); font-size: Theme.text-xs; font-family: Theme.font-medium; letter-spacing: 1px; color: Theme.text-muted; }
+                        Text { text: root.tab_title; font-size: 16px; font-family: Theme.font-medium; color: Theme.text-primary; }
                     }
+                    Rectangle { x: 0; y: parent.height - 1px; width: parent.width; height: 1px; background: Theme.border-hairline; }
                 }
 
                 if root.add_menu_open: PersonCard {
-                    Text { text: "ADD SERVER"; font-size: 10px; font-family: Theme.font-medium; color: Theme.accent; }
+                    Text { text: "ADD SERVER"; font-size: Theme.text-xs; font-family: Theme.font-medium; letter-spacing: 1px; color: Theme.accent; }
                     TextInputField { placeholder: "Name"; value <=> root.new_server_name; edited(t) => { root.new_server_name_changed(t); } submitted => { root.create_server(); } }
                     PrimaryButton { text: "Create"; clicked => { root.create_server(); } }
                     Rectangle { height: 1px; background: Theme.border; }
@@ -188,6 +217,9 @@ export component Sidebar inherits Rectangle {
                     vertical-stretch: 1;
 
                     if root.tab == SidebarTab.Chats: VerticalLayout {
+        opacity: 0;
+        init => { self.opacity = 1; }
+        animate opacity { duration: 140ms; }
                         padding: 12px;
                         spacing: 8px;
                         SmallButton { text: root.new_group_open ? "Cancel" : "+ New group"; clicked => { root.toggle_group_panel(); } }
@@ -202,37 +234,71 @@ export component Sidebar inherits Rectangle {
                                     border-color: Theme.border-strong;
                                     TouchArea { clicked => { root.toggle_group_member(f.user_id); } }
                                 }
-                                Text { text: f.label; font-size: 12px; color: Theme.text-primary; vertical-alignment: center; }
+                                Text { text: f.label; font-size: Theme.text-sm; color: Theme.text-primary; vertical-alignment: center; }
                             }
                             PrimaryButton { text: "Create group"; clicked => { root.create_group(); } }
                             if root.group_create_status != "": Text { text: root.group_create_status; font-size: 11px; color: Theme.text-muted; }
                         }
-                        if root.conversations.length == 0: Text { text: "No chats yet. Message a friend to start."; font-size: 13px; color: Theme.text-muted; wrap: word-wrap; }
+                        if root.conversations.length == 0: EmptyState { text: "No chats yet. Message a friend to start."; }
                         list_convos := ListView {
                             for c in root.conversations: Rectangle {
                                 height: 40px;
                                 background: c.active ? Theme.accent-soft : (ct.has-hover ? Theme.bg-hover : transparent);
                                 border-width: 1px;
-                                border-color: c.active ? Theme.accent : transparent;
+                                border-color: c.active ? Theme.border-strong : transparent;
+                                animate background { duration: 120ms; }
+                                animate border-color { duration: 120ms; }
                                 ct := TouchArea { clicked => { root.open_conversation(c.id); } }
+                                // Active conversation spine (square).
+                                if c.active: Rectangle {
+                                    x: 0;
+                                    y: 0;
+                                    width: 3px;
+                                    height: parent.height;
+                                    background: Theme.accent;
+                                }
                                 HorizontalLayout {
                                     padding-left: 12px;
                                     spacing: 10px;
                                     alignment: start;
                                     if c.unread && !c.active: Rectangle { width: 8px; height: 8px; background: Theme.accent; vertical-stretch: 0; }
-                                    Text { text: c.title; font-size: 14px; color: Theme.text-primary; vertical-alignment: center; }
+                                    Text {
+                                        text: c.title;
+                                        font-size: Theme.text-md;
+                                        font-family: c.unread && !c.active ? Theme.font-medium : Theme.font-body;
+                                        color: c.active || c.unread ? Theme.text-primary : Theme.text-muted;
+                                        vertical-alignment: center;
+                                        animate color { duration: 120ms; }
+                                    }
                                 }
                             }
                         }
                     }
 
                     if root.tab == SidebarTab.Friends: Flickable {
+        opacity: 0;
+        init => { self.opacity = 1; }
+        animate opacity { duration: 140ms; }
                         viewport-height: friends_col.preferred-height;
                         friends_col := VerticalLayout {
                             width: parent.width;
                             padding: 10px;
                             spacing: 10px;
-                            Text { text: root.friends_summary; font-size: 12px; color: Theme.text-muted; }
+                            // Friends banner -- framed by the column padding,
+                            // hard-edged to match the rest of the UI.
+                            Rectangle {
+                                height: 96px;
+                                border-width: 1px;
+                                border-color: Theme.border-strong;
+                                clip: true;
+                                Image {
+                                    source: @image-url("../assets/textures/friendsbaner.png");
+                                    width: parent.width;
+                                    height: parent.height;
+                                    image-fit: ImageFit.cover;
+                                }
+                            }
+                            Text { text: root.friends_summary; font-size: Theme.text-xs; font-family: Theme.font-medium; color: Theme.text-muted; }
                             HorizontalLayout {
                                 spacing: 8px;
                                 TextInputField { placeholder: "Search people or @username"; value <=> root.add_friend_input; edited(t) => { root.add_friend_input_changed(t); } submitted => { root.send_friend_request(); } }
@@ -245,16 +311,16 @@ export component Sidebar inherits Rectangle {
                                 SmallButton { text: "Online"; bg: root.friends_filter == 1 ? Theme.accent-soft : Theme.bg-secondary; clicked => { root.set_friends_filter(1); } }
                                 SmallButton { text: "★ Fav"; bg: root.friends_filter == 2 ? Theme.accent-soft : Theme.bg-secondary; clicked => { root.set_friends_filter(2); } }
                             }
-                            if root.add_friend_status != "": Text { text: root.add_friend_status; font-size: 12px; color: Theme.text-muted; }
+                            if root.add_friend_status != "": Text { text: root.add_friend_status; font-size: Theme.text-sm; color: Theme.text-muted; }
 
-                            if root.people_hits.length > 0: Text { text: "Search results"; font-size: 12px; color: Theme.text-muted; }
+                            if root.people_hits.length > 0: Text { text: "Search results"; font-size: Theme.text-xs; font-family: Theme.font-medium; color: Theme.text-muted; }
                             for hit in root.people_hits: PersonCard {
                                 HorizontalLayout {
                                     spacing: 10px;
                                     Avatar { initial: hit.initial; avatar-color: hit.avatar_color; photo-source: hit.photo; show-presence: true; online: hit.online; }
                                     VerticalLayout {
                                         spacing: 2px;
-                                        Text { text: hit.display_name; font-size: 14px; color: Theme.text-primary; }
+                                        Text { text: hit.display_name; font-size: Theme.text-md; color: Theme.text-primary; }
                                         Text { text: hit.meta; font-size: 11px; color: Theme.text-muted; }
                                     }
                                 }
@@ -274,7 +340,7 @@ export component Sidebar inherits Rectangle {
                                 }
                             }
 
-                            if root.people_hits.length == 0 && root.suggestions.length > 0: Text { text: "Suggested from servers"; font-size: 12px; color: Theme.text-muted; }
+                            if root.people_hits.length == 0 && root.suggestions.length > 0: Text { text: "Suggested from servers"; font-size: Theme.text-xs; font-family: Theme.font-medium; color: Theme.text-muted; }
                             for s in root.suggestions: PersonCard {
                                 HorizontalLayout {
                                     spacing: 10px;
@@ -290,16 +356,16 @@ export component Sidebar inherits Rectangle {
                                 }
                             }
 
-                            if root.friends.length == 0: Text { text: "No friends yet. Search above or accept invites."; font-size: 13px; color: Theme.text-muted; wrap: word-wrap; }
+                            if root.friends.length == 0: EmptyState { text: "No friends yet. Search above or accept invites."; box-height: 100px; }
                             for friend in root.friends: PersonCard {
                                 HorizontalLayout {
                                     spacing: 10px;
                                     Avatar { initial: friend.initial; avatar-color: friend.avatar_color; photo-source: friend.photo; show-presence: true; online: friend.online; }
                                     VerticalLayout {
                                         spacing: 2px;
-                                        Text { text: friend.label; font-size: 14px; color: Theme.text-primary; }
+                                        Text { text: friend.label; font-size: Theme.text-md; color: Theme.text-primary; }
                                         Text { text: friend.subtitle; font-size: 11px; color: Theme.text-muted; }
-                                        Text { text: friend.meta; font-size: 10px; color: Theme.text-muted; }
+                                        Text { text: friend.meta; font-size: Theme.text-xs; color: Theme.text-muted; }
                                     }
                                 }
                                 HorizontalLayout {
@@ -314,7 +380,7 @@ export component Sidebar inherits Rectangle {
                                 }
                             }
 
-                            if root.blocked.length > 0: Text { text: "Blocked"; font-size: 12px; color: Theme.text-muted; }
+                            if root.blocked.length > 0: Text { text: "Blocked"; font-size: Theme.text-xs; font-family: Theme.font-medium; color: Theme.text-muted; }
                             for b in root.blocked: PersonCard {
                                 HorizontalLayout {
                                     Text { text: b.display_name; font-size: 13px; color: Theme.text-primary; vertical-alignment: center; horizontal-stretch: 1; }
@@ -325,24 +391,27 @@ export component Sidebar inherits Rectangle {
                     }
 
                     if root.tab == SidebarTab.Requests: Flickable {
+        opacity: 0;
+        init => { self.opacity = 1; }
+        animate opacity { duration: 140ms; }
                         viewport-height: requests_col.preferred-height;
                         requests_col := VerticalLayout {
                             width: parent.width;
                             padding: 10px;
                             spacing: 10px;
                             HorizontalLayout {
-                                Text { text: "Incoming"; font-size: 12px; color: Theme.text-muted; vertical-alignment: center; horizontal-stretch: 1; }
+                                Text { text: "Incoming"; font-size: Theme.text-xs; font-family: Theme.font-medium; color: Theme.text-muted; vertical-alignment: center; horizontal-stretch: 1; }
                                 if root.incoming_requests.length > 0: SmallButton { text: "Accept all"; bg: Theme.success; fg: white; clicked => { root.accept_all(); } }
                                 if root.incoming_requests.length > 0: SmallButton { text: "Decline all"; clicked => { root.decline_all(); } }
                             }
-                            if root.incoming_requests.length == 0: Text { text: "No pending invites."; font-size: 13px; color: Theme.text-muted; }
+                            if root.incoming_requests.length == 0: EmptyState { text: "No pending invites."; box-height: 56px; }
                             for req in root.incoming_requests: PersonCard {
                                 HorizontalLayout {
                                     spacing: 10px;
                                     Avatar { initial: req.initial; avatar-color: req.avatar_color; photo-source: req.photo; show-presence: true; online: req.online; }
                                     VerticalLayout {
                                         spacing: 2px;
-                                        Text { text: req.from_display_name; font-size: 14px; color: Theme.text-primary; }
+                                        Text { text: req.from_display_name; font-size: Theme.text-md; color: Theme.text-primary; }
                                         Text { text: req.sub; font-size: 11px; color: Theme.text-muted; }
                                     }
                                 }
@@ -350,7 +419,7 @@ export component Sidebar inherits Rectangle {
                                     background: Theme.bg-tertiary;
                                     border-width: 1px;
                                     border-color: Theme.border;
-                                    Text { x: 10px; y: 8px; text: req.note; font-size: 12px; color: Theme.text-primary; wrap: word-wrap; }
+                                    Text { x: 10px; y: 8px; text: req.note; font-size: Theme.text-sm; color: Theme.text-primary; wrap: word-wrap; }
                                 }
                                 HorizontalLayout {
                                     spacing: 8px;
@@ -363,15 +432,15 @@ export component Sidebar inherits Rectangle {
                                 }
                             }
 
-                            Text { text: "Outgoing"; font-size: 12px; color: Theme.text-muted; }
-                            if root.outgoing_requests.length == 0: Text { text: "No outgoing requests."; font-size: 13px; color: Theme.text-muted; }
+                            Text { text: "Outgoing"; font-size: Theme.text-xs; font-family: Theme.font-medium; color: Theme.text-muted; }
+                            if root.outgoing_requests.length == 0: EmptyState { text: "No outgoing requests."; box-height: 56px; }
                             for req in root.outgoing_requests: PersonCard {
                                 HorizontalLayout {
                                     spacing: 10px;
                                     Avatar { initial: req.initial; avatar-color: req.avatar_color; photo-source: req.photo; }
                                     VerticalLayout {
                                         spacing: 2px;
-                                        Text { text: req.to_display_name; font-size: 14px; color: Theme.text-primary; }
+                                        Text { text: req.to_display_name; font-size: Theme.text-md; color: Theme.text-primary; }
                                         Text { text: "@" + req.to_username; font-size: 11px; color: Theme.text-muted; }
                                         Text { text: req.sent_label; font-size: 11px; color: Theme.text-muted; }
                                     }
@@ -386,9 +455,12 @@ export component Sidebar inherits Rectangle {
                     }
 
                     if root.tab == SidebarTab.Servers && root.selected_server: VerticalLayout {
+        opacity: 0;
+        init => { self.opacity = 1; }
+        animate opacity { duration: 140ms; }
                         padding: 12px;
                         spacing: 6px;
-                        Text { text: root.server_name; font-size: 16px; color: Theme.text-primary; }
+                        Text { text: root.server_name; font-size: 16px; font-family: Theme.font-medium; color: Theme.text-primary; }
                         Text { text: root.server_meta; font-size: 11px; color: Theme.text-muted; }
                         HorizontalLayout {
                             spacing: 6px;
@@ -411,28 +483,62 @@ export component Sidebar inherits Rectangle {
                             viewport-height: channels_col.preferred-height;
                             channels_col := VerticalLayout {
                             width: parent.width;
-                            if root.text_channels.length > 0: Text { text: "TEXT CHANNELS"; font-size: 10px; font-family: Theme.font-medium; color: Theme.text-muted; }
+                            if root.text_channels.length > 0: Text { text: "TEXT CHANNELS"; font-size: Theme.text-xs; font-family: Theme.font-medium; letter-spacing: 1px; color: Theme.text-muted; }
                             for ch in root.text_channels: Rectangle {
                                 height: 32px;
                                 background: ch.active ? Theme.accent-soft : (cht.has-hover ? Theme.bg-hover : transparent);
+                                animate background { duration: 120ms; }
                                 cht := TouchArea { clicked => { root.open_channel(ch.conversation_id); } }
-                                Text { x: 12px; text: ch.label; font-size: 13px; font-family: Theme.font-medium; color: Theme.text-primary; vertical-alignment: center; }
+                                if ch.active: Rectangle {
+                                    x: 0;
+                                    y: 0;
+                                    width: 3px;
+                                    height: parent.height;
+                                    background: Theme.accent;
+                                }
+                                Text {
+                                    x: 12px;
+                                    text: ch.label;
+                                    font-size: 13px;
+                                    font-family: Theme.font-medium;
+                                    color: ch.active ? Theme.text-primary : (cht.has-hover ? Theme.text-primary : Theme.text-muted);
+                                    vertical-alignment: center;
+                                    animate color { duration: 120ms; }
+                                }
                             }
-                            if root.voice_channels.length > 0: Text { text: "VOICE CHANNELS"; font-size: 10px; font-family: Theme.font-medium; color: Theme.text-muted; }
+                            if root.voice_channels.length > 0: Text { text: "VOICE CHANNELS"; font-size: Theme.text-xs; font-family: Theme.font-medium; letter-spacing: 1px; color: Theme.text-muted; }
                             for ch in root.voice_channels: Rectangle {
                                 height: 32px;
                                 background: ch.active ? Theme.accent-soft : (chv.has-hover ? Theme.bg-hover : transparent);
+                                animate background { duration: 120ms; }
                                 chv := TouchArea { clicked => { root.open_channel(ch.conversation_id); } }
-                                Text { x: 12px; text: ch.label; font-size: 14px; color: Theme.text-primary; vertical-alignment: center; }
+                                if ch.active: Rectangle {
+                                    x: 0;
+                                    y: 0;
+                                    width: 3px;
+                                    height: parent.height;
+                                    background: Theme.accent;
+                                }
+                                Text {
+                                    x: 12px;
+                                    text: ch.label;
+                                    font-size: Theme.text-md;
+                                    color: ch.active ? Theme.text-primary : (chv.has-hover ? Theme.text-primary : Theme.text-muted);
+                                    vertical-alignment: center;
+                                    animate color { duration: 120ms; }
+                                }
                             }
                             }
                         }
                     }
                     if root.tab == SidebarTab.Servers && !root.selected_server: VerticalLayout {
+        opacity: 0;
+        init => { self.opacity = 1; }
+        animate opacity { duration: 140ms; }
                         padding: 16px;
                         spacing: 6px;
                         Text { text: "Pick a server on the left rail."; font-size: 13px; color: Theme.text-muted; }
-                        Text { text: "Or press + to create / join."; font-size: 12px; color: Theme.text-muted; }
+                        Text { text: "Or press + to create / join."; font-size: Theme.text-sm; color: Theme.text-muted; }
                         // Stretchy spacer: keeps this all-fixed column
                         // height-unbounded so it can't clamp the window
                         // scene (see ResizeHandle in widgets.slint).
@@ -440,11 +546,14 @@ export component Sidebar inherits Rectangle {
                     }
 
                     if root.tab == SidebarTab.Admin: VerticalLayout {
+        opacity: 0;
+        init => { self.opacity = 1; }
+        animate opacity { duration: 140ms; }
                         padding: 12px;
                         spacing: 10px;
                         TextInputField { placeholder: "Search users..."; value <=> root.admin_search; edited(t) => { root.admin_search_changed(t); } }
                         if root.admin_status != "": Text { text: root.admin_status; font-size: 11px; color: Theme.text-muted; }
-                        if root.admin_users.length == 0: Text { text: "No users found."; font-size: 13px; color: Theme.text-muted; }
+                        if root.admin_users.length == 0: EmptyState { text: "No users found."; box-height: 72px; }
                         list_admin := ListView {
                             vertical-stretch: 1;
                             for u in root.admin_users: PersonCard {
@@ -465,7 +574,7 @@ export component Sidebar inherits Rectangle {
                                     if root.is_admin && !u.role_locked: SmallButton { text: "Mod"; clicked => { root.admin_set_role(u.user_id, "moderator"); } }
                                     if root.is_admin && !u.role_locked: SmallButton { text: "Admin"; bg: Theme.accent-soft; clicked => { root.admin_set_role(u.user_id, "admin"); } }
                                     if !u.role_locked: SmallButton { text: u.banned ? "Unban" : "Ban"; bg: Theme.danger-soft; fg: Theme.danger; clicked => { root.admin_set_banned(u.user_id, !u.banned); } }
-                                    if u.role_locked: Text { text: "rank locked"; font-size: 10px; color: Theme.warning; vertical-alignment: center; }
+                                    if u.role_locked: Text { text: "rank locked"; font-size: Theme.text-xs; color: Theme.warning; vertical-alignment: center; }
                                 }
                             }
                         }
@@ -487,7 +596,7 @@ export component Sidebar inherits Rectangle {
                             horizontal-stretch: 1;
                             HorizontalLayout {
                                 spacing: 6px;
-                                Text { text: root.my_display_name; font-size: 13px; color: Theme.text-primary; vertical-alignment: center; }
+                                Text { text: root.my_display_name; font-size: 13px; font-family: Theme.font-medium; color: Theme.text-primary; vertical-alignment: center; }
                                 if root.my_badge_text != "": Rectangle {
                                     background: root.my_badge_bg;
                                     height: 14px;
@@ -495,7 +604,7 @@ export component Sidebar inherits Rectangle {
                                     my-badge-label := Text { text: root.my_badge_text; font-size: 9px; color: root.my_badge_fg; horizontal-alignment: center; vertical-alignment: center; }
                                 }
                             }
-                            Text { text: "Online"; font-size: 10px; color: Theme.online; }
+                            Text { text: "Online"; font-size: Theme.text-xs; color: Theme.online; }
                         }
                         SmallButton { text: "Settings"; clicked => { root.open_settings(); } }
                     }

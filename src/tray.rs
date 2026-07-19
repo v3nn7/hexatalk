@@ -19,7 +19,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
 
 #[derive(Debug, Clone)]
-pub enum TrayEvent {
+pub(crate) enum TrayEvent {
     Show,
     Quit,
     /// The tray icon came up successfully — the window can safely hide to
@@ -77,7 +77,7 @@ fn build_menu() -> Result<Menu, String> {
 /// stream, which iced guarantees only starts once per subscription id (see
 /// the same assumption already relied on by call.rs's engine subscription).
 #[cfg(windows)]
-pub fn spawn(event_tx: UnboundedSender<TrayEvent>) {
+pub(crate) fn spawn(event_tx: UnboundedSender<TrayEvent>) {
     std::thread::spawn(move || {
         eprintln!("[tray] thread started");
         // A panic on this thread would otherwise vanish silently -- no
@@ -199,7 +199,7 @@ fn run_tray_thread(event_tx: UnboundedSender<TrayEvent>) {
 /// "AppIndicator and KStatusNotifierItem Support" is installed. That's a
 /// desktop-environment gap, not something this code can work around.
 #[cfg(target_os = "linux")]
-pub fn spawn(event_tx: UnboundedSender<TrayEvent>) {
+pub(crate) fn spawn(event_tx: UnboundedSender<TrayEvent>) {
     std::thread::spawn(move || {
         if let Err(err) = gtk::init() {
             let _ = event_tx.send(TrayEvent::Unavailable(format!("gtk::init failed: {err}")));
@@ -274,6 +274,6 @@ pub fn spawn(event_tx: UnboundedSender<TrayEvent>) {
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
-pub fn spawn(event_tx: UnboundedSender<TrayEvent>) {
+pub(crate) fn spawn(event_tx: UnboundedSender<TrayEvent>) {
     let _ = event_tx.send(TrayEvent::Unavailable("not implemented on this platform".into()));
 }

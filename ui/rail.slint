@@ -13,9 +13,11 @@ component RailButton inherits Rectangle {
     width: 44px;
     height: 44px;
     clip: true;
-    background: root.active ? Theme.accent-soft-strong : (touch.has-hover ? Theme.bg-hover : Theme.bg-secondary);
+    background: root.active ? Theme.accent-soft-strong : (touch.pressed ? Theme.bg-tertiary : (touch.has-hover ? Theme.bg-hover : Theme.bg-secondary));
     border-width: 1px;
     border-color: root.active ? Theme.accent : (touch.has-hover ? Theme.border-strong : Theme.border);
+    animate background { duration: 120ms; }
+    animate border-color { duration: 120ms; }
 
     touch := TouchArea { clicked => { root.clicked(); } }
 
@@ -88,7 +90,7 @@ export component ServerRail inherits Rectangle {
             }
         }
 
-        Rectangle { height: 1px; background: Theme.border-strong; }
+        Rectangle { height: 1px; background: Theme.border; }
 
         ListView {
             // Size to the actual server count so the icon strip hugs the
@@ -110,7 +112,7 @@ export component ServerRail inherits Rectangle {
             }
         }
 
-        Rectangle { height: 1px; background: Theme.border-strong; }
+        Rectangle { height: 1px; background: Theme.border; }
 
         RailButton {
             active: root.add_menu_open;
@@ -141,26 +143,22 @@ export component ServerRail inherits Rectangle {
             active: root.requests_active;
             badge: root.incoming_count;
             clicked => { root.open_requests(); }
-            Text {
-                text: "In";
-                font-size: 14px;
-                font-family: Theme.font-medium;
-                color: root.requests_active ? #050d05 : Theme.text-primary;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            Image {
+                source: @image-url("../assets/textures/invitesicon.png");
+                width: 28px;
+                height: 28px;
+                image-fit: ImageFit.cover;
             }
         }
 
         if root.show_admin: RailButton {
             active: root.admin_active;
             clicked => { root.open_admin(); }
-            Text {
-                text: "Ad";
-                font-size: 14px;
-                font-family: Theme.font-medium;
-                color: root.admin_active ? #050d05 : Theme.text-primary;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            Image {
+                source: @image-url("../assets/textures/admin.png");
+                width: 28px;
+                height: 28px;
+                image-fit: ImageFit.cover;
             }
         }
 

@@ -1,0 +1,32 @@
+[package]
+name = "talkyss-relay"
+version = "0.1.0"
+edition = "2021"
+description = "Standalone peerseal-compatible WebSocket relay server for Talkyss"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Standalone crate: NOT a member of the Talkyss root workspace
+# (root Cargo.toml has an explicit `members` list). This empty table
+# keeps `cargo build` here independent of the parent workspace.
+[workspace]
+
+[dependencies]
+tokio = { version = "1", features = [
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "sync",
+    "time",
+    "io-util",
+    "signal",
+] }
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
+pico-args = "0.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = true
+codegen-units = 1

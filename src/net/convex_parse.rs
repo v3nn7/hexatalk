@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use convex::{FunctionResult, Value};
 
-use crate::*;
+use crate::state::types::{ProfileView, Session};
 
 // ---------- Convex parsing helpers ----------
 
@@ -27,18 +27,29 @@ pub(crate) fn obj_f64(obj: &BTreeMap<String, Value>, key: &str) -> f64 {
     }
 }
 
-pub(crate) fn obj_bool(obj: &BTreeMap<String, Value>, key: &str) -> bool {
+/// Millisecond timestamps arrive from Convex as JSON numbers; convert to
+/// integer ms-since-epoch once, here at the parse boundary, so the rest of
+/// the app only ever threads `i64` timestamps around.
+pub(super) fn obj_ms(obj: &BTreeMap<String, Value>, key: &str) -> i64 {
+    match obj.get(key) {
+        Some(Value::Float64(f)) => *f as i64,
+        Some(Value::Int64(i)) => *i,
+        _ => 0,
+    }
+}
+
+pub(super) fn obj_bool(obj: &BTreeMap<String, Value>, key: &str) -> bool {
     matches!(obj.get(key), Some(Value::Boolean(true)))
 }
 
-pub(crate) fn obj_opt_str(obj: &BTreeMap<String, Value>, key: &str) -> Option<String> {
+pub(super) fn obj_opt_str(obj: &BTreeMap<String, Value>, key: &str) -> Option<String> {
     match obj.get(key) {
         Some(Value::String(s)) => Some(s.clone()),
         _ => None,
     }
 }
 
-pub(crate) fn obj_object_array(obj: &BTreeMap<String, Value>, key: &str) -> Vec<BTreeMap<String, Value>> {
+pub(super) fn obj_object_array(obj: &BTreeMap<String, Value>, key: &str) -> Vec<BTreeMap<String, Value>> {
     match obj.get(key) {
         Some(Value::Array(items)) => items
             .iter()
@@ -51,10 +62,23 @@ pub(crate) fn obj_object_array(obj: &BTreeMap<String, Value>, key: &str) -> Vec<
     }
 }
 
-pub(crate) fn obj_object(obj: &BTreeMap<String, Value>, key: &str) -> Option<BTreeMap<String, Value>> {
+pub(super) fn obj_object(obj: &BTreeMap<String, Value>, key: &str) -> Option<BTreeMap<String, Value>> {
     match obj.get(key) {
         Some(Value::Object(o)) => Some(o.clone()),
         _ => None,
+    }
+}
+
+pub(crate) fn obj_str_list(obj: &BTreeMap<String, Value>, key: &str) -> Vec<String> {
+    match obj.get(key) {
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| match v {
+                Value::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -75,7 +99,7 @@ pub(crate) fn expect_string(result: FunctionResult) -> Result<String, String> {
     }
 }
 
-pub(crate) fn parse_platform_role(obj: &BTreeMap<String, Value>) -> String {
+fn parse_platform_role(obj: &BTreeMap<String, Value>) -> String {
     let r = obj_str(obj, "role");
     match r.as_str() {
         "owner" | "admin" | "moderator" => r,
@@ -267,7 +291,7 @@ pub(crate) fn parse_profile_view(result: FunctionResult) -> Result<ProfileView, 
             avatar_image_url: obj_str(&obj, "avatarImageUrl"),
             status_message: obj_str(&obj, "statusMessage"),
             bio: obj_str(&obj, "bio"),
-            last_seen_at: obj_f64(&obj, "lastSeenAt"),
+            last_seen_at: obj_ms(&obj, "lastSeenAt"),
             presence: {
                 let p = obj_str(&obj, "presence");
                 if p.is_empty() {

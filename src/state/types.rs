@@ -3,7 +3,17 @@
 //! selected, which settings category, etc). No behavior beyond a couple of
 //! tiny `Friend` display helpers.
 
-use crate::utils::is_online;
+/// A presence timestamp within this many ms of "now" counts as online.
+const ONLINE_THRESHOLD_MS: i64 = 15_000;
+
+/// `last_seen_at` is ms since epoch (0 = never seen).
+pub(crate) fn is_online(last_seen_at: i64) -> bool {
+    if last_seen_at <= 0 {
+        return false;
+    }
+    let now = chrono::Utc::now().timestamp_millis();
+    (now - last_seen_at) < ONLINE_THRESHOLD_MS
+}
 
 // ---------- Domain types ----------
 
@@ -37,7 +47,7 @@ pub(crate) struct Friend {
     pub(crate) user_id: String,
     pub(crate) username: String,
     pub(crate) display_name: String,
-    pub(crate) last_seen_at: f64,
+    pub(crate) last_seen_at: i64,
     /// online | idle | dnd | offline
     pub(crate) presence: String,
     pub(crate) avatar_color: String,
@@ -47,7 +57,7 @@ pub(crate) struct Friend {
     pub(crate) nickname: String,
     pub(crate) favorite: bool,
     pub(crate) private_note: String,
-    pub(crate) friends_since: f64,
+    pub(crate) friends_since: i64,
     pub(crate) mutual_servers: Vec<String>,
     pub(crate) is_staff: bool,
 }
@@ -82,7 +92,7 @@ pub(crate) struct IncomingRequest {
     pub(crate) from_avatar_color: String,
     pub(crate) from_avatar_image_url: String,
     pub(crate) note: String,
-    pub(crate) sent_at: f64,
+    pub(crate) sent_at: i64,
     pub(crate) from_status_message: String,
     pub(crate) mutual_servers: Vec<String>,
     pub(crate) presence: String,
@@ -133,7 +143,7 @@ pub(crate) struct OutgoingRequest {
     pub(crate) to_avatar_color: String,
     pub(crate) to_avatar_image_url: String,
     pub(crate) note: String,
-    pub(crate) sent_at: f64,
+    pub(crate) sent_at: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -142,8 +152,11 @@ pub(crate) struct ConversationSummary {
     pub(crate) title: String,
     pub(crate) kind: String,
     pub(crate) peer_user_id: Option<String>,
-    pub(crate) last_message_at: f64,
+    pub(crate) last_message_at: i64,
     pub(crate) unread: bool,
+    /// Unread messages that @-mention me (or @everyone) -- the red sidebar
+    /// badge. 0 pre-deploy / for old messages without mention metadata.
+    pub(crate) mention_count: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -211,9 +224,10 @@ pub(crate) struct ChatMessage {
     pub(crate) reactions: Vec<(String, u32, bool)>,
     pub(crate) reply_to: Option<(String, String)>,
     pub(crate) encrypted: bool,
-    pub(crate) sent_at: f64,
+    pub(crate) sent_at: i64,
     pub(crate) deleted: bool,
     pub(crate) edited: bool,
+    pub(crate) pinned: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -225,7 +239,7 @@ pub(crate) struct ProfileView {
     pub(crate) avatar_image_url: String,
     pub(crate) status_message: String,
     pub(crate) bio: String,
-    pub(crate) last_seen_at: f64,
+    pub(crate) last_seen_at: i64,
     pub(crate) presence: String,
     pub(crate) is_staff: bool,
     pub(crate) is_friend: bool,
@@ -284,6 +298,8 @@ pub(crate) struct ChannelSummary {
     pub(crate) conversation_id: String,
     pub(crate) name: String,
     pub(crate) channel_type: String, // "text" | "voice"
+    /// Unread messages that @-mention me (or @everyone) -- red sidebar badge.
+    pub(crate) mention_count: u32,
 }
 
 /// One custom role explicitly assigned to a member (the implicit
@@ -306,7 +322,7 @@ pub(crate) struct ServerMemberRow {
     pub(crate) is_bot: bool,
     /// user | moderator | admin (platform staff badge)
     pub(crate) platform_role: String,
-    pub(crate) last_seen_at: f64,
+    pub(crate) last_seen_at: i64,
     /// All custom roles this member currently holds (multi-role, Discord-style).
     pub(crate) roles: Vec<MemberRoleTag>,
 }
@@ -350,20 +366,6 @@ pub(crate) enum ResizePanel {
     ChannelList,
     Members,
 }
-
-/// Fixed swatches offered when picking a role color — mirrors
-/// `ROLE_COLORS` in convex/roles.ts so the picker only ever produces
-/// colors the server already accepts.
-pub(crate) const ROLE_COLOR_PALETTE: [&str; 8] = [
-    "#33FF66",
-    "#88FFAA",
-    "#00CC55",
-    "#CCFF33",
-    "#66DD88",
-    "#FAA61A",
-    "#EB459E",
-    "#ED4245",
-];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsCategory {

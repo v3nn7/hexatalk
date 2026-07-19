@@ -7,8 +7,11 @@
 //! default empty `slint::Image` for now -- see the image-handling pass
 //! (ports `image::Handle` -> `slint::Image`) that fills these in.
 
-use crate::ui;
-use crate::*;
+use crate::slint_ui as ui;
+use crate::media::screenshare;
+use crate::state::types::{AdminUserRow, BlockedUser, ChannelSummary, ChatMessage, ConversationSummary, Friend, FriendSuggestion, IncomingRequest, OutgoingRequest, PeopleHit, ServerMemberRow, ServerSummary, is_online};
+use crate::ui::mentions;
+use crate::ui::utils::{format_day, format_relative_time, format_time, presence_label};
 
 pub(crate) fn hex_color(hex: &str) -> slint::Color {
     let hex = hex.trim_start_matches('#');
@@ -363,11 +366,16 @@ fn display_messages<'a>(
     v
 }
 
+/// `my_names` are the current user's display name + username (used to flag
+/// rows that ping us); `everyone_allowed` gates `@everyone` highlighting to
+/// channels/groups (it's plain text in 1:1 DMs).
 pub(crate) fn chat_message_rows(
     messages: &[ChatMessage],
     live_messages: Option<&[ChatMessage]>,
     my_user_id: &str,
     is_admin: bool,
+    my_names: &[String],
+    everyone_allowed: bool,
 ) -> Vec<ui::ChatMessageRow> {
     let mut rows = Vec::new();
     let mut last_author: Option<String> = None;
@@ -420,6 +428,9 @@ pub(crate) fn chat_message_rows(
                 can_delete: false,
                 can_purge: false,
                 can_react: false,
+                mentions_me: false,
+                mentions_everyone: false,
+                ping_label: "".into(),
             });
         }
 
@@ -451,6 +462,9 @@ pub(crate) fn chat_message_rows(
                 can_delete,
                 can_purge,
                 can_react: false,
+                mentions_me: false,
+                mentions_everyone: false,
+                ping_label: "".into(),
             });
             continue;
         }
@@ -475,6 +489,19 @@ pub(crate) fn chat_message_rows(
             }
         } else {
             msg.body.clone()
+        };
+
+        // Mention highlight (Discord-style): the row is tinted when the body
+        // pings the current user (by display name or username) or, in
+        // channels/groups, contains the literal @everyone. Mentions are
+        // parsed from the raw body, never from the "(deleted)" decoration.
+        let mentions_me = !msg.deleted && mentions::mentions_any(&msg.body, my_names);
+        let mentions_everyone =
+            !msg.deleted && everyone_allowed && mentions::has_everyone(&msg.body);
+        let ping_label = if mentions_me || mentions_everyone {
+            format!("pinged {}", format_relative_time(msg.sent_at).to_lowercase())
+        } else {
+            String::new()
         };
 
         rows.push(ui::ChatMessageRow {
@@ -516,6 +543,9 @@ pub(crate) fn chat_message_rows(
             can_delete,
             can_purge,
             can_react,
+            mentions_me,
+            mentions_everyone,
+            ping_label: ping_label.into(),
         });
     }
     rows
@@ -529,7 +559,18 @@ pub(crate) fn share_target_rows(share_targets: &[screenshare::ShareTarget]) -> V
         .iter()
         .map(|t| ui::ShareTargetRow {
             id: encode_share_target(t).into(),
-            label: t.label().to_string().into(),
+            // Monitors and app windows share one list; make it obvious
+            // which is which (raw xcap monitor names like "\\.\DISPLAY1"
+            // don't read as "your screen" on their own).
+            label: match t {
+                screenshare::ShareTarget::Monitor(_) => {
+                    format!("{} — entire screen", t.label())
+                }
+                screenshare::ShareTarget::Window(_) => {
+                    format!("{} — app window", t.label())
+                }
+            }
+            .into(),
         })
         .collect()
 }
@@ -548,5 +589,46 @@ pub(crate) fn decode_share_target(encoded: &str) -> Option<screenshare::ShareTar
         Some(screenshare::ShareTarget::Window(title.to_string()))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn share_target_round_trips() {
+        let targets = vec![
+            screenshare::ShareTarget::Monitor("DISPLAY1".to_string()),
+            screenshare::ShareTarget::Window("Talkyss".to_string()),
+            // Window titles can contain the same separator the encoding
+            // uses -- the id must still decode to the original title.
+            screenshare::ShareTarget::Window("window: tricky: title".to_string()),
+            screenshare::ShareTarget::Window(String::new()),
+        ];
+        for target in &targets {
+            let encoded = encode_share_target(target);
+            let decoded = decode_share_target(&encoded);
+            assert_eq!(decoded.as_ref(), Some(target), "round-trip of {encoded}");
+        }
+    }
+
+    #[test]
+    fn decode_rejects_unknown_prefix() {
+        assert_eq!(decode_share_target(""), None);
+        assert_eq!(decode_share_target("screen:1"), None);
+        assert_eq!(decode_share_target("monitor"), None);
+    }
+
+    #[test]
+    fn share_target_labels_distinguish_kinds() {
+        let rows = share_target_rows(&[
+            screenshare::ShareTarget::Monitor("DISPLAY1".to_string()),
+            screenshare::ShareTarget::Window("Talkyss".to_string()),
+        ]);
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].label.contains("entire screen"));
+        assert!(rows[1].label.contains("app window"));
+        assert_ne!(rows[0].id, rows[1].id);
     }
 }

@@ -10,10 +10,12 @@ export component PrimaryButton inherits Rectangle {
     callback clicked;
 
     height: 38px;
-    background: touch.pressed ? Theme.accent-dim : (touch.has-hover ? Theme.accent : Theme.accent-dim);
+    background: touch.pressed ? Theme.accent-pressed : (touch.has-hover ? Theme.accent : Theme.accent-dim);
     border-width: 1px;
-    border-color: Theme.accent;
+    border-color: touch.has-hover || touch.pressed ? Theme.accent : Theme.accent-dim;
     opacity: root.enabled ? 1.0 : 0.5;
+    animate background { duration: 120ms; }
+    animate border-color { duration: 120ms; }
 
     touch := TouchArea {
         enabled: root.enabled && !root.busy;
@@ -37,10 +39,12 @@ export component SecondaryButton inherits Rectangle {
     callback clicked;
 
     height: 34px;
-    background: touch.pressed ? Theme.bg-elevated : (touch.has-hover ? Theme.bg-hover : Theme.bg-secondary);
+    background: touch.pressed ? Theme.bg-tertiary : (touch.has-hover ? Theme.bg-hover : Theme.bg-secondary);
     border-width: 1px;
     border-color: touch.has-hover ? Theme.border-strong : Theme.border;
     opacity: root.enabled ? 1.0 : 0.5;
+    animate background { duration: 120ms; }
+    animate border-color { duration: 120ms; }
 
     touch := TouchArea {
         enabled: root.enabled;
@@ -63,10 +67,12 @@ export component DangerButton inherits Rectangle {
     callback clicked;
 
     height: 34px;
-    background: touch.has-hover ? Theme.danger-soft : transparent;
+    background: touch.pressed ? #d9525740 : (touch.has-hover ? Theme.danger-soft : transparent);
     border-width: 1px;
-    border-color: Theme.danger;
+    border-color: touch.has-hover || touch.pressed ? Theme.danger : #d9525799;
     opacity: root.enabled ? 1.0 : 0.5;
+    animate background { duration: 120ms; }
+    animate border-color { duration: 120ms; }
 
     touch := TouchArea {
         enabled: root.enabled;
@@ -95,6 +101,7 @@ export component LinkButton inherits Rectangle {
         color: touch.has-hover ? Theme.accent : Theme.text-muted;
         font-size: Theme.text-sm;
         font-family: Theme.font-body;
+        animate color { duration: 120ms; }
     }
 }
 
@@ -114,9 +121,11 @@ export component TextInputField inherits Rectangle {
     callback submitted;
 
     height: 38px;
-    background: Theme.bg-tertiary;
+    background: inner.has-focus ? Theme.bg-elevated : Theme.bg-tertiary;
     border-width: 1px;
     border-color: inner.has-focus ? Theme.accent : Theme.border;
+    animate background { duration: 120ms; }
+    animate border-color { duration: 120ms; }
 
     inner := TextInput {
         x: 10px;
@@ -240,6 +249,7 @@ export component ResizeHandle inherits Rectangle {
 
     width: 4px;
     background: touch.has-hover || touch.pressed ? Theme.border-strong : Theme.border;
+    animate background { duration: 120ms; }
 
     touch := TouchArea {
         mouse-cursor: MouseCursor.col-resize;

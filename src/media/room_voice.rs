@@ -5,9 +5,9 @@
 //! the lexicographically smaller userId always creates the offer (stable
 //! offerer → no glare when both join at once).
 //!
-//! Mic capture is shared: one G.711 PCMU frame is fanned out to every local
-//! track. Remote RTP from all peers is mixed into a single jitter buffer for
-//! playback.
+//! Mic capture is shared: one IMA-ADPCM @ 24 kHz frame (see src/adpcm.rs)
+//! is fanned out to every local track. Remote RTP from all peers is mixed
+//! into a single jitter buffer for playback.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -20,26 +20,27 @@ use futures::channel::mpsc::Sender as EventSender;
 use futures::{SinkExt, StreamExt};
 use maplit::btreemap;
 use webrtc::api::interceptor_registry::register_default_interceptors;
-use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_PCMU};
+use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::APIBuilder;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
-use webrtc::media::Sample;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
-use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
-use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
+use webrtc::rtp_transceiver::rtp_codec::{
+    RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType,
+};
+use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_local::TrackLocal;
 use webrtc::track::track_remote::TrackRemote;
 
-use crate::call::{spawn_capture_thread, spawn_playback_thread, turn_ice_server};
-use crate::g711;
+use super::adpcm;
+use super::call::{spawn_capture_thread, spawn_playback_thread, turn_ice_server};
 
 #[derive(Debug, Clone)]
-pub enum RoomVoiceEvent {
+pub(crate) enum RoomVoiceEvent {
     Connecting,
     /// At least one peer is media-connected.
     Connected,
@@ -49,21 +50,24 @@ pub enum RoomVoiceEvent {
     Failed(String),
 }
 
-pub struct RoomVoiceParams {
-    pub client: ConvexClient,
-    pub session_token: String,
-    pub user_id: String,
-    pub conversation_id: String,
-    pub input_device: Option<String>,
-    pub output_device: Option<String>,
-    pub muted: Arc<AtomicBool>,
-    pub output_muted: Arc<AtomicBool>,
-    pub noise_gate: Arc<AtomicU32>,
+pub(crate) struct RoomVoiceParams {
+    pub(crate) client: ConvexClient,
+    pub(crate) session_token: String,
+    pub(crate) user_id: String,
+    pub(crate) conversation_id: String,
+    pub(crate) input_device: Option<String>,
+    pub(crate) output_device: Option<String>,
+    pub(crate) muted: Arc<AtomicBool>,
+    pub(crate) output_muted: Arc<AtomicBool>,
+    pub(crate) noise_gate: Arc<AtomicU32>,
+    /// Per-peer volume gains (peer user_id -> gain), applied live to each
+    /// peer's decoded remote audio in `create_peer_slot`'s on_track.
+    pub(crate) gains: Arc<Mutex<HashMap<String, f32>>>,
 }
 
 struct PeerSlot {
     pc: Arc<RTCPeerConnection>,
-    local_track: Arc<TrackLocalStaticSample>,
+    local_track: Arc<TrackLocalStaticRTP>,
     link_id: Option<String>,
     is_offerer: bool,
     answer_applied: bool,
@@ -93,8 +97,22 @@ fn ice_config() -> RTCConfiguration {
 
 async fn build_api() -> Result<webrtc::api::API, String> {
     let mut media_engine = MediaEngine::default();
+    // Only the Talkyss ADPCM codec (see call.rs for why: mismatched peers
+    // must fail negotiation, not play garbage).
     media_engine
-        .register_default_codecs()
+        .register_codec(
+            RTCRtpCodecParameters {
+                capability: RTCRtpCodecCapability {
+                    mime_type: adpcm::MIME_TYPE.to_string(),
+                    clock_rate: adpcm::WIRE_SAMPLE_RATE,
+                    channels: 1,
+                    ..Default::default()
+                },
+                payload_type: adpcm::RTP_PAYLOAD_TYPE,
+                ..Default::default()
+            },
+            RTPCodecType::Audio,
+        )
         .map_err(|_| "Could not set up audio codecs".to_string())?;
     let mut registry = Registry::new();
     registry = register_default_interceptors(registry, &mut media_engine)
@@ -120,7 +138,7 @@ fn parse_bool_field(obj: &std::collections::BTreeMap<String, Value>, key: &str) 
     matches!(obj.get(key), Some(Value::Boolean(true)))
 }
 
-pub async fn run_room_voice(params: RoomVoiceParams, mut output: EventSender<RoomVoiceEvent>) {
+pub(crate) async fn run_room_voice(params: RoomVoiceParams, mut output: EventSender<RoomVoiceEvent>) {
     let RoomVoiceParams {
         mut client,
         session_token,
@@ -131,6 +149,7 @@ pub async fn run_room_voice(params: RoomVoiceParams, mut output: EventSender<Roo
         muted,
         output_muted,
         noise_gate,
+        gains,
     } = params;
 
     let api = match build_api().await {
@@ -172,23 +191,36 @@ pub async fn run_room_voice(params: RoomVoiceParams, mut output: EventSender<Roo
         return;
     }
 
-    let local_tracks: Arc<Mutex<Vec<Arc<TrackLocalStaticSample>>>> =
+    let local_tracks: Arc<Mutex<Vec<Arc<TrackLocalStaticRTP>>>> =
         Arc::new(Mutex::new(Vec::new()));
     let tracks_for_send = Arc::clone(&local_tracks);
     tokio::spawn(async move {
+        // One shared sequence/timestamp generator is fine: each track is a
+        // separate peer connection with its own SSRC, so identical numbers
+        // across tracks never collide (see call.rs for the packet format).
+        let mut sequence_number: u16 = 0;
+        let mut timestamp: u32 = 0;
+        let mut first_packet = true;
         while let Some(chunk) = frame_rx.recv().await {
+            let packet = rtp::packet::Packet {
+                header: rtp::header::Header {
+                    version: 2,
+                    marker: first_packet,
+                    sequence_number,
+                    timestamp,
+                    ..Default::default()
+                },
+                payload: Bytes::from(chunk),
+            };
+            first_packet = false;
+            sequence_number = sequence_number.wrapping_add(1);
+            timestamp = timestamp.wrapping_add(adpcm::FRAME_SAMPLES as u32);
             let tracks = tracks_for_send
                 .lock()
                 .map(|g| g.clone())
                 .unwrap_or_default();
             for track in tracks {
-                let _ = track
-                    .write_sample(&Sample {
-                        data: Bytes::from(chunk.clone()),
-                        duration: Duration::from_millis(20),
-                        ..Default::default()
-                    })
-                    .await;
+                let _ = track.write_rtp_with_extensions(&packet, &[]).await;
             }
         }
     });
@@ -291,6 +323,8 @@ pub async fn run_room_voice(params: RoomVoiceParams, mut output: EventSender<Roo
                         Arc::clone(&jitter),
                         Arc::clone(&any_connected),
                         output.clone(),
+                        peer_id.clone(),
+                        Arc::clone(&gains),
                     ).await {
                         Ok(mut slot) => {
                             if let Ok(mut tracks) = local_tracks.lock() {
@@ -367,6 +401,8 @@ pub async fn run_room_voice(params: RoomVoiceParams, mut output: EventSender<Roo
                             Arc::clone(&jitter),
                             Arc::clone(&any_connected),
                             output.clone(),
+                            peer_id.clone(),
+                            Arc::clone(&gains),
                         ).await {
                             Ok(slot) => {
                                 if let Ok(mut tracks) = local_tracks.lock() {
@@ -517,6 +553,8 @@ async fn create_peer_slot(
     jitter: Arc<Mutex<VecDeque<i16>>>,
     any_connected: Arc<AtomicBool>,
     output: EventSender<RoomVoiceEvent>,
+    peer_id: String,
+    gains: Arc<Mutex<HashMap<String, f32>>>,
 ) -> Result<PeerSlot, String> {
     let pc = api
         .new_peer_connection(config.clone())
@@ -524,10 +562,10 @@ async fn create_peer_slot(
         .map_err(|e| format!("Could not start peer link: {e}"))?;
     let pc = Arc::new(pc);
 
-    let local_track = Arc::new(TrackLocalStaticSample::new(
+    let local_track = Arc::new(TrackLocalStaticRTP::new(
         RTCRtpCodecCapability {
-            mime_type: MIME_TYPE_PCMU.to_string(),
-            clock_rate: 8000,
+            mime_type: adpcm::MIME_TYPE.to_string(),
+            clock_rate: adpcm::WIRE_SAMPLE_RATE,
             channels: 1,
             ..Default::default()
         },
@@ -541,15 +579,26 @@ async fn create_peer_slot(
     let jitter_for_track = Arc::clone(&jitter);
     pc.on_track(Box::new(move |track: Arc<TrackRemote>, _r, _t| {
         let jitter = Arc::clone(&jitter_for_track);
+        let gains = Arc::clone(&gains);
+        let peer_id = peer_id.clone();
         Box::pin(async move {
             loop {
                 match track.read_rtp().await {
                     Ok((packet, _)) => {
-                        let samples = g711::decode(&packet.payload);
+                        // Drop foreign payloads (mismatched app version).
+                        let Some(mut samples) = adpcm::decode_frame(&packet.payload) else {
+                            continue;
+                        };
+                        let g = gains
+                            .lock()
+                            .ok()
+                            .and_then(|m| m.get(&peer_id).copied())
+                            .unwrap_or(1.0);
+                        crate::media::call::apply_gain(&mut samples, g);
                         if let Ok(mut buf) = jitter.lock() {
                             buf.extend(samples);
-                            // Soft cap ~500ms at 8kHz across all peers.
-                            while buf.len() > 4000 {
+                            // Soft cap ~500ms at 24kHz across all peers.
+                            while buf.len() > 12000 {
                                 buf.pop_front();
                             }
                         }

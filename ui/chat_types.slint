@@ -40,6 +40,12 @@ export struct ChatMessageRow {
     can_delete: bool,
     can_purge: bool,
     can_react: bool,
+    // Discord-style mention highlight: `mentions_me` = body pings the
+    // current user, `mentions_everyone` = body contains @everyone in a
+    // channel/group. `ping_label` is "pinged 5m ago"-style text ("" = no ping).
+    mentions_me: bool,
+    mentions_everyone: bool,
+    ping_label: string,
 }
 
 export struct ConversationRow {
@@ -174,4 +180,10 @@ export struct MemberRow {
 export struct ShareTargetRow {
     id: string,
     label: string,
+}
+
+export struct VoiceUserVolumeRow {
+    user_id: string,
+    name: string,
+    volume: float,
 }

@@ -31,9 +31,15 @@ component NavItem inherits Rectangle {
     callback clicked;
     height: content.preferred-height + 16px;
     background: root.active ? Theme.accent-soft : (touch.has-hover ? Theme.bg-hover : transparent);
-    border-width: root.active ? 1px : 0px;
-    border-color: Theme.accent;
+    animate background { duration: 120ms; }
     touch := TouchArea { clicked => { root.clicked(); } }
+    if root.active: Rectangle {
+        x: 0;
+        y: 0;
+        width: 3px;
+        height: parent.height;
+        background: root.danger ? Theme.danger : Theme.accent;
+    }
     content := VerticalLayout {
         padding: 8px;
         spacing: 2px;

@@ -14,9 +14,23 @@ use convex::{ConvexClient, FunctionResult, Value};
 use maplit::btreemap;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::rt::{job, Job, Task, WindowAction};
+use crate::net::rt::{job, Job, Task, WindowAction};
 
-use crate::*;
+use crate::{AVATAR_PALETTE, MAX_BACKGROUND_PEER_SESSIONS, PEER_CLEAR_HISTORY_CTRL, scroll_chat_to_bottom};
+use crate::crypto;
+use crate::media::call;
+use crate::media::screenshare;
+use crate::net::peer;
+use crate::state::history;
+use crate::ui::mentions;
+use crate::media::notify::{BEEP_MESSAGE, notify_desktop, play_beep};
+use crate::net::convex_parse::{expect_null, humanize_error, value_as_bool};
+use crate::net::subscriptions::{DECRYPT_FAILED_PLACEHOLDER, admin_users_subscription, apply_decrypted_payload, blocked_subscription, call_subscription, channels_subscription, conversations_subscription, friends_subscription, members_subscription, messages_subscription, my_call_subscription, my_perms_subscription, outgoing_requests_subscription, peer_invite_subscription, peer_session_subscription, pins_subscription, requests_subscription, roles_subscription, room_voice_subscription, servers_subscription, social_stats_subscription, suggestions_subscription, tray_subscription, typing_ping_task, typing_subscription, voice_users_subscription};
+use crate::state::message::Message;
+use crate::state::session_store::{connect_task, load_panel_prefs, load_session_token_from_disk, talkyss_data_dir};
+use crate::state::settings_store::{PersistedSettings, load_settings, save_settings};
+use crate::state::types::{AdminUserRow, AuthMode, BlockedUser, BotSummary, CallRole, ChannelSummary, ChatMessage, ConversationSummary, Friend, FriendSuggestion, FriendsFilter, IncomingRequest, MyCallInfo, OutgoingRequest, PendingAttachment, PeopleHit, ProfileView, ResizePanel, ServerMemberRow, ServerRoleRow, ServerSettingsCategory, ServerSummary, Session, SettingsCategory, SidebarTab, SocialStats, VoiceUserRow};
+use crate::update_check::check_for_update_task;
 
 pub(crate) struct App {
     pub(crate) deployment_url: String,
@@ -150,7 +164,16 @@ pub(crate) struct App {
     pub(crate) active_conversation_peer_id: Option<String>,
     pub(crate) active_peer_name: Option<String>,
     pub(crate) messages: Vec<ChatMessage>,
+    /// Pinned messages of the open conversation (live `messages:listPinned`
+    /// watch; decrypted on arrival like history rows). Backs the header panel.
+    pub(crate) pinned_messages: Vec<ChatMessage>,
+    /// Whether the chat header's pinned-messages panel is open.
+    pub(crate) pins_panel_open: bool,
     pub(crate) message_input: String,
+    /// @-autocomplete suggestions for the composer (display names matching
+    /// the "@prefix" token being typed; includes "everyone" where the
+    /// active conversation supports it). Empty = popup hidden.
+    pub(crate) mention_suggestions: Vec<String>,
     pub(crate) pending_attachment: Option<PendingAttachment>,
     pub(crate) pending_reply: Option<(String, String, String)>,
     pub(crate) chat_error: Option<String>,
@@ -163,10 +186,10 @@ pub(crate) struct App {
     pub(crate) clear_chat_confirm: bool,
     pub(crate) clear_chat_busy: bool,
 
-    pub(crate) seen_last_message_at: HashMap<String, f64>,
+    pub(crate) seen_last_message_at: HashMap<String, i64>,
     /// `last_message_at` value for which a markRead mutation was already sent,
     /// per conversation. Prevents the markRead -> watch -> markRead loop.
-    pub(crate) last_marked_read_at: HashMap<String, f64>,
+    pub(crate) last_marked_read_at: HashMap<String, i64>,
     pub(crate) conversations_loaded: bool,
     pub(crate) requests_loaded: bool,
 
@@ -179,6 +202,10 @@ pub(crate) struct App {
     pub(crate) settings_input_device: Option<String>,
     pub(crate) settings_output_device: Option<String>,
     pub(crate) noise_gate: Arc<AtomicU32>,
+    /// Per-peer voice volume gains (peer user_id -> gain, 0.0..=2.0). The
+    /// 1:1 call remote uses the special key "*". Applied live to decoded
+    /// remote audio in call.rs / room_voice.rs.
+    pub(crate) voice_gains: Arc<std::sync::Mutex<std::collections::HashMap<String, f32>>>,
 
     pub(crate) share_control_tx: Option<tokio::sync::mpsc::UnboundedSender<call::ShareCommand>>,
     pub(crate) share_control_slot:
@@ -240,6 +267,7 @@ impl App {
         let task = connect_task(connect_url);
         let pending_restore_token = load_session_token_from_disk();
         let (channel_list_width, members_panel_preferred_width) = load_panel_prefs();
+        let persisted_settings = load_settings();
         (
             Self {
                 deployment_url,
@@ -340,7 +368,10 @@ impl App {
                 active_conversation_peer_id: None,
                 active_peer_name: None,
                 messages: Vec::new(),
+                pinned_messages: Vec::new(),
+                pins_panel_open: false,
                 message_input: String::new(),
+                mention_suggestions: Vec::new(),
                 pending_attachment: None,
                 pending_reply: None,
                 chat_error: None,
@@ -360,9 +391,17 @@ impl App {
                 call_muted: Arc::new(AtomicBool::new(false)),
                 call_output_muted: Arc::new(AtomicBool::new(false)),
                 call_status_text: None,
-                settings_input_device: None,
-                settings_output_device: None,
-                noise_gate: Arc::new(AtomicU32::new(call::DEFAULT_NOISE_GATE.to_bits())),
+                settings_input_device: persisted_settings.input_device.clone(),
+                settings_output_device: persisted_settings.output_device.clone(),
+                noise_gate: Arc::new(AtomicU32::new(
+                    persisted_settings
+                        .noise_gate
+                        .unwrap_or(call::DEFAULT_NOISE_GATE)
+                        .to_bits(),
+                )),
+                voice_gains: Arc::new(std::sync::Mutex::new(
+                    persisted_settings.voice_gains.clone(),
+                )),
                 share_control_tx: None,
                 share_control_slot: Arc::new(std::sync::Mutex::new(None)),
                 share_picker_open: false,
@@ -401,11 +440,119 @@ impl App {
         )
     }
 
-    pub(crate) fn show_toast(&mut self, message: impl Into<String>) {
+    pub(super) fn show_toast(&mut self, message: impl Into<String>) {
         self.toast = Some((message.into(), Instant::now()));
     }
 
-    pub(crate) fn load_conversation_store_pref(&self) -> Task<Message> {
+    /// Display names the current user can be pinged by (display name +
+    /// username) -- the candidate set for "does this body mention me?".
+    pub(crate) fn my_mention_names(&self) -> Vec<String> {
+        self.session
+            .as_ref()
+            .map(|s| vec![s.display_name.clone(), s.username.clone()])
+            .unwrap_or_default()
+    }
+
+    /// Recomputes the composer @-autocomplete popup contents from the
+    /// current input + active conversation: server members in channels,
+    /// friends in groups/DMs, plus an "everyone" entry only where the token
+    /// actually pings the room (channels/groups, not 1:1 DMs).
+    pub(crate) fn compute_mention_suggestions(&self) -> Vec<String> {
+        let mut candidates: Vec<String> = Vec::new();
+        match self.active_conversation_kind.as_deref() {
+            Some("channel") | Some("voice") => {
+                candidates.extend(self.server_members.iter().map(|m| m.display_name.clone()));
+                candidates.push("everyone".to_string());
+            }
+            Some("group") => {
+                candidates.extend(self.friends.iter().map(|f| f.label().to_string()));
+                candidates.push("everyone".to_string());
+            }
+            _ => {
+                // 1:1 DM: just the peer (fallback: all friends while the
+                // conversation is still resolving).
+                if let Some(peer_id) = &self.active_conversation_peer_id {
+                    if let Some(f) = self.friends.iter().find(|f| &f.user_id == peer_id) {
+                        candidates.push(f.label().to_string());
+                    }
+                }
+                if candidates.is_empty() {
+                    candidates.extend(self.friends.iter().map(|f| f.label().to_string()));
+                }
+            }
+        }
+        mentions::suggest(&self.message_input, &candidates, 8)
+    }
+
+    /// `(display_name, user_id)` candidates for the active conversation --
+    /// the id-carrying counterpart of `compute_mention_suggestions`' name
+    /// list, used at send time to resolve @names into mention metadata.
+    pub(crate) fn mention_id_candidates(&self) -> Vec<(String, String)> {
+        match self.active_conversation_kind.as_deref() {
+            Some("channel") | Some("voice") => self
+                .server_members
+                .iter()
+                .map(|m| (m.display_name.clone(), m.user_id.clone()))
+                .collect(),
+            Some("group") => self
+                .friends
+                .iter()
+                .map(|f| (f.label().to_string(), f.user_id.clone()))
+                .collect(),
+            _ => {
+                // 1:1 DM: just the peer (fallback: all friends while the
+                // conversation is still resolving).
+                if let Some(peer_id) = &self.active_conversation_peer_id {
+                    if let Some(f) = self.friends.iter().find(|f| &f.user_id == peer_id) {
+                        return vec![(f.label().to_string(), f.user_id.clone())];
+                    }
+                }
+                self.friends
+                    .iter()
+                    .map(|f| (f.label().to_string(), f.user_id.clone()))
+                    .collect()
+            }
+        }
+    }
+
+    /// Mention metadata for an outgoing message body: mentioned user ids +
+    /// whether `@everyone` pings (channels/groups only -- same gate as the
+    /// render-time highlight). Computed from the PLAINTEXT body, i.e. before
+    /// any group/channel encryption happens.
+    pub(crate) fn outgoing_mentions(&self, body: &str) -> (Vec<String>, bool) {
+        let (mut ids, everyone) =
+            mentions::resolve_mentions(body, &self.mention_id_candidates());
+        // Your own messages never count as pinging you.
+        if let Some(session) = &self.session {
+            ids.retain(|id| id != &session.user_id);
+        }
+        let everyone_ok = matches!(
+            self.active_conversation_kind.as_deref(),
+            Some("channel") | Some("group")
+        );
+        (ids, everyone && everyone_ok)
+    }
+
+    /// Snapshot the user-facing audio settings to disk (settings.json).
+    /// Called from `update()` whenever one of them changes; cheap enough
+    /// (a few hundred bytes of JSON) that no debouncing is needed.
+    pub(super) fn persist_settings(&self) {
+        save_settings(&PersistedSettings {
+            input_device: self.settings_input_device.clone(),
+            output_device: self.settings_output_device.clone(),
+            noise_gate: Some(f32::from_bits(
+                self.noise_gate
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )),
+            voice_gains: self
+                .voice_gains
+                .lock()
+                .map(|gains| gains.clone())
+                .unwrap_or_default(),
+        });
+    }
+
+    pub(super) fn load_conversation_store_pref(&self) -> Task<Message> {
         let (Some(client), Some(session), Some(conversation_id)) = (
             self.client.clone(),
             self.session.clone(),
@@ -448,7 +595,7 @@ impl App {
 
     /// Drop in-memory chat + any leftover local vault/cache/ratchet files for
     /// this conversation (or the whole pair). Convex is cleared separately.
-    pub(crate) fn wipe_local_chat_history(&mut self) {
+    pub(super) fn wipe_local_chat_history(&mut self) {
         let data_dir = talkyss_data_dir();
         if let Some(session) = self.session.as_ref() {
             if let Some(conv_id) = self.active_conversation.as_deref() {
@@ -474,7 +621,7 @@ impl App {
         self.clear_chat_confirm = false;
     }
 
-    pub(crate) fn reset_session(&mut self) {
+    pub(super) fn reset_session(&mut self) {
         self.session = None;
         self.friends.clear();
         self.incoming_requests.clear();
@@ -506,6 +653,8 @@ impl App {
         self.peerseal_public_key = None;
         self.history_vault_key = None;
         self.messages.clear();
+        self.pinned_messages.clear();
+        self.pins_panel_open = false;
         self.message_input.clear();
         self.add_friend_input.clear();
         self.add_friend_note.clear();
@@ -561,13 +710,13 @@ impl App {
         self.rename_channel_input.clear();
     }
 
-    pub(crate) fn fetch_missing_avatars(&self, urls: impl IntoIterator<Item = String>) -> Task<Message> {
+    pub(super) fn fetch_missing_avatars(&self, urls: impl IntoIterator<Item = String>) -> Task<Message> {
         self.fetch_missing_images(urls.into_iter().map(|url| (url, None, None)))
     }
 
     /// Fetch images; when key/nonce are set the bytes are E2EE attachment
     /// ciphertext and get decrypted before landing in the image cache.
-    pub(crate) fn fetch_missing_images(
+    pub(super) fn fetch_missing_images(
         &self,
         jobs: impl IntoIterator<Item = (String, Option<String>, Option<String>)>,
     ) -> Task<Message> {
@@ -605,7 +754,7 @@ impl App {
 
     /// If we were signalling "typing" in the current conversation, tell the
     /// server we stopped, and reset the debounce state.
-    pub(crate) fn stop_typing_task(&mut self) -> Task<Message> {
+    pub(super) fn stop_typing_task(&mut self) -> Task<Message> {
         if !self.typing_active {
             return Task::none();
         }
@@ -622,7 +771,7 @@ impl App {
     /// long-lived async block -- which only actually runs once per call,
     /// thanks to `Subscription::run_with_id` dedup -- can pull it out even
     /// though `subscription(&self)` only gets a shared reference.
-    pub(crate) fn reset_share_state(&mut self) {
+    pub(super) fn reset_share_state(&mut self) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.share_control_tx = Some(tx);
         self.share_control_slot = Arc::new(std::sync::Mutex::new(Some(rx)));
@@ -636,7 +785,7 @@ impl App {
     /// Clears screen-share UI state when a call ends. Doesn't touch
     /// `share_control_tx`/`share_control_slot` -- those get replaced
     /// wholesale by `reset_share_state` the next time a call starts.
-    pub(crate) fn clear_share_ui(&mut self) {
+    pub(super) fn clear_share_ui(&mut self) {
         self.share_picker_open = false;
         self.is_sharing = false;
         self.remote_share_frame = None;
@@ -644,7 +793,7 @@ impl App {
     }
 
     /// Loads peerseal identity and publishes its public key for fingerprint UI.
-    pub(crate) fn ensure_identity_key(&mut self) -> Task<Message> {
+    pub(super) fn ensure_identity_key(&mut self) -> Task<Message> {
         let Some(session) = self.session.clone() else {
             return Task::none();
         };
@@ -687,7 +836,7 @@ impl App {
     /// otherwise run for as long as a friend stays online, independent of
     /// which DM is open; see `App::subscription` and the reaping logic in
     /// the `Message::FriendsUpdated` handler for the per-friend case).
-    pub(crate) fn stop_all_peer_sessions(&mut self) {
+    fn stop_all_peer_sessions(&mut self) {
         for tx in self.peer_cmd_txs.values() {
             let _ = tx.send(peer::PeerCmd::Shutdown);
         }
@@ -704,7 +853,7 @@ impl App {
 
     /// Shuts down and forgets one friend's background peer session (they
     /// went offline, or were unfriended/blocked).
-    pub(crate) fn stop_peer_session_for(&mut self, peer_id: &str) {
+    pub(super) fn stop_peer_session_for(&mut self, peer_id: &str) {
         if let Some(tx) = self.peer_cmd_txs.remove(peer_id) {
             let _ = tx.send(peer::PeerCmd::Shutdown);
         }
@@ -718,14 +867,14 @@ impl App {
         self.pending_invite_published.remove(peer_id);
     }
 
-    pub(crate) fn persist_peer_message(&self, _msg: &ChatMessage, _photo_bytes: Option<&[u8]>) {
+    fn persist_peer_message(&self, _msg: &ChatMessage, _photo_bytes: Option<&[u8]>) {
         // No local vault — durable history is written to Convex by the sender.
     }
 
     /// `peer_id` is the friend this event is about — since sessions now run
     /// in the background for every online friend simultaneously, events can
     /// arrive for any of them, not just whichever DM is currently open.
-    pub(crate) fn handle_peer_event(&mut self, peer_id: String, ev: peer::PeerEvent) -> Task<Message> {
+    pub(super) fn handle_peer_event(&mut self, peer_id: String, ev: peer::PeerEvent) -> Task<Message> {
         let is_viewing = self.active_conversation_peer_id.as_deref() == Some(peer_id.as_str());
         match ev {
             peer::PeerEvent::Status(s) => {
@@ -768,7 +917,7 @@ impl App {
                                     "sessionToken".to_string() => Value::String(session.token),
                                     "conversationId".to_string() => Value::String(conversation_id),
                                     "invitePayload".to_string() => Value::String(payload),
-                                    "expiresAt".to_string() => Value::Float64(expires_at_ms),
+                                    "expiresAt".to_string() => Value::Float64(expires_at_ms as f64),
                                 },
                             )
                             .await
@@ -828,13 +977,21 @@ impl App {
                     reactions: Vec::new(),
                     reply_to: None,
                     encrypted: true,
-                    sent_at: chrono::Local::now().timestamp_millis() as f64,
+                    sent_at: chrono::Local::now().timestamp_millis(),
                     deleted: false,
                     edited: false,
+                    pinned: false,
                 };
                 if !(self.window_focused && is_viewing) {
                     play_beep(BEEP_MESSAGE);
-                    notify_desktop("Talkyss", &format!("New message · {}", msg.author_name));
+                    if mentions::mentions_any(&msg.body, &self.my_mention_names()) {
+                        notify_desktop(
+                            &format!("{} mentioned you", msg.author_name),
+                            &mentions::snippet(&msg.body, 140),
+                        );
+                    } else {
+                        notify_desktop("Talkyss", &format!("New message · {}", msg.author_name));
+                    }
                 }
                 self.persist_peer_message(&msg, None);
                 self.peer_live_messages.entry(peer_id).or_default().push(msg);
@@ -878,9 +1035,10 @@ impl App {
                     reactions: Vec::new(),
                     reply_to: None,
                     encrypted: true,
-                    sent_at: chrono::Local::now().timestamp_millis() as f64,
+                    sent_at: chrono::Local::now().timestamp_millis(),
                     deleted: false,
                     edited: false,
+                    pinned: false,
                 };
                 if !(self.window_focused && is_viewing) {
                     play_beep(BEEP_MESSAGE);
@@ -913,7 +1071,7 @@ impl App {
         }
     }
 
-    pub(crate) fn push_local_peer_message(
+    pub(super) fn push_local_peer_message(
         &mut self,
         session: &Session,
         peer_id: &str,
@@ -951,9 +1109,10 @@ impl App {
             reactions: Vec::new(),
             reply_to: None,
             encrypted: true,
-            sent_at: chrono::Local::now().timestamp_millis() as f64,
+            sent_at: chrono::Local::now().timestamp_millis(),
             deleted: false,
             edited: false,
+            pinned: false,
         };
         self.persist_peer_message(&msg, photo_for_vault.as_deref());
         self.peer_live_messages.entry(peer_id.to_string()).or_default().push(msg);
@@ -961,7 +1120,7 @@ impl App {
 
     /// Decrypt group/channel TGK1 bodies (and legacy TKR3 DM blobs if any).
     /// Live DMs use peerseal and arrive via `peer_live_messages`.
-    pub(crate) fn decrypt_incoming_messages(&mut self, messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    pub(super) fn decrypt_incoming_messages(&mut self, messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
         let Some(conversation_id) = self.active_conversation.clone() else {
             return messages;
         };
@@ -1029,7 +1188,7 @@ impl App {
     }
 
     /// Load or bootstrap the shared group key for the open group/channel.
-    pub(crate) fn ensure_group_key(&mut self) -> Task<Message> {
+    pub(super) fn ensure_group_key(&mut self) -> Task<Message> {
         let Some(session) = self.session.clone() else {
             return Task::none();
         };
@@ -1286,8 +1445,13 @@ impl App {
     /// had). `tx` is where every job sends its resulting `Message`s.
     pub(crate) fn subscription(&self, tx: UnboundedSender<Message>) -> Vec<Job> {
         // Always on, even before login: the tray icon needs to exist so the
-        // close button can minimize to it instead of quitting outright.
-        let mut subs = vec![tray_subscription(tx.clone())];
+        // close button can minimize to it instead of quitting outright. The
+        // periodic update re-check also runs pre-login -- the app can update
+        // itself even from the auth screen.
+        let mut subs = vec![
+            tray_subscription(tx.clone()),
+            update_check_job(tx.clone()),
+        ];
 
         let (Some(client), Some(session)) = (self.client.clone(), self.session.clone()) else {
             return subs;
@@ -1379,6 +1543,7 @@ impl App {
                 Arc::clone(&self.call_muted),
                 Arc::clone(&self.call_output_muted),
                 Arc::clone(&self.noise_gate),
+                self.voice_gains.clone(),
                 tx.clone(),
             ));
         }
@@ -1390,6 +1555,12 @@ impl App {
 
         if let Some(conversation_id) = &self.active_conversation {
             subs.push(messages_subscription(
+                client.clone(),
+                session.token.clone(),
+                conversation_id.clone(),
+                tx.clone(),
+            ));
+            subs.push(pins_subscription(
                 client.clone(),
                 session.token.clone(),
                 conversation_id.clone(),
@@ -1493,6 +1664,7 @@ impl App {
                 Arc::clone(&self.call_output_muted),
                 Arc::clone(&self.noise_gate),
                 Arc::clone(&self.share_control_slot),
+                self.voice_gains.clone(),
                 tx.clone(),
             ));
         }
@@ -1508,6 +1680,23 @@ fn tick_job(tx: UnboundedSender<Message>) -> Job {
         loop {
             interval.tick().await;
             if tx.send(Message::Tick).is_err() {
+                break;
+            }
+        }
+    })
+}
+
+/// Re-checks for updates every 30 minutes in the background. The boot-time
+/// check already runs at startup, so the immediate first interval tick is
+/// consumed up front; `Message::CheckForUpdate` itself skips re-downloading
+/// once an update is staged.
+fn update_check_job(tx: UnboundedSender<Message>) -> Job {
+    job("update-check", async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(30 * 60));
+        interval.tick().await; // swallow the immediate first tick
+        loop {
+            interval.tick().await;
+            if tx.send(Message::CheckForUpdate).is_err() {
                 break;
             }
         }

@@ -1,9 +1,9 @@
 // Header + message history + composer -- the right-hand chat pane. Port of
 // the `Some(_)` / `None` branches of `chat_panel` in src/view/chat.rs.
-import { ListView } from "std-widgets.slint";
+import { ListView, Slider } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Avatar, SecondaryButton, PrimaryButton, DangerButton } from "widgets.slint";
-import { ChatMessageRow } from "chat_types.slint";
+import { ChatMessageRow, VoiceUserVolumeRow } from "chat_types.slint";
 import { MessageRow } from "message_row.slint";
 
 component HeaderChip inherits Rectangle {
@@ -30,13 +30,17 @@ component HeaderButton inherits Rectangle {
     callback clicked;
     height: 30px;
     width: label.preferred-width + 20px;
-    background: root.accent ? Theme.accent-dim : (touch.has-hover ? Theme.bg-hover : Theme.bg-secondary);
+    background: root.accent
+        ? (touch.pressed ? Theme.accent-pressed : (touch.has-hover ? Theme.accent : Theme.accent-dim))
+        : (touch.pressed ? Theme.bg-tertiary : (touch.has-hover ? Theme.bg-hover : Theme.bg-secondary));
     border-width: 1px;
-    border-color: root.accent ? Theme.accent : Theme.border;
+    border-color: root.accent ? Theme.accent : (touch.has-hover ? Theme.border-strong : Theme.border);
+    animate background { duration: 120ms; }
+    animate border-color { duration: 120ms; }
     touch := TouchArea { clicked => { root.clicked(); } }
     label := Text {
         text: root.text;
-        font-size: 12px;
+        font-size: Theme.text-sm;
         color: root.accent ? Theme.text-on-accent : Theme.text-primary;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -67,6 +71,7 @@ export component ChatArea inherits Rectangle {
     in property <bool> in_voice: false;
     in property <string> room_voice_status;
     in property <string> voice_users_label;
+    in property <[VoiceUserVolumeRow]> voice_users: [];
 
     in property <[ChatMessageRow]> messages: [];
     in property <[string]> quick_emojis: [];
@@ -76,6 +81,10 @@ export component ChatArea inherits Rectangle {
     in property <string> send_label;
     in property <bool> crypto_ready: true;
     in-out property <string> message_input;
+    // Discord-style @ autocomplete: names matching the "@prefix" token the
+    // user is currently typing (filled from Rust; includes "everyone" where
+    // the conversation supports it). Empty = popup hidden.
+    in property <[string]> mention_suggestions: [];
     in property <bool> has_pending_attachment: false;
     in property <image> pending_attachment_preview;
     in property <bool> has_pending_reply: false;
@@ -92,6 +101,7 @@ export component ChatArea inherits Rectangle {
     callback leave_voice;
 
     callback message_input_edited(string);
+    callback mention_pick(string);
     callback send;
     callback pick_attachment;
     callback remove_attachment;
@@ -105,6 +115,7 @@ export component ChatArea inherits Rectangle {
     callback delete(string);
     callback purge(string);
     callback open_attachment(string);
+    callback voice_volume_changed(string, float);
 
     background: Theme.bg-primary;
 
@@ -117,6 +128,9 @@ export component ChatArea inherits Rectangle {
     // layout contributes no constraints to the parent, so the Rectangle
     // stays unconstrained and simply centers the content box.
     if !root.has_conversation: Rectangle {
+        opacity: 0;
+        init => { self.opacity = 1; }
+        animate opacity { duration: 140ms; }
         welcome_content := VerticalLayout {
             x: (parent.width - self.preferred-width) / 2;
             y: (parent.height - self.preferred-height) / 2;
@@ -151,7 +165,7 @@ export component ChatArea inherits Rectangle {
             }
             Text {
                 text: "Pick a chat on the left, or add a friend to get started.";
-                font-size: 14px;
+                font-size: Theme.text-md;
                 color: Theme.text-muted;
                 horizontal-alignment: center;
             }
@@ -165,7 +179,7 @@ export component ChatArea inherits Rectangle {
                     width: hint.preferred-width + 28px;
                     hint := Text {
                         text: "[DM] chats · [Fr] friends · [+] servers";
-                        font-size: 12px;
+                        font-size: Theme.text-sm;
                         font-family: Theme.font-medium;
                         color: Theme.text-muted;
                         horizontal-alignment: center;
@@ -177,6 +191,9 @@ export component ChatArea inherits Rectangle {
     }
 
     if root.has_conversation: VerticalLayout {
+        opacity: 0;
+        init => { self.opacity = 1; }
+        animate opacity { duration: 140ms; }
         // ---- Header ----
         Rectangle {
             height: 62px;
@@ -212,6 +229,7 @@ export component ChatArea inherits Rectangle {
                 Text {
                     text: root.peer_title;
                     font-size: 17px;
+                    font-family: Theme.font-medium;
                     color: Theme.text-primary;
                     vertical-alignment: center;
                 }
@@ -231,13 +249,13 @@ export component ChatArea inherits Rectangle {
                 }
                 if !root.is_server_channel && !root.store_allowed: Text {
                     text: "ephemeral";
-                    font-size: 10px;
+                    font-size: Theme.text-xs;
                     color: Theme.warning;
                     vertical-alignment: center;
                 }
                 if !root.is_server_channel && root.clear_chat_busy: Text {
                     text: "Clearing…";
-                    font-size: 12px;
+                    font-size: Theme.text-sm;
                     color: Theme.text-muted;
                     vertical-alignment: center;
                 }
@@ -272,6 +290,48 @@ export component ChatArea inherits Rectangle {
                     font-size: 11px;
                     color: Theme.text-muted;
                     vertical-alignment: center;
+                }
+            }
+        }
+
+        // ---- Voice volume panel (per-peer gain sliders while in a room) ----
+        if root.in_voice && root.voice_users.length > 0: Rectangle {
+            background: Theme.bg-secondary;
+            border-width: 1px;
+            border-color: Theme.border;
+            VerticalLayout {
+                padding: 10px;
+                spacing: 6px;
+                Text {
+                    text: "VOICE VOLUME";
+                    font-size: Theme.text-xs;
+                    font-family: Theme.font-medium;
+                    color: Theme.text-muted;
+                }
+                for u in root.voice_users: HorizontalLayout {
+                    spacing: 10px;
+                    Text {
+                        text: u.name;
+                        font-size: 12px;
+                        color: Theme.text-primary;
+                        width: 140px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    Slider {
+                        horizontal-stretch: 1;
+                        minimum: 0;
+                        maximum: 2;
+                        value: u.volume;
+                        changed(v) => { root.voice_volume_changed(u.user_id, v); }
+                    }
+                    Text {
+                        text: Math.round(u.volume * 100) + "%";
+                        font-size: 11px;
+                        color: Theme.text-muted;
+                        width: 40px;
+                        vertical-alignment: center;
+                    }
                 }
             }
         }
@@ -316,12 +376,19 @@ export component ChatArea inherits Rectangle {
                     border-width: 1px;
                     border-color: Theme.border;
                     height: 36px;
+                    Rectangle {
+                        x: 0;
+                        y: 0;
+                        width: 2px;
+                        height: parent.height;
+                        background: Theme.accent-dim;
+                    }
                     HorizontalLayout {
                         padding: 10px;
                         spacing: 10px;
                         Text {
                             text: root.pending_reply_line;
-                            font-size: 12px;
+                            font-size: Theme.text-sm;
                             color: Theme.text-primary;
                             vertical-alignment: center;
                             horizontal-stretch: 1;
@@ -347,7 +414,7 @@ export component ChatArea inherits Rectangle {
                         }
                         Text {
                             text: "Image attached";
-                            font-size: 12px;
+                            font-size: Theme.text-sm;
                             color: Theme.text-muted;
                             vertical-alignment: center;
                             horizontal-stretch: 1;
@@ -364,7 +431,7 @@ export component ChatArea inherits Rectangle {
                     Text {
                         x: 10px;
                         text: root.chat_error;
-                        font-size: 12px;
+                        font-size: Theme.text-sm;
                         color: Theme.danger;
                         vertical-alignment: center;
                     }
@@ -377,9 +444,38 @@ export component ChatArea inherits Rectangle {
                     Text {
                         x: 10px;
                         text: root.warning_line;
-                        font-size: 12px;
+                        font-size: Theme.text-sm;
                         color: Theme.warning;
                         vertical-alignment: center;
+                    }
+                }
+
+                // ---- @ mention autocomplete popup ----
+                // In-flow strip directly above the input row (grows the
+                // composer while open, so it can never cover messages).
+                if root.mention_suggestions.length > 0: Rectangle {
+                    background: Theme.bg-tertiary;
+                    border-width: 1px;
+                    border-color: Theme.border-strong;
+                    VerticalLayout {
+                        padding: 4px;
+                        spacing: 2px;
+                        for name in root.mention_suggestions: Rectangle {
+                            height: 26px;
+                            background: mention_touch.has-hover ? Theme.bg-hover : transparent;
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                spacing: 6px;
+                                Text {
+                                    text: "@" + name;
+                                    font-size: Theme.text-sm;
+                                    font-family: Theme.font-medium;
+                                    color: name == "everyone" ? Theme.warning : Theme.accent;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            mention_touch := TouchArea { clicked => { root.mention_pick(name); } }
+                        }
                     }
                 }
 
@@ -410,9 +506,11 @@ export component ChatArea inherits Rectangle {
                     Rectangle {
                         horizontal-stretch: 1;
                         height: 40px;
-                        background: Theme.bg-tertiary;
+                        background: composer_input.has-focus ? Theme.bg-elevated : Theme.bg-tertiary;
                         border-width: 1px;
                         border-color: composer_input.has-focus ? Theme.accent : Theme.border;
+                        animate background { duration: 120ms; }
+                        animate border-color { duration: 120ms; }
                         composer_input := TextInput {
                             x: 12px;
                             width: parent.width - 24px;
@@ -420,15 +518,23 @@ export component ChatArea inherits Rectangle {
                             vertical-alignment: center;
                             text <=> root.message_input;
                             color: Theme.text-primary;
-                            font-size: 14px;
+                            font-size: Theme.text-md;
                             edited => { root.message_input_edited(self.text); }
-                            accepted => { if (root.crypto_ready) { root.send(); } }
+                            // While the mention popup is open, Enter completes
+                            // the first suggestion instead of sending.
+                            accepted => {
+                                if (root.mention_suggestions.length > 0) {
+                                    root.mention_pick(root.mention_suggestions[0]);
+                                } else if (root.crypto_ready) {
+                                    root.send();
+                                }
+                            }
                         }
                         if root.message_input == "": Text {
                             x: 12px;
                             text: root.input_placeholder;
                             color: Theme.text-muted;
-                            font-size: 14px;
+                            font-size: Theme.text-md;
                             vertical-alignment: center;
                             height: parent.height;
                         }

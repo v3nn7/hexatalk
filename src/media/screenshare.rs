@@ -1,7 +1,8 @@
 //! Screen/window capture for screen sharing during a call.
 //!
-//! There's no real video codec in this build -- see g711.rs's comment on
-//! why (same C-toolchain constraint rules out VP8/H264 encoders). Instead,
+//! There's no real video codec in this build (the no-C-toolchain constraint
+//! rules out VP8/H264 encoders, same as it ruled out Opus for audio — see
+//! adpcm.rs). Instead,
 //! frames are captured, downscaled and JPEG-encoded with the pure-Rust
 //! `image` crate (used via xcap's own re-export, so it's guaranteed to be
 //! the same crate instance xcap's `RgbaImage` return values come from), and
@@ -18,13 +19,13 @@ use xcap::image::codecs::jpeg::JpegEncoder;
 use xcap::image::{imageops::FilterType, DynamicImage, ExtendedColorType};
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum ShareTarget {
+pub(crate) enum ShareTarget {
     Monitor(String),
     Window(String),
 }
 
 impl ShareTarget {
-    pub fn label(&self) -> &str {
+    pub(crate) fn label(&self) -> &str {
         match self {
             ShareTarget::Monitor(name) => name,
             ShareTarget::Window(title) => title,
@@ -35,7 +36,7 @@ impl ShareTarget {
 /// Enumerates monitors and visible, titled windows as candidate share
 /// targets. Best-effort: any entry whose properties can't be read is
 /// skipped rather than failing the whole list.
-pub fn list_share_targets() -> Vec<ShareTarget> {
+pub(crate) fn list_share_targets() -> Vec<ShareTarget> {
     let mut targets = Vec::new();
     if let Ok(monitors) = xcap::Monitor::all() {
         for monitor in monitors {
@@ -162,7 +163,7 @@ const MAX_CONSECUTIVE_CAPTURE_FAILURES: u32 = TARGET_FPS as u32 * 4;
 /// `frame_tx`) if the capture target becomes unavailable, which the
 /// receiving side in `call.rs` distinguishes from a deliberate stop so it
 /// can tell the user sharing failed instead of just going quiet.
-pub fn spawn_capture_thread(
+pub(crate) fn spawn_capture_thread(
     target: ShareTarget,
     frame_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     stop: Arc<AtomicBool>,

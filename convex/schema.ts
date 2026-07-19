@@ -207,12 +207,23 @@ export default defineSchema({
     deleted: v.optional(v.boolean()),
     deletedAt: v.optional(v.number()),
     deletedBy: v.optional(v.id("users")),
+    // Mention metadata, computed client-side at send time (the client owns
+    // the plaintext for E2EE chats, so only it can parse @names). Absent on
+    // older messages -- treat as "no mentions".
+    mentionUserIds: v.optional(v.array(v.id("users"))),
+    mentionEveryone: v.optional(v.boolean()),
+    // Pinned messages: optional so old documents validate unchanged.
+    pinned: v.optional(v.boolean()),
+    pinnedAt: v.optional(v.number()),
+    pinnedBy: v.optional(v.id("users")),
   }).index("by_conversation", ["conversationId"]),
 
   reactions: defineTable({
     messageId: v.id("messages"),
     userId: v.id("users"),
     emoji: v.string(),
+    // Optional so pre-existing rows (written before this field) validate.
+    createdAt: v.optional(v.number()),
   })
     .index("by_message", ["messageId"])
     .index("by_message_and_user_and_emoji", ["messageId", "userId", "emoji"]),

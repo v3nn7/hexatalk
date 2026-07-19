@@ -1,6 +1,7 @@
 // Top-of-window call bar: ringing / active states, share picker, remote
 // screenshare frame. Port of `call_banner_view` in src/view/chat.rs.
 import { Theme } from "theme.slint";
+import { Slider, ScrollView } from "std-widgets.slint";
 import { ShareTargetRow } from "chat_types.slint";
 
 component BannerButton inherits Rectangle {
@@ -10,9 +11,11 @@ component BannerButton inherits Rectangle {
     callback clicked;
     height: 32px;
     width: label.preferred-width + 24px;
-    background: root.filled ? root.accent_color : (touch.has-hover ? Theme.bg-hover : Theme.bg-secondary);
+    background: root.filled ? root.accent_color : (touch.pressed ? Theme.bg-tertiary : (touch.has-hover ? Theme.bg-hover : Theme.bg-secondary));
     border-width: 1px;
-    border-color: root.filled ? root.accent_color : Theme.border;
+    border-color: root.filled ? root.accent_color : (touch.has-hover ? Theme.border-strong : Theme.border);
+    animate background { duration: 120ms; }
+    animate border-color { duration: 120ms; }
     touch := TouchArea { clicked => { root.clicked(); } }
     label := Text {
         text: root.text;
@@ -20,6 +23,12 @@ component BannerButton inherits Rectangle {
         color: root.filled ? white : Theme.text-primary;
         horizontal-alignment: center;
         vertical-alignment: center;
+    }
+    // Square tint overlay: lightens on hover, darkens on press. Works on
+    // filled and outline variants alike without rounding anything.
+    Rectangle {
+        background: touch.pressed ? #00000030 : (touch.has-hover ? #ffffff12 : transparent);
+        animate background { duration: 120ms; }
     }
 }
 
@@ -38,6 +47,7 @@ export component CallBanner inherits Rectangle {
     in property <image> remote_frame;
     in property <string> remote_frame_title;
     in property <bool> share_expanded: false;
+    in property <float> peer_volume: 1.0;
 
     callback accept;
     callback decline;
@@ -48,17 +58,26 @@ export component CallBanner inherits Rectangle {
     callback stop_share;
     callback start_share(string);
     callback toggle_share_size;
+    callback volume_changed(float);
 
     height: root.visible_ ? content.preferred-height : 0px;
     clip: true;
-    background: Theme.bg-secondary;
+    background: Theme.bg-elevated;
 
     content := VerticalLayout {
         Rectangle {
             height: 56px;
-            background: root.is_ringing ? #d1bc4d1a : Theme.bg-secondary;
+            background: root.is_ringing ? #d1bc4d1a : Theme.bg-elevated;
             border-width: 1px;
             border-color: root.is_ringing ? #d1bc4d59 : Theme.border;
+            // Status spine: warning-yellow while ringing, emerald in call.
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: 3px;
+                height: parent.height;
+                background: root.is_ringing ? Theme.warning : Theme.accent;
+            }
             HorizontalLayout {
                 padding: 14px;
                 spacing: 12px;
@@ -69,7 +88,7 @@ export component CallBanner inherits Rectangle {
                     vertical-alignment: center;
                     horizontal-stretch: 1;
                 }
-                if root.is_ringing && root.is_incoming: BannerButton { text: "Accept"; filled: true; accent_color: Theme.accent-dim; clicked => { root.accept(); } }
+                if root.is_ringing && root.is_incoming: BannerButton { text: "Accept"; filled: true; accent_color: Theme.success; clicked => { root.accept(); } }
                 if root.is_ringing && root.is_incoming: BannerButton { text: "Decline"; filled: true; accent_color: Theme.danger; clicked => { root.decline(); } }
                 if root.is_ringing && !root.is_incoming: BannerButton { text: "Cancel"; clicked => { root.hang_up(); } }
                 if root.is_active: BannerButton { text: root.muted ? "Unmute" : "Mute"; clicked => { root.toggle_mute(); } }
@@ -82,23 +101,65 @@ export component CallBanner inherits Rectangle {
             }
         }
 
-        if root.is_active && root.share_picker_open: Rectangle {
+        if root.is_active: Rectangle {
             height: 40px;
             background: Theme.bg-primary;
+            border-width: 1px;
+            border-color: Theme.border-hairline;
             HorizontalLayout {
                 padding: 8px;
                 spacing: 10px;
-                Text { text: "Share:"; font-size: 12px; color: Theme.text-muted; vertical-alignment: center; }
-                if root.share_targets.length == 0: Text { text: "Loading sources..."; font-size: 12px; color: Theme.text-muted; vertical-alignment: center; }
-                for t in root.share_targets: Rectangle {
-                    width: t-label.preferred-width + 4px;
-                    t-label := Text {
-                        text: t.label;
-                        font-size: 12px;
-                        color: t-touch.has-hover ? Theme.accent : Theme.text-primary;
-                        vertical-alignment: center;
+                Text { text: "Peer volume"; font-size: 12px; color: Theme.text-muted; vertical-alignment: center; }
+                Slider {
+                    width: 160px;
+                    minimum: 0;
+                    maximum: 2;
+                    value: root.peer_volume;
+                    changed(v) => { root.volume_changed(v); }
+                }
+                Text { text: Math.round(root.peer_volume * 100) + "%"; font-size: 11px; color: Theme.text-muted; vertical-alignment: center; }
+            }
+        }
+
+        if root.is_active && root.share_picker_open: Rectangle {
+            background: Theme.bg-primary;
+            border-width: 1px;
+            border-color: Theme.border-hairline;
+            // A real list, not a single strip: with more than a handful of
+            // open windows the old one-row overflowed off the side of the
+            // window and most targets (app windows in particular) were
+            // unreachable.
+            height: 240px;
+            VerticalLayout {
+                padding: 10px;
+                spacing: 6px;
+                Text { text: "Share your whole screen or a single app window:"; font-size: 12px; color: Theme.text-muted; }
+                if root.share_targets.length == 0: Text { text: "Loading sources..."; font-size: 12px; color: Theme.text-muted; }
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 2px;
+                        alignment: start;
+                        for t in root.share_targets: Rectangle {
+                            height: 28px;
+                            background: t-touch.pressed ? Theme.bg-tertiary : (t-touch.has-hover ? Theme.bg-hover : transparent);
+                            animate background { duration: 120ms; }
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                t-label := Text {
+                                    text: t.label;
+                                    font-size: 12px;
+                                    color: t-touch.has-hover ? Theme.accent : Theme.text-primary;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                    animate color { duration: 120ms; }
+                                }
+                            }
+                            t-touch := TouchArea { clicked => { root.start_share(t.id); } }
+                        }
                     }
-                    t-touch := TouchArea { clicked => { root.start_share(t.id); } }
                 }
             }
         }

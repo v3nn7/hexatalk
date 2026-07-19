@@ -7,7 +7,12 @@
 
 use convex::ConvexClient;
 
-use crate::*;
+use crate::media::call;
+use crate::media::screenshare;
+use crate::net::peer;
+use crate::tray;
+use crate::state::types::{AdminUserRow, AttachmentPick, AuthMode, AvatarPick, BlockedUser, BotSummary, ChannelSummary, ChatMessage, ConversationSummary, Friend, FriendSuggestion, FriendsFilter, IncomingRequest, MyCallInfo, OutgoingRequest, PeopleHit, ProfileView, ResizePanel, ServerMemberRow, ServerRoleRow, ServerSettingsCategory, ServerSummary, Session, SettingsCategory, SidebarTab, SocialStats, VoiceUserRow};
+use crate::update_check::UpdateOutcome;
 
 // ---------- Messages ----------
 
@@ -41,6 +46,8 @@ pub(crate) enum Message {
 
     CheckForUpdate,
     UpdateCheckFinished(UpdateOutcome),
+    /// "Restart & install" button: swap in the staged update and relaunch.
+    RestartAndUpdate,
     MeasurePing,
     PingMeasured(Option<u64>),
     WindowCloseRequested,
@@ -63,6 +70,13 @@ pub(crate) enum Message {
     ConversationsUpdated(Vec<ConversationSummary>),
     AdminUsersUpdated(Vec<AdminUserRow>),
     MessagesUpdated(Vec<ChatMessage>),
+    /// Pinned messages of the open conversation (messages:listPinned watch).
+    PinnedMessagesUpdated(Vec<ChatMessage>),
+    /// Header "Pinned" button -- opens/closes the pinned-messages panel.
+    TogglePinsPanel,
+    PinMessage(String),
+    UnpinMessage(String),
+    PinToggled(Result<(), String>),
 
     SidebarTabChanged(SidebarTab),
     MessageHovered(Option<String>),
@@ -164,6 +178,8 @@ pub(crate) enum Message {
     DeleteChannelFinished(Result<(), String>),
 
     MessageInputChanged(String),
+    /// @-autocomplete suggestion picked from the composer popup.
+    MentionSuggestionPicked(String),
     PickAttachmentImage,
     AttachmentFilePicked(AttachmentPick),
     RemovePendingAttachment,
@@ -210,9 +226,12 @@ pub(crate) enum Message {
     JoinVoiceChannel,
     LeaveVoiceChannel,
     VoiceUsersUpdated(Vec<VoiceUserRow>),
+    /// Per-peer voice volume slider moved: (peer user_id, "*" for the 1:1
+    /// call remote, gain 0.0..=2.0).
+    VoiceVolumeChanged(String, f32),
     /// Ok(Some(channel_id)) = joined; Ok(None) = left.
     VoiceActionFinished(Result<Option<String>, String>),
-    RoomVoiceEngineEvent(crate::room_voice::RoomVoiceEvent),
+    RoomVoiceEngineEvent(crate::media::room_voice::RoomVoiceEvent),
     /// Group/channel key ready (or failed) for the open conversation.
     GroupKeyReady(Result<(), String>),
     /// Unsealed key stored: (conversation_id, epoch, key bytes).

@@ -45,12 +45,15 @@ component ToggleRow inherits Rectangle {
             background: root.value ? Theme.accent-dim : Theme.bg-tertiary;
             border-width: 1px;
             border-color: root.value ? Theme.accent : Theme.border;
+            animate background { duration: 120ms; }
+            animate border-color { duration: 120ms; }
             Rectangle {
                 x: root.value ? parent.width - self.width - 3px : 3px;
                 y: 3px;
                 width: 16px;
                 height: 16px;
                 background: white;
+                animate x { duration: 120ms; }
             }
             TouchArea { clicked => { root.toggled(); } }
         }
@@ -63,10 +66,16 @@ component SidebarItem inherits Rectangle {
     callback clicked;
     height: 40px;
     background: root.active ? Theme.accent-soft : (touch.has-hover ? Theme.bg-hover : transparent);
-    border-width: root.active ? 1px : 0px;
-    border-color: Theme.accent;
+    animate background { duration: 120ms; }
     touch := TouchArea { clicked => { root.clicked(); } }
-    Text { x: 12px; text: root.text; font-size: 13px; color: Theme.text-primary; vertical-alignment: center; }
+    if root.active: Rectangle {
+        x: 0;
+        y: 0;
+        width: 3px;
+        height: parent.height;
+        background: Theme.accent;
+    }
+    Text { x: 12px; text: root.text; font-size: 13px; color: root.active ? Theme.text-primary : Theme.text-muted; vertical-alignment: center; animate color { duration: 120ms; } }
 }
 
 component DeviceItem inherits Rectangle {
@@ -75,7 +84,15 @@ component DeviceItem inherits Rectangle {
     callback clicked;
     height: 32px;
     background: root.active ? Theme.accent-soft : (touch.has-hover ? Theme.bg-hover : transparent);
+    animate background { duration: 120ms; }
     touch := TouchArea { clicked => { root.clicked(); } }
+    if root.active: Rectangle {
+        x: 0;
+        y: 0;
+        width: 2px;
+        height: parent.height;
+        background: Theme.accent;
+    }
     Text { x: 8px; text: root.text; font-size: 13px; color: Theme.text-primary; vertical-alignment: center; }
 }
 
@@ -127,6 +144,7 @@ export component SettingsScreen inherits Rectangle {
     in property <string> version_line;
     in property <string> vault_hint;
     in property <string> update_check_status;
+    in property <bool> update_ready: false;
     in property <string> ping_status;
 
     callback close;
@@ -168,6 +186,7 @@ export component SettingsScreen inherits Rectangle {
     callback noise_gate_changed(float);
 
     callback check_for_update;
+    callback restart_update;
     callback measure_ping;
 
     background: Theme.bg-primary;
@@ -402,6 +421,7 @@ export component SettingsScreen inherits Rectangle {
                         Text { text: "DM history lives on Convex (shared). Live transport is peerseal."; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
                         Text { text: "Local data dir: " + root.vault_hint; font-size: 10px; color: Theme.text-muted; wrap: word-wrap; }
                         SecondaryButton { text: "Check for updates"; width: 180px; clicked => { root.check_for_update(); } }
+                        if root.update_ready: PrimaryButton { text: "Restart & install update"; width: 180px; clicked => { root.restart_update(); } }
                         if root.update_check_status != "": Text { text: root.update_check_status; font-size: 12px; color: Theme.text-muted; }
                         SecondaryButton { text: "Ping server"; width: 180px; clicked => { root.measure_ping(); } }
                         if root.ping_status != "": Text { text: "ping: " + root.ping_status; font-size: 12px; color: Theme.accent; }

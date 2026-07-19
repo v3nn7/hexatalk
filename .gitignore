@@ -45,3 +45,4 @@ Desktop.ini
 
 /.agents
 /crates/talkyss-mobile/target
+/server/talkyss-relay/target

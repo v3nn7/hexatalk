@@ -80,8 +80,8 @@ impl<M: Send + 'static> Task<M> {
 /// `reconcile()` calls means "still wanted, leave it running"; a
 /// previously-seen id that's missing this time means "cancel it".
 pub(crate) struct Job {
-    pub(crate) id: String,
-    pub(crate) future: BoxFuture<()>,
+    id: String,
+    future: BoxFuture<()>,
 }
 
 pub(crate) fn job(id: impl Into<String>, future: impl Future<Output = ()> + Send + 'static) -> Job {

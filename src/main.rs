@@ -2,61 +2,43 @@
 // since it's the only place panics/eprintln! diagnostics show up).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod app;
-mod call;
-mod convex_parse;
 mod crypto;
-mod g711;
-mod history;
-mod message;
-mod notify;
-mod peer;
-mod room_voice;
-mod rt;
-mod screenshare;
-mod session_store;
-mod subscriptions;
+mod media;
+mod net;
+mod state;
 mod tray;
-mod types;
-mod update;
+mod ui;
 mod update_check;
-mod viewmodel;
-mod img_cache;
-mod utils;
 
-// Re-exported at crate root so every module can keep writing `use crate::*;`
-// regardless of which file a given type/message-variant physically lives in.
-pub(crate) use app::App;
-pub(crate) use convex_parse::*;
-pub(crate) use message::Message;
-pub(crate) use notify::*;
-pub(crate) use session_store::*;
-pub(crate) use subscriptions::*;
-pub(crate) use types::*;
-pub(crate) use update_check::*;
-pub(crate) use utils::*;
 
+use crate::media::img_cache;
+use crate::media::screenshare;
+use crate::state::history;
+use crate::ui::viewmodel;
+use crate::net::rt::{SubscriptionRegistry, Task, WindowAction};
+use crate::state::app::App;
+use crate::state::message::Message;
+use crate::state::types::{AdminUserRow, BlockedUser, BotSummary, ChannelSummary, ChatMessage, ConversationSummary, Friend, FriendSuggestion, FriendsFilter, IncomingRequest, MyCallInfo, OutgoingRequest, PERM_CONNECT_VOICE, PERM_KICK_MEMBERS, PERM_MANAGE_CHANNELS, PERM_MANAGE_ROLES, PERM_MANAGE_SERVER, PERM_SEND_MESSAGES, PERM_SPEAK, PERM_VIEW_CHANNELS, PeopleHit, ProfileView, ResizePanel, ServerMemberRow, ServerRoleRow, ServerSettingsCategory, ServerSummary, Session, SettingsCategory, SidebarTab, SocialStats, VoiceUserRow, is_online};
+use crate::ui::utils::{friend_request_privacy_label, presence_label, typing_label};
+use crate::update_check::CURRENT_APP_VERSION;
 use std::env;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use rt::{SubscriptionRegistry, Task, WindowAction};
 use slint::Model;
 use slint::ComponentHandle;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 // Generated Slint bindings, kept in their own module (not glob-exported at
-// crate root) so `ui::AuthMode`/`ui::Screen` never collide with the
-// business-logic types of the same name in `crate::types`.
-mod ui {
+// crate root) so `slint_ui::AuthMode`/`slint_ui::Screen` never collide with
+// the business-logic types of the same name in `state::types`.
+mod slint_ui {
     slint::include_modules!();
 }
 
-pub(crate) const ONLINE_THRESHOLD_MS: f64 = 15_000.0;
-
 /// Set by `scroll_chat_to_bottom()`, consumed (and cleared) by the chat
 /// screen's UI sync step, which pulses the message list's scroll-to-end.
-pub(crate) static CHAT_SCROLL_PENDING: AtomicBool = AtomicBool::new(false);
+static CHAT_SCROLL_PENDING: AtomicBool = AtomicBool::new(false);
 
 fn scroll_chat_to_bottom<T: Send + 'static>() -> Task<T> {
     CHAT_SCROLL_PENDING.store(true, Ordering::Relaxed);
@@ -107,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // UI fonts are embedded at Slint compile time (see the `import "*.ttf"`
     // lines at the top of ui/main.slint) -- no runtime registration needed.
-    let ui = ui::AppWindow::new()?;
+    let ui = slint_ui::AppWindow::new()?;
 
     // Force the initial window size explicitly instead of relying purely on
     // `preferred-width`/`preferred-height` in main.slint. Those are only a
@@ -151,7 +133,7 @@ async fn run_pump(
     deployment_url: String,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Message>,
     tx: UnboundedSender<Message>,
-    ui_weak: slint::Weak<ui::AppWindow>,
+    ui_weak: slint::Weak<slint_ui::AppWindow>,
 ) {
     let (mut app, boot_task) = App::new(deployment_url);
     let mut registry = SubscriptionRegistry::new();
@@ -169,7 +151,7 @@ async fn run_pump(
     }
 }
 
-fn apply_window_action(app: &mut App, ui_weak: &slint::Weak<ui::AppWindow>) {
+fn apply_window_action(app: &mut App, ui_weak: &slint::Weak<slint_ui::AppWindow>) {
     let Some(action) = app.pending_window_action.take() else {
         return;
     };
@@ -194,17 +176,17 @@ fn apply_window_action(app: &mut App, ui_weak: &slint::Weak<ui::AppWindow>) {
 /// A plain-data snapshot of whatever `App` state the UI needs, built on the
 /// pump thread (where `App` lives) and applied on the Slint UI thread via
 /// `invoke_from_event_loop`. Only plain owned data (`String`/`bool`/`Vec`/
-/// domain structs, never `slint::Image`/generated `ui::*Row` values) is
+/// domain structs, never `slint::Image`/generated `slint_ui::*Row` values) is
 /// allowed to cross the thread boundary here -- Slint's own types aren't
-/// guaranteed `Send`, so the `ui::*Row` conversion (see `src/viewmodel.rs`)
+/// guaranteed `Send`, so the `slint_ui::*Row` conversion (see `src/viewmodel.rs`)
 /// happens inside `apply()`, which only ever runs on the Slint UI thread.
 ///
 /// `image_cache` carries the raw avatar/attachment bytes (`Arc<[u8]>`, so
 /// `Send`) fetched on the pump thread. `slint::Image` itself can't cross the
 /// boundary, so decoding happens on the UI thread (see `src/img_cache.rs`).
 struct UiSnapshot {
-    screen: ui::Screen,
-    auth_mode: ui::AuthMode,
+    screen: slint_ui::Screen,
+    auth_mode: slint_ui::AuthMode,
     username_input: String,
     password_input: String,
     display_name_input: String,
@@ -270,6 +252,7 @@ struct SettingsRaw {
     bot_token_reveal: Option<String>,
     noise_gate: f32,
     update_check_status: Option<String>,
+    update_ready: bool,
     ping_status: Option<String>,
 }
 
@@ -288,7 +271,7 @@ struct ProfileRaw {
 }
 
 /// Raw (unconverted) chat-screen state, cloned out of `App` on the pump
-/// thread. See `UiSnapshot` docs for why this can't hold `ui::*` types.
+/// thread. See `UiSnapshot` docs for why this can't hold `slint_ui::*` types.
 struct ChatRaw {
     session: Session,
     my_avatar_url: String,
@@ -344,9 +327,11 @@ struct ChatRaw {
     active_voice_channel: Option<String>,
     room_voice_status: Option<String>,
     voice_users: Vec<VoiceUserRow>,
+    voice_gains: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, f32>>>,
     messages: Vec<ChatMessage>,
     peer_live_messages: std::collections::HashMap<String, Vec<ChatMessage>>,
     message_input: String,
+    mention_suggestions: Vec<String>,
     has_pending_attachment: bool,
     pending_reply: Option<(String, String, String)>,
     chat_error: Option<String>,
@@ -359,6 +344,9 @@ struct ChatRaw {
     share_picker_open: bool,
     share_targets: Vec<screenshare::ShareTarget>,
     has_remote_share_frame: bool,
+    /// Raw JPEG bytes of the latest remote share frame (Send-safe, decoded
+    /// to `slint::Image` on the UI thread -- same pattern as `image_cache`).
+    remote_share_frame: Option<std::sync::Arc<[u8]>>,
     share_view_expanded: bool,
     server_members: Vec<ServerMemberRow>,
     members_panel_width: f32,
@@ -369,15 +357,15 @@ struct ChatRaw {
 impl UiSnapshot {
     fn from_app(app: &App) -> Self {
         let screen = if app.session.is_none() {
-            ui::Screen::Auth
+            slint_ui::Screen::Auth
         } else if app.viewing_profile.is_some() || app.profile_error.is_some() {
-            ui::Screen::Profile
+            slint_ui::Screen::Profile
         } else if app.settings_open {
-            ui::Screen::Settings
+            slint_ui::Screen::Settings
         } else if app.server_settings_open && app.selected_server.is_some() {
-            ui::Screen::ServerSettings
+            slint_ui::Screen::ServerSettings
         } else {
-            ui::Screen::Chat
+            slint_ui::Screen::Chat
         };
         let server_settings = app.selected_server.as_ref().map(|server| ServerSettingsRaw {
             server: server.clone(),
@@ -432,6 +420,7 @@ impl UiSnapshot {
             bot_token_reveal: app.bot_token_reveal.clone(),
             noise_gate: f32::from_bits(app.noise_gate.load(Ordering::Relaxed)),
             update_check_status: app.update_check_status.clone(),
+            update_ready: app.pending_update_path.is_some(),
             ping_status: app.ping_status.clone(),
         });
         let profile = app.session.as_ref().map(|session| ProfileRaw {
@@ -516,9 +505,11 @@ impl UiSnapshot {
             active_voice_channel: app.active_voice_channel.clone(),
             room_voice_status: app.room_voice_status.clone(),
             voice_users: app.voice_users.clone(),
+            voice_gains: app.voice_gains.clone(),
             messages: app.messages.clone(),
             peer_live_messages: app.peer_live_messages.clone(),
             message_input: app.message_input.clone(),
+            mention_suggestions: app.mention_suggestions.clone(),
             has_pending_attachment: app.pending_attachment.is_some(),
             pending_reply: app.pending_reply.clone(),
             chat_error: app.chat_error.clone(),
@@ -531,6 +522,7 @@ impl UiSnapshot {
             share_picker_open: app.share_picker_open,
             share_targets: app.share_targets.clone(),
             has_remote_share_frame: app.remote_share_frame.is_some(),
+            remote_share_frame: app.remote_share_frame.clone(),
             share_view_expanded: app.share_view_expanded,
             server_members: app.server_members.clone(),
             members_panel_width: app.members_panel_width,
@@ -540,8 +532,8 @@ impl UiSnapshot {
         Self {
             screen,
             auth_mode: match app.auth_mode {
-                crate::types::AuthMode::Login => ui::AuthMode::Login,
-                crate::types::AuthMode::Register => ui::AuthMode::Register,
+                crate::state::types::AuthMode::Login => slint_ui::AuthMode::Login,
+                crate::state::types::AuthMode::Register => slint_ui::AuthMode::Register,
             },
             username_input: app.username_input.clone(),
             image_cache: app.avatar_image_cache.clone(),
@@ -558,7 +550,7 @@ impl UiSnapshot {
         }
     }
 
-    fn apply(&self, ui: &ui::AppWindow) {
+    fn apply(&self, ui: &slint_ui::AppWindow) {
         ui.set_current_screen(self.screen);
         ui.set_auth_mode(self.auth_mode);
         ui.set_username_input(self.username_input.clone().into());
@@ -597,16 +589,16 @@ const ROLE_PERM_LABELS: [(u32, &str); 8] = [
 fn apply_server_settings(
     s: &ServerSettingsRaw,
     cache: &std::collections::HashMap<String, std::sync::Arc<[u8]>>,
-    ui: &ui::AppWindow,
+    ui: &slint_ui::AppWindow,
 ) {
     let server = &s.server;
     ui.set_ss_category(match s.category {
-        ServerSettingsCategory::Overview => ui::ServerSettingsCategory::Overview,
-        ServerSettingsCategory::Channels => ui::ServerSettingsCategory::Channels,
-        ServerSettingsCategory::Members => ui::ServerSettingsCategory::Members,
-        ServerSettingsCategory::Roles => ui::ServerSettingsCategory::Roles,
-        ServerSettingsCategory::Invites => ui::ServerSettingsCategory::Invites,
-        ServerSettingsCategory::Danger => ui::ServerSettingsCategory::Danger,
+        ServerSettingsCategory::Overview => slint_ui::ServerSettingsCategory::Overview,
+        ServerSettingsCategory::Channels => slint_ui::ServerSettingsCategory::Channels,
+        ServerSettingsCategory::Members => slint_ui::ServerSettingsCategory::Members,
+        ServerSettingsCategory::Roles => slint_ui::ServerSettingsCategory::Roles,
+        ServerSettingsCategory::Invites => slint_ui::ServerSettingsCategory::Invites,
+        ServerSettingsCategory::Danger => slint_ui::ServerSettingsCategory::Danger,
     });
     ui.set_ss_server_name(server.name.clone().into());
     ui.set_ss_server_initial(
@@ -659,7 +651,7 @@ fn apply_server_settings(
     ui.set_ss_channels(
         s.channels
             .iter()
-            .map(|c| ui::SSChannelRow {
+            .map(|c| slint_ui::SSChannelRow {
                 conversation_id: c.conversation_id.clone().into(),
                 name: c.name.clone().into(),
                 is_voice: c.channel_type == "voice",
@@ -684,7 +676,7 @@ fn apply_server_settings(
                 } else {
                     m.roles.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join(", ")
                 };
-                ui::SSMemberRow {
+                slint_ui::SSMemberRow {
                     user_id: m.user_id.clone().into(),
                     display_name: m.display_name.clone().into(),
                     username: m.username.clone().into(),
@@ -697,7 +689,7 @@ fn apply_server_settings(
                     picker_open: s.member_role_picker_open.as_deref() == Some(m.user_id.as_str()),
                     assignable_roles: assignable_roles
                         .iter()
-                        .map(|r| ui::SSAssignableRole {
+                        .map(|r| slint_ui::SSAssignableRole {
                             role_id: r.role_id.clone().into(),
                             name: r.name.clone().into(),
                             assigned: m.roles.iter().any(|t| t.role_id == r.role_id),
@@ -718,7 +710,7 @@ fn apply_server_settings(
     ui.set_ss_roles(
         s.server_roles
             .iter()
-            .map(|r| ui::SSRoleRow {
+            .map(|r| slint_ui::SSRoleRow {
                 role_id: r.role_id.clone().into(),
                 name: r.name.clone().into(),
                 color: viewmodel::hex_color(&r.color),
@@ -734,7 +726,7 @@ fn apply_server_settings(
         ui.set_ss_role_permissions(
             ROLE_PERM_LABELS
                 .iter()
-                .map(|(bit, label)| ui::SSPermRow {
+                .map(|(bit, label)| slint_ui::SSPermRow {
                     bit: *bit as i32,
                     label: (*label).into(),
                     enabled: editing.permissions & bit != 0,
@@ -756,15 +748,15 @@ fn apply_server_settings(
 fn apply_settings(
     s: &SettingsRaw,
     cache: &std::collections::HashMap<String, std::sync::Arc<[u8]>>,
-    ui: &ui::AppWindow,
+    ui: &slint_ui::AppWindow,
 ) {
     let session = &s.session;
     ui.set_settings_category(match s.category {
-        SettingsCategory::Account => ui::SettingsCategory::Account,
-        SettingsCategory::Privacy => ui::SettingsCategory::Privacy,
-        SettingsCategory::Bots => ui::SettingsCategory::Bots,
-        SettingsCategory::Voice => ui::SettingsCategory::Voice,
-        SettingsCategory::About => ui::SettingsCategory::About,
+        SettingsCategory::Account => slint_ui::SettingsCategory::Account,
+        SettingsCategory::Privacy => slint_ui::SettingsCategory::Privacy,
+        SettingsCategory::Bots => slint_ui::SettingsCategory::Bots,
+        SettingsCategory::Voice => slint_ui::SettingsCategory::Voice,
+        SettingsCategory::About => slint_ui::SettingsCategory::About,
     });
     ui.set_settings_avatar_initial(viewmodel::initial(&session.display_name));
     ui.set_settings_avatar_color(viewmodel::hex_color(&s.settings_avatar_color));
@@ -812,7 +804,7 @@ fn apply_settings(
     ui.set_settings_my_bots(
         s.my_bots
             .iter()
-            .map(|b| ui::BotRow {
+            .map(|b| slint_ui::BotRow {
                 bot_id: b.bot_id.clone().into(),
                 display_name: b.display_name.clone().into(),
                 username: b.username.clone().into(),
@@ -823,20 +815,20 @@ fn apply_settings(
     );
     ui.set_settings_bot_invite_username_input(s.bot_invite_username_input.clone().into());
     ui.set_settings_bot_status(s.bot_status.clone().unwrap_or_default().into());
-    let mut input_devices = vec![ui::DeviceRow {
+    let mut input_devices = vec![slint_ui::DeviceRow {
         name: "System default".into(),
         selected: s.settings_input_device.is_none(),
     }];
-    input_devices.extend(s.settings_input_devices.iter().map(|d| ui::DeviceRow {
+    input_devices.extend(s.settings_input_devices.iter().map(|d| slint_ui::DeviceRow {
         name: d.clone().into(),
         selected: s.settings_input_device.as_deref() == Some(d.as_str()),
     }));
     ui.set_settings_input_devices(input_devices.as_slice().into());
-    let mut output_devices = vec![ui::DeviceRow {
+    let mut output_devices = vec![slint_ui::DeviceRow {
         name: "System default".into(),
         selected: s.settings_output_device.is_none(),
     }];
-    output_devices.extend(s.settings_output_devices.iter().map(|d| ui::DeviceRow {
+    output_devices.extend(s.settings_output_devices.iter().map(|d| slint_ui::DeviceRow {
         name: d.clone().into(),
         selected: s.settings_output_device.as_deref() == Some(d.as_str()),
     }));
@@ -850,13 +842,14 @@ fn apply_settings(
     ui.set_settings_version_line(format!("Talkyss v{CURRENT_APP_VERSION}").into());
     ui.set_settings_vault_hint(history::vault_root_display(&session.user_id).into());
     ui.set_settings_update_check_status(s.update_check_status.clone().unwrap_or_default().into());
+    ui.set_settings_update_ready(s.update_ready);
     ui.set_settings_ping_status(s.ping_status.clone().unwrap_or_default().into());
 }
 
 fn apply_profile(
     p: &ProfileRaw,
     cache: &std::collections::HashMap<String, std::sync::Arc<[u8]>>,
-    ui: &ui::AppWindow,
+    ui: &slint_ui::AppWindow,
 ) {
     ui.set_profile_loading(p.loading);
     ui.set_profile_error_text(p.error.clone().unwrap_or_default().into());
@@ -896,7 +889,7 @@ fn apply_profile(
             member
                 .roles
                 .iter()
-                .map(|r| ui::RoleTagRow {
+                .map(|r| slint_ui::RoleTagRow {
                     name: r.name.clone().into(),
                     color: viewmodel::hex_color(&r.color),
                 })
@@ -915,13 +908,15 @@ fn apply_profile(
 // These caches let apply_chat() skip re-setting list models whose contents
 // have not actually changed since the last sync.
 thread_local! {
-    static CONVO_ROWS_CACHE: std::cell::RefCell<Vec<ui::ConversationRow>> =
+    static CONVO_ROWS_CACHE: std::cell::RefCell<Vec<slint_ui::ConversationRow>> =
         const { std::cell::RefCell::new(Vec::new()) };
-    static SERVER_ROWS_CACHE: std::cell::RefCell<Vec<ui::ServerRow>> =
+    static SERVER_ROWS_CACHE: std::cell::RefCell<Vec<slint_ui::ServerRow>> =
         const { std::cell::RefCell::new(Vec::new()) };
-    static TEXT_CHANNEL_ROWS_CACHE: std::cell::RefCell<Vec<ui::ChannelRow>> =
+    static TEXT_CHANNEL_ROWS_CACHE: std::cell::RefCell<Vec<slint_ui::ChannelRow>> =
         const { std::cell::RefCell::new(Vec::new()) };
-    static VOICE_CHANNEL_ROWS_CACHE: std::cell::RefCell<Vec<ui::ChannelRow>> =
+    static VOICE_CHANNEL_ROWS_CACHE: std::cell::RefCell<Vec<slint_ui::ChannelRow>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    static MSG_ROWS_CACHE: std::cell::RefCell<Vec<slint_ui::ChatMessageRow>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -929,11 +924,11 @@ fn rows_eq<T>(a: &[T], b: &[T], eq: impl Fn(&T, &T) -> bool) -> bool {
     a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| eq(x, y))
 }
 
-fn convo_row_eq(a: &ui::ConversationRow, b: &ui::ConversationRow) -> bool {
+fn convo_row_eq(a: &slint_ui::ConversationRow, b: &slint_ui::ConversationRow) -> bool {
     a.id == b.id && a.title == b.title && a.unread == b.unread && a.active == b.active
 }
 
-fn server_row_eq(a: &ui::ServerRow, b: &ui::ServerRow) -> bool {
+fn server_row_eq(a: &slint_ui::ServerRow, b: &slint_ui::ServerRow) -> bool {
     a.server_id == b.server_id
         && a.name == b.name
         && a.initial == b.initial
@@ -941,11 +936,50 @@ fn server_row_eq(a: &ui::ServerRow, b: &ui::ServerRow) -> bool {
         && a.active == b.active
 }
 
-fn channel_row_eq(a: &ui::ChannelRow, b: &ui::ChannelRow) -> bool {
+fn channel_row_eq(a: &slint_ui::ChannelRow, b: &slint_ui::ChannelRow) -> bool {
     a.conversation_id == b.conversation_id
         && a.label == b.label
         && a.is_voice == b.is_voice
         && a.active == b.active
+}
+
+fn msg_row_eq(a: &slint_ui::ChatMessageRow, b: &slint_ui::ChatMessageRow) -> bool {
+    // Images decode asynchronously on the UI thread, so compare their sizes
+    // too -- otherwise a freshly loaded avatar/attachment would never push.
+    let photo_same = a.author_photo.size() == b.author_photo.size();
+    let att_same = a.attachment.size() == b.attachment.size();
+    let reactions_same = a.reactions.row_count() == b.reactions.row_count()
+        && a.reactions.iter().zip(b.reactions.iter()).all(|(x, y)| {
+            x.emoji == y.emoji && x.count == y.count && x.reacted_by_me == y.reacted_by_me
+        });
+    a.id == b.id
+        && a.author_id == b.author_id
+        && a.author_name == b.author_name
+        && a.author_initial == b.author_initial
+        && a.author_avatar_color == b.author_avatar_color
+        && a.author_photo_url == b.author_photo_url
+        && a.is_bot == b.is_bot
+        && a.mine == b.mine
+        && a.encrypted == b.encrypted
+        && a.is_call_log == b.is_call_log
+        && a.grouped == b.grouped
+        && a.meta == b.meta
+        && a.reply_line == b.reply_line
+        && a.body == b.body
+        && a.body_danger == b.body_danger
+        && a.has_attachment == b.has_attachment
+        && a.attachment_loading == b.attachment_loading
+        && a.attachment_url == b.attachment_url
+        && a.can_edit == b.can_edit
+        && a.can_delete == b.can_delete
+        && a.can_purge == b.can_purge
+        && a.can_react == b.can_react
+        && a.mentions_me == b.mentions_me
+        && a.mentions_everyone == b.mentions_everyone
+        && a.ping_label == b.ping_label
+        && photo_same
+        && att_same
+        && reactions_same
 }
 
 /// Pushes `rows` to `set` only when they differ from the cached copy.
@@ -969,10 +1003,35 @@ fn set_rows_if_changed<T: Clone>(
     }
 }
 
+/// Decodes the latest remote screenshare JPEG into a `slint::Image`,
+/// memoized by `Arc` identity. Holding a strong ref to the previous frame's
+/// bytes guarantees that address can't be recycled for a *different* frame,
+/// so `Arc::ptr_eq` is a safe same-frame check -- this avoids re-decoding
+/// the same JPEG on every unrelated UI resync (typing indicators, etc.)
+/// while still picking up each new frame as it arrives.
+fn share_frame_image(bytes: &std::sync::Arc<[u8]>) -> Option<slint::Image> {
+    use std::cell::RefCell;
+    thread_local! {
+        static LAST_FRAME: RefCell<Option<(std::sync::Arc<[u8]>, slint::Image)>> =
+            RefCell::new(None);
+    }
+    LAST_FRAME.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if let Some((prev_bytes, img)) = slot.as_ref() {
+            if std::sync::Arc::ptr_eq(prev_bytes, bytes) {
+                return Some(img.clone());
+            }
+        }
+        let img = img_cache::decode(bytes)?;
+        *slot = Some((std::sync::Arc::clone(bytes), img.clone()));
+        Some(img)
+    })
+}
+
 fn apply_chat(
     c: &ChatRaw,
     cache: &std::collections::HashMap<String, std::sync::Arc<[u8]>>,
-    ui: &ui::AppWindow,
+    ui: &slint_ui::AppWindow,
 ) {
     let session = &c.session;
     let unread_count = c.conversations.iter().filter(|conv| conv.unread).count() as i32;
@@ -1001,11 +1060,11 @@ fn apply_chat(
         SidebarTab::Admin => "Admin".to_string(),
     };
     let ui_tab = match effective_tab {
-        SidebarTab::Chats => ui::SidebarTab::Chats,
-        SidebarTab::Friends => ui::SidebarTab::Friends,
-        SidebarTab::Requests => ui::SidebarTab::Requests,
-        SidebarTab::Servers => ui::SidebarTab::Servers,
-        SidebarTab::Admin => ui::SidebarTab::Admin,
+        SidebarTab::Chats => slint_ui::SidebarTab::Chats,
+        SidebarTab::Friends => slint_ui::SidebarTab::Friends,
+        SidebarTab::Requests => slint_ui::SidebarTab::Requests,
+        SidebarTab::Servers => slint_ui::SidebarTab::Servers,
+        SidebarTab::Admin => slint_ui::SidebarTab::Admin,
     };
 
     // ---- Rail ----
@@ -1152,7 +1211,22 @@ fn apply_chat(
     ui.set_chat_my_badge_fg(badge_fg);
 
     // ---- Chat area ----
-    let has_conversation = c.active_conversation.is_some();
+    // The chat area only shows a conversation that actually belongs to the
+    // tab currently on screen. Previously `active_conversation.is_some()` was
+    // enough, so switching tabs left the old chat visible (the main screen
+    // never followed the sidebar).
+    let has_conversation = c.active_conversation.is_some()
+        && match effective_tab {
+            SidebarTab::Chats => matches!(
+                c.active_conversation_kind.as_deref(),
+                Some("direct") | Some("group")
+            ),
+            SidebarTab::Servers => matches!(
+                c.active_conversation_kind.as_deref(),
+                Some("channel") | Some("voice")
+            ),
+            SidebarTab::Friends | SidebarTab::Requests | SidebarTab::Admin => false,
+        };
     ui.set_chat_has_conversation(has_conversation);
     let peer_friend = c
         .active_conversation_peer_id
@@ -1213,15 +1287,41 @@ fn apply_chat(
     ui.set_chat_voice_users_label(
         c.voice_users.iter().map(|u| u.display_name.as_str()).collect::<Vec<_>>().join(", ").into(),
     );
-    ui.set_chat_messages(
+    let volume_rows: Vec<slint_ui::VoiceUserVolumeRow> = {
+        let gains = c.voice_gains.lock().ok();
+        c.voice_users
+            .iter()
+            .map(|u| slint_ui::VoiceUserVolumeRow {
+                user_id: u.user_id.clone().into(),
+                name: u.display_name.clone().into(),
+                volume: gains
+                    .as_ref()
+                    .and_then(|m| m.get(&u.user_id).copied())
+                    .unwrap_or(1.0),
+            })
+            .collect()
+    };
+    ui.set_chat_voice_users(volume_rows.as_slice().into());
+    // Mention context for the row highlight: who "me" is, and whether
+    // @everyone pings in this conversation (channels/groups, not 1:1 DMs).
+    let my_mention_names: Vec<String> = {
+        let mut v = vec![session.display_name.clone(), session.username.clone()];
+        v.retain(|s| !s.trim().is_empty());
+        v
+    };
+    let everyone_allowed = matches!(c.active_conversation_kind.as_deref(), Some("channel") | Some("group"));
+    set_rows_if_changed(
+        &MSG_ROWS_CACHE,
         viewmodel::chat_message_rows(
             &c.messages,
             c.active_conversation_peer_id.as_ref().and_then(|id| c.peer_live_messages.get(id)).map(Vec::as_slice),
             &session.user_id,
             session.is_admin,
-        )
-        .as_slice()
-        .into(),
+            &my_mention_names,
+            everyone_allowed,
+        ),
+        msg_row_eq,
+        |rows| ui.set_chat_messages(rows.as_slice().into()),
     );
     ui.set_chat_quick_emojis(QUICK_REACT_EMOJIS.iter().map(|e| slint::SharedString::from(*e)).collect::<Vec<_>>().as_slice().into());
     let is_editing = c.editing_message_id.is_some();
@@ -1235,6 +1335,14 @@ fn apply_chat(
     let crypto_ready = !is_direct || peer_connected_now;
     ui.set_chat_crypto_ready(crypto_ready);
     ui.set_chat_message_input(c.message_input.clone().into());
+    ui.set_chat_mention_suggestions(
+        c.mention_suggestions
+            .iter()
+            .map(|s| slint::SharedString::from(s.as_str()))
+            .collect::<Vec<_>>()
+            .as_slice()
+            .into(),
+    );
     ui.set_chat_has_pending_attachment(c.has_pending_attachment);
     if let Some(bytes) = &c.pending_attachment_preview {
         if let Some(img) = img_cache::decode(bytes) {
@@ -1283,6 +1391,13 @@ fn apply_chat(
     ui.set_chat_members_bot_list(viewmodel::member_rows(&bot_members).as_slice().into());
 
     // ---- Call banner ----
+    ui.set_banner_peer_volume(
+        c.voice_gains
+            .lock()
+            .ok()
+            .and_then(|m| m.get("*").copied())
+            .unwrap_or(1.0),
+    );
     if let Some(call) = &c.my_call {
         let is_ringing = call.status == "ringing";
         ui.set_chat_call_visible(true);
@@ -1304,7 +1419,13 @@ fn apply_chat(
         ui.set_chat_is_sharing(c.is_sharing);
         ui.set_chat_share_picker_open(c.share_picker_open);
         ui.set_chat_share_targets(viewmodel::share_target_rows(&c.share_targets).as_slice().into());
-        ui.set_chat_has_remote_frame(c.has_remote_share_frame);
+        // The actual remote share image: decode the JPEG here on the UI
+        // thread (memoized -- see below) and hand it to the banner. Without
+        // this the banner showed "peer's screen" with a permanently blank
+        // image, i.e. viewing a share never worked.
+        let remote_frame_img = c.remote_share_frame.as_ref().and_then(share_frame_image);
+        ui.set_chat_remote_frame(remote_frame_img.clone().unwrap_or_default());
+        ui.set_chat_has_remote_frame(c.has_remote_share_frame && remote_frame_img.is_some());
         ui.set_chat_remote_frame_title(format!("{}'s screen", call.peer_display_name).into());
         ui.set_chat_share_expanded(c.share_view_expanded);
     } else {
@@ -1318,65 +1439,65 @@ fn apply_chat(
     // (the next resync, triggered by `AvatarImageLoaded`, fills them in).
     fill_model_photos(
         ui,
-        ui::AppWindow::get_chat_servers,
+        slint_ui::AppWindow::get_chat_servers,
         cache,
-        |r: &ui::ServerRow| r.icon_url.to_string(),
+        |r: &slint_ui::ServerRow| r.icon_url.to_string(),
         |r, img| r.icon = img,
     );
     fill_model_photos(
         ui,
-        ui::AppWindow::get_chat_people_hits,
+        slint_ui::AppWindow::get_chat_people_hits,
         cache,
-        |r: &ui::PeopleHitRow| r.photo_url.to_string(),
+        |r: &slint_ui::PeopleHitRow| r.photo_url.to_string(),
         |r, img| r.photo = img,
     );
     fill_model_photos(
         ui,
-        ui::AppWindow::get_chat_suggestions,
+        slint_ui::AppWindow::get_chat_suggestions,
         cache,
-        |r: &ui::SuggestionRow| r.photo_url.to_string(),
+        |r: &slint_ui::SuggestionRow| r.photo_url.to_string(),
         |r, img| r.photo = img,
     );
     fill_model_photos(
         ui,
-        ui::AppWindow::get_chat_friends,
+        slint_ui::AppWindow::get_chat_friends,
         cache,
-        |r: &ui::FriendRow| r.photo_url.to_string(),
+        |r: &slint_ui::FriendRow| r.photo_url.to_string(),
         |r, img| r.photo = img,
     );
     fill_model_photos(
         ui,
-        ui::AppWindow::get_chat_incoming_requests,
+        slint_ui::AppWindow::get_chat_incoming_requests,
         cache,
-        |r: &ui::IncomingRequestRow| r.photo_url.to_string(),
+        |r: &slint_ui::IncomingRequestRow| r.photo_url.to_string(),
         |r, img| r.photo = img,
     );
     fill_model_photos(
         ui,
-        ui::AppWindow::get_chat_outgoing_requests,
+        slint_ui::AppWindow::get_chat_outgoing_requests,
         cache,
-        |r: &ui::OutgoingRequestRow| r.photo_url.to_string(),
+        |r: &slint_ui::OutgoingRequestRow| r.photo_url.to_string(),
         |r, img| r.photo = img,
     );
     fill_model_photos(
         ui,
-        ui::AppWindow::get_chat_members_online_list,
+        slint_ui::AppWindow::get_chat_members_online_list,
         cache,
-        |r: &ui::MemberRow| r.photo_url.to_string(),
+        |r: &slint_ui::MemberRow| r.photo_url.to_string(),
         |r, img| r.photo = img,
     );
     fill_model_photos(
         ui,
-        ui::AppWindow::get_chat_members_offline_list,
+        slint_ui::AppWindow::get_chat_members_offline_list,
         cache,
-        |r: &ui::MemberRow| r.photo_url.to_string(),
+        |r: &slint_ui::MemberRow| r.photo_url.to_string(),
         |r, img| r.photo = img,
     );
     fill_model_photos(
         ui,
-        ui::AppWindow::get_chat_members_bot_list,
+        slint_ui::AppWindow::get_chat_members_bot_list,
         cache,
-        |r: &ui::MemberRow| r.photo_url.to_string(),
+        |r: &slint_ui::MemberRow| r.photo_url.to_string(),
         |r, img| r.photo = img,
     );
     {
@@ -1396,7 +1517,7 @@ fn apply_chat(
     }
 }
 
-fn sync_ui(app: &App, ui_weak: &slint::Weak<ui::AppWindow>) {
+fn sync_ui(app: &App, ui_weak: &slint::Weak<slint_ui::AppWindow>) {
     let snapshot = UiSnapshot::from_app(app);
     let ui_weak = ui_weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
@@ -1412,8 +1533,8 @@ fn sync_ui(app: &App, ui_weak: &slint::Weak<ui::AppWindow>) {
 /// row's URL from the snapshot's `image_cache` and assign the result. Rows
 /// whose image hasn't been fetched yet keep their colored-initial fallback.
 fn fill_model_photos<T: Clone + 'static>(
-    ui: &ui::AppWindow,
-    get: impl Fn(&ui::AppWindow) -> slint::ModelRc<T>,
+    ui: &slint_ui::AppWindow,
+    get: impl Fn(&slint_ui::AppWindow) -> slint::ModelRc<T>,
     cache: &std::collections::HashMap<String, std::sync::Arc<[u8]>>,
     url_of: impl Fn(&T) -> String,
     mut set_photo: impl FnMut(&mut T, slint::Image),
@@ -1432,12 +1553,12 @@ fn fill_model_photos<T: Clone + 'static>(
 
 /// Wires every Slint UI callback to send the matching `Message` into the
 /// update loop -- the Slint-side equivalent of iced's `.on_press(Message::X)`.
-fn wire_callbacks(ui: &ui::AppWindow, tx: UnboundedSender<Message>) {
+fn wire_callbacks(ui: &slint_ui::AppWindow, tx: UnboundedSender<Message>) {
     let t = tx.clone();
     ui.on_auth_switch_mode(move |mode| {
         let mode = match mode {
-            ui::AuthMode::Login => crate::types::AuthMode::Login,
-            ui::AuthMode::Register => crate::types::AuthMode::Register,
+            slint_ui::AuthMode::Login => crate::state::types::AuthMode::Login,
+            slint_ui::AuthMode::Register => crate::state::types::AuthMode::Register,
         };
         let _ = t.send(Message::SwitchAuthMode(mode));
     });
@@ -1483,7 +1604,7 @@ fn wire_callbacks(ui: &ui::AppWindow, tx: UnboundedSender<Message>) {
 /// drawer, call banner) to the matching `Message`. Mechanical 1:1 mapping,
 /// same role as `.on_press(Message::X)` throughout the old
 /// src/view/chat.rs.
-fn wire_chat_callbacks(ui: &ui::AppWindow, tx: &UnboundedSender<Message>) {
+fn wire_chat_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Message>) {
     macro_rules! on0 {
         ($setter:ident, $msg:expr) => {{
             let t = tx.clone();
@@ -1601,6 +1722,7 @@ fn wire_chat_callbacks(ui: &ui::AppWindow, tx: &UnboundedSender<Message>) {
     on0!(on_chat_join_voice, Message::JoinVoiceChannel);
     on0!(on_chat_leave_voice, Message::LeaveVoiceChannel);
     on1!(on_chat_message_input_edited, |t: slint::SharedString| Message::MessageInputChanged(t.to_string()));
+    on1!(on_chat_mention_pick, |name: slint::SharedString| Message::MentionSuggestionPicked(name.to_string()));
     on0!(on_chat_send, Message::SendMessage);
     on0!(on_chat_pick_attachment, Message::PickAttachmentImage);
     on0!(on_chat_remove_attachment, Message::RemovePendingAttachment);
@@ -1619,6 +1741,7 @@ fn wire_chat_callbacks(ui: &ui::AppWindow, tx: &UnboundedSender<Message>) {
     on1!(on_chat_delete, |id: slint::SharedString| Message::DeleteMessage(id.to_string()));
     on1!(on_chat_purge, |id: slint::SharedString| Message::PurgeMessage(id.to_string()));
     on1!(on_chat_open_attachment, |url: slint::SharedString| Message::OpenAttachmentPreview(url.to_string()));
+    on2!(on_chat_voice_volume_changed, |id: slint::SharedString, v: f32| Message::VoiceVolumeChanged(id.to_string(), v));
 
     // ---- Members drawer ----
     on0!(on_chat_toggle_members, Message::ToggleMembersPanel);
@@ -1640,7 +1763,7 @@ fn wire_chat_callbacks(ui: &ui::AppWindow, tx: &UnboundedSender<Message>) {
 
 /// Wires the `profile_*` Slint callbacks -- port of src/view/profile.rs's
 /// button handlers.
-fn wire_profile_callbacks(ui: &ui::AppWindow, tx: &UnboundedSender<Message>) {
+fn wire_profile_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Message>) {
     macro_rules! on0 {
         ($setter:ident, $msg:expr) => {{
             let t = tx.clone();
@@ -1672,7 +1795,7 @@ fn wire_profile_callbacks(ui: &ui::AppWindow, tx: &UnboundedSender<Message>) {
 
 /// Wires the `settings_*` Slint callbacks -- port of src/view/settings.rs's
 /// button handlers.
-fn wire_settings_callbacks(ui: &ui::AppWindow, tx: &UnboundedSender<Message>) {
+fn wire_settings_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Message>) {
     macro_rules! on0 {
         ($setter:ident, $msg:expr) => {{
             let t = tx.clone();
@@ -1695,11 +1818,11 @@ fn wire_settings_callbacks(ui: &ui::AppWindow, tx: &UnboundedSender<Message>) {
         let t = tx.clone();
         ui.on_settings_category_changed(move |cat| {
             let cat = match cat {
-                ui::SettingsCategory::Account => SettingsCategory::Account,
-                ui::SettingsCategory::Privacy => SettingsCategory::Privacy,
-                ui::SettingsCategory::Bots => SettingsCategory::Bots,
-                ui::SettingsCategory::Voice => SettingsCategory::Voice,
-                ui::SettingsCategory::About => SettingsCategory::About,
+                slint_ui::SettingsCategory::Account => SettingsCategory::Account,
+                slint_ui::SettingsCategory::Privacy => SettingsCategory::Privacy,
+                slint_ui::SettingsCategory::Bots => SettingsCategory::Bots,
+                slint_ui::SettingsCategory::Voice => SettingsCategory::Voice,
+                slint_ui::SettingsCategory::About => SettingsCategory::About,
             };
             let _ = t.send(Message::SettingsCategoryChanged(cat));
         });
@@ -1736,12 +1859,13 @@ fn wire_settings_callbacks(ui: &ui::AppWindow, tx: &UnboundedSender<Message>) {
     on1!(on_settings_output_device_selected, |d: slint::SharedString| Message::SettingsOutputDeviceSelected(d.to_string()));
     on1!(on_settings_noise_gate_changed, |v: f32| Message::NoiseGateChanged(v));
     on0!(on_settings_check_for_update, Message::CheckForUpdate);
+    on0!(on_settings_restart_update, Message::RestartAndUpdate);
     on0!(on_settings_measure_ping, Message::MeasurePing);
 }
 
 /// Wires the `ss_*` (server settings) Slint callbacks -- port of
 /// src/view/server_settings.rs's button handlers.
-fn wire_server_settings_callbacks(ui: &ui::AppWindow, tx: &UnboundedSender<Message>) {
+fn wire_server_settings_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Message>) {
     macro_rules! on0 {
         ($setter:ident, $msg:expr) => {{
             let t = tx.clone();
@@ -1772,12 +1896,12 @@ fn wire_server_settings_callbacks(ui: &ui::AppWindow, tx: &UnboundedSender<Messa
         let t = tx.clone();
         ui.on_ss_category_changed(move |cat| {
             let cat = match cat {
-                ui::ServerSettingsCategory::Overview => ServerSettingsCategory::Overview,
-                ui::ServerSettingsCategory::Channels => ServerSettingsCategory::Channels,
-                ui::ServerSettingsCategory::Members => ServerSettingsCategory::Members,
-                ui::ServerSettingsCategory::Roles => ServerSettingsCategory::Roles,
-                ui::ServerSettingsCategory::Invites => ServerSettingsCategory::Invites,
-                ui::ServerSettingsCategory::Danger => ServerSettingsCategory::Danger,
+                slint_ui::ServerSettingsCategory::Overview => ServerSettingsCategory::Overview,
+                slint_ui::ServerSettingsCategory::Channels => ServerSettingsCategory::Channels,
+                slint_ui::ServerSettingsCategory::Members => ServerSettingsCategory::Members,
+                slint_ui::ServerSettingsCategory::Roles => ServerSettingsCategory::Roles,
+                slint_ui::ServerSettingsCategory::Invites => ServerSettingsCategory::Invites,
+                slint_ui::ServerSettingsCategory::Danger => ServerSettingsCategory::Danger,
             };
             let _ = t.send(Message::ServerSettingsCategoryChanged(cat));
         });

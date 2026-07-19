@@ -1,5 +1,6 @@
 //! Voice call engine: WebRTC peer connection (Google STUN, trickle ICE),
-//! G.711 PCMU audio over a local track, and Convex as the signaling channel
+//! IMA-ADPCM @ 24 kHz audio over a local track (see src/adpcm.rs), and
+//! Convex as the signaling channel
 //! (the `calls` table carries the offer/answer SDP; both peers watch the
 //! same reactive `calls:myCall` query to learn when the other side answers
 //! or hangs up). ICE candidates trickle over `calls:addIceCandidate` /
@@ -11,7 +12,7 @@
 //! playback each run on a dedicated OS thread because `cpal::Stream` is not
 //! `Send` and cannot live inside an async task.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -23,7 +24,7 @@ use futures::channel::mpsc::Sender as EventSender;
 use futures::{SinkExt, StreamExt};
 use maplit::btreemap;
 use webrtc::api::interceptor_registry::register_default_interceptors;
-use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_PCMU};
+use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::data_channel_state::RTCDataChannelState;
@@ -32,17 +33,18 @@ use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit}
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
-use webrtc::media::Sample;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
-use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
-use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
+use webrtc::rtp_transceiver::rtp_codec::{
+    RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType,
+};
+use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_local::TrackLocal;
 use webrtc::track::track_remote::TrackRemote;
 
-use crate::g711;
-use crate::screenshare::{self, ShareTarget};
+use super::adpcm;
+use super::screenshare::{self, ShareTarget};
 
 /// Optional TURN relay, baked in via `build.rs` from `.env.local`/`.env`
 /// (`TURN_URL`/`TURN_USERNAME`/`TURN_CREDENTIAL`), overridable at runtime
@@ -53,7 +55,7 @@ use crate::screenshare::{self, ShareTarget};
 /// relay. Setting these three values (e.g. pointing at a self-hosted
 /// coturn instance) is the only step needed to add one -- no other code
 /// changes required.
-pub(crate) fn turn_ice_server() -> Option<RTCIceServer> {
+pub(super) fn turn_ice_server() -> Option<RTCIceServer> {
     const BAKED_TURN_URL: &str = env!("TURN_URL");
     const BAKED_TURN_USERNAME: &str = env!("TURN_USERNAME");
     const BAKED_TURN_CREDENTIAL: &str = env!("TURN_CREDENTIAL");
@@ -106,8 +108,8 @@ impl JitterEstimator {
     fn new() -> Self {
         Self {
             last_arrival: None,
-            // 20ms is this call's nominal frame interval (160 samples at
-            // 8kHz); used only as the initial reference before the first
+            // 20ms is this call's nominal frame interval (480 samples at
+            // 24kHz); used only as the initial reference before the first
             // real interval is observed.
             last_interval_ms: 20.0,
             jitter_ms: 0.0,
@@ -115,7 +117,7 @@ impl JitterEstimator {
     }
 
     /// Call once per received packet. Returns the current target buffer
-    /// depth in samples (at this call's fixed 8kHz sample rate).
+    /// depth in samples (at this call's fixed 24kHz wire sample rate).
     fn on_packet_arrival(&mut self) -> usize {
         let now = std::time::Instant::now();
         if let Some(last) = self.last_arrival {
@@ -128,12 +130,12 @@ impl JitterEstimator {
 
         let target_ms =
             (self.jitter_ms * 4.0 + JITTER_TARGET_MIN_MS).clamp(JITTER_TARGET_MIN_MS, JITTER_TARGET_MAX_MS);
-        (target_ms * 8.0) as usize // 8 samples/ms at 8kHz
+        (target_ms * (adpcm::WIRE_SAMPLE_RATE as f32 / 1000.0)) as usize
     }
 }
 
 /// Default noise gate threshold (linear amplitude, 0..1).
-pub const DEFAULT_NOISE_GATE: f32 = 0.008;
+pub(crate) const DEFAULT_NOISE_GATE: f32 = 0.008;
 
 /// Screen-share frames go out over the call's WebRTC data channel in fixed
 /// chunks prefixed with a small header, since there's no real video
@@ -142,15 +144,95 @@ pub const DEFAULT_NOISE_GATE: f32 = 0.008;
 const SHARE_CHUNK_SIZE: usize = 12_000;
 const MSG_KIND_FRAME: u8 = 0;
 const MSG_KIND_STOP: u8 = 1;
+/// kind byte + frame id (u32 LE) + chunk index (u16 LE) + chunk count
+/// (u16 LE) ahead of each chunk's payload bytes.
+const SHARE_HEADER_LEN: usize = 9;
+
+/// Splits one JPEG frame into the wire messages `send_share_frame` puts on
+/// the data channel. Pure so the chunking stays unit-testable (see the
+/// round-trip test against `ShareReassembler` below).
+fn share_frame_chunks(frame_id: u32, jpeg: &[u8]) -> Vec<Vec<u8>> {
+    let chunk_count = jpeg.len().div_ceil(SHARE_CHUNK_SIZE).max(1) as u16;
+    jpeg.chunks(SHARE_CHUNK_SIZE)
+        .enumerate()
+        .map(|(index, chunk)| {
+            let mut msg = Vec::with_capacity(SHARE_HEADER_LEN + chunk.len());
+            msg.push(MSG_KIND_FRAME);
+            msg.extend_from_slice(&frame_id.to_le_bytes());
+            msg.extend_from_slice(&(index as u16).to_le_bytes());
+            msg.extend_from_slice(&chunk_count.to_le_bytes());
+            msg.extend_from_slice(chunk);
+            msg
+        })
+        .collect()
+}
+
+/// What one inbound data-channel message means for the share stream.
+#[derive(Debug)]
+enum ShareMessage {
+    /// A complete reassembled JPEG frame.
+    Frame(Vec<u8>),
+    /// The peer stopped sharing; clear any displayed frame.
+    Stopped,
+}
+
+/// Reassembles chunked share frames from inbound data-channel messages.
+/// Chunks for a given frame arrive in order (the data channel is ordered by
+/// default), so reassembly just needs to notice when the frame id changes
+/// and when the last chunk of a frame has arrived -- no out-of-order
+/// bookkeeping required. Extracted from the `on_message` closure so the
+/// state machine can be unit-tested without a live `RTCDataChannel`.
+struct ShareReassembler {
+    current_frame: Option<(u32, Vec<u8>)>,
+}
+
+impl ShareReassembler {
+    fn new() -> Self {
+        Self {
+            current_frame: None,
+        }
+    }
+
+    fn handle(&mut self, data: &[u8]) -> Option<ShareMessage> {
+        let (&kind, rest) = data.split_first()?;
+        match kind {
+            MSG_KIND_STOP => {
+                self.current_frame = None;
+                Some(ShareMessage::Stopped)
+            }
+            MSG_KIND_FRAME if rest.len() >= SHARE_HEADER_LEN - 1 => {
+                let frame_id = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
+                let chunk_index = u16::from_le_bytes([rest[4], rest[5]]);
+                let chunk_count = u16::from_le_bytes([rest[6], rest[7]]);
+                let payload = &rest[SHARE_HEADER_LEN - 1..];
+
+                if self.current_frame.as_ref().map(|(id, _)| *id) != Some(frame_id) {
+                    self.current_frame = Some((frame_id, Vec::new()));
+                }
+                if let Some((_, buf)) = self.current_frame.as_mut() {
+                    buf.extend_from_slice(payload);
+                }
+
+                if chunk_index + 1 >= chunk_count {
+                    if let Some((_, buf)) = self.current_frame.take() {
+                        return Some(ShareMessage::Frame(buf));
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+}
 
 /// Sent from the UI into a running call to start/stop screen sharing.
-pub enum ShareCommand {
+pub(crate) enum ShareCommand {
     Start(ShareTarget),
     Stop,
 }
 
 #[derive(Debug, Clone)]
-pub enum CallEvent {
+pub(crate) enum CallEvent {
     /// Emitted once the caller's row has been created on the server.
     Created,
     Connecting,
@@ -167,39 +249,52 @@ pub enum CallEvent {
     ScreenShareFailed(String),
 }
 
-pub struct CallParams {
-    pub client: ConvexClient,
-    pub session_token: String,
-    pub is_caller: bool,
+pub(crate) struct CallParams {
+    pub(crate) client: ConvexClient,
+    pub(crate) session_token: String,
+    pub(crate) is_caller: bool,
     /// Required for the callee (the call already exists on the server).
-    pub call_id: Option<String>,
+    pub(crate) call_id: Option<String>,
     /// Required for the caller (used to create the call).
-    pub conversation_id: Option<String>,
-    pub callee_id: Option<String>,
+    pub(crate) conversation_id: Option<String>,
+    pub(crate) callee_id: Option<String>,
     /// Required for the callee (the offer received from `calls:myCall`).
-    pub offer_sdp: Option<String>,
-    pub input_device: Option<String>,
-    pub output_device: Option<String>,
-    pub muted: Arc<AtomicBool>,
+    pub(crate) offer_sdp: Option<String>,
+    pub(crate) input_device: Option<String>,
+    pub(crate) output_device: Option<String>,
+    pub(crate) muted: Arc<AtomicBool>,
     /// Speaker mute, independent of `muted` (which is the microphone). A
     /// "Mute all" control in the UI sets both together.
-    pub output_muted: Arc<AtomicBool>,
+    pub(crate) output_muted: Arc<AtomicBool>,
     /// Noise gate threshold, stored as `f32::to_bits()` so it can be tuned
     /// live (from Settings) while a call is in progress.
-    pub noise_gate: Arc<AtomicU32>,
+    pub(crate) noise_gate: Arc<AtomicU32>,
+    /// Per-peer volume gains; a 1:1 call always reads the "*" key.
+    pub(crate) gains: Arc<Mutex<HashMap<String, f32>>>,
     /// Start/stop screen-share commands from the UI, sent while this call
     /// is already running.
-    pub share_rx: tokio::sync::mpsc::UnboundedReceiver<ShareCommand>,
+    pub(crate) share_rx: tokio::sync::mpsc::UnboundedReceiver<ShareCommand>,
 }
 
-pub fn list_input_devices() -> Vec<String> {
+/// Multiply decoded PCM samples by a per-peer volume gain (1.0 = unity),
+/// clamping back into the i16 range. No-op fast path at unity gain.
+pub(super) fn apply_gain(samples: &mut [i16], gain: f32) {
+    if gain == 1.0 {
+        return;
+    }
+    for s in samples.iter_mut() {
+        *s = (*s as f32 * gain).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+    }
+}
+
+pub(crate) fn list_input_devices() -> Vec<String> {
     let host = cpal::default_host();
     host.input_devices()
         .map(|devices| devices.filter_map(|d| d.name().ok()).collect())
         .unwrap_or_default()
 }
 
-pub fn list_output_devices() -> Vec<String> {
+pub(crate) fn list_output_devices() -> Vec<String> {
     let host = cpal::default_host();
     host.output_devices()
         .map(|devices| devices.filter_map(|d| d.name().ok()).collect())
@@ -283,7 +378,7 @@ impl OnePoleHighPass {
 }
 
 /// Downward expander / noise gate with a soft knee so it doesn't chop speech
-/// onsets into square-ish artifacts that G.711 then turns into harsh crackle.
+/// onsets into square-ish artifacts that the codec then turns into crackle.
 struct NoiseGate {
     envelope: f32,
     gain: f32,
@@ -315,7 +410,7 @@ impl NoiseGate {
 
         // Soft knee around the threshold: full open above ~1.6x threshold,
         // fully closed below ~0.5x, linear fade between. Hard open/close
-        // was producing audible gate chatter that sounded metallic on G.711.
+        // was producing audible gate chatter that sounded metallic on the wire.
         let target_gain = if threshold <= 0.0 {
             1.0
         } else {
@@ -339,10 +434,10 @@ impl NoiseGate {
     }
 }
 
-/// Peak + RMS hybrid AGC. Quiet mics get a modest boost so they survive
-/// G.711 quantization; loud Windows mics get pulled down so they don't sit
-/// against full scale. Gain reduction is much faster than increase, which
-/// stops the classic AGC pump into clipping after a loud syllable.
+/// Peak + RMS hybrid AGC. Quiet mics get a modest boost so they stay well
+/// above the ADPCM noise floor; loud Windows mics get pulled down so they
+/// don't sit against full scale. Gain reduction is much faster than increase,
+/// which stops the classic AGC pump into clipping after a loud syllable.
 struct AutoGain {
     peak: f32,
     rms: f32,
@@ -351,7 +446,8 @@ struct AutoGain {
 
 impl AutoGain {
     /// Target speech level into the codec (linear 0..1). Kept moderate —
-    /// G.711 already has headroom bias, and pushing hotter only buys grit.
+    /// ADPCM tracks quiet detail better than µ-law did, and pushing hotter
+    /// only buys grit.
     const TARGET_PEAK: f32 = 0.18;
     const TARGET_RMS: f32 = 0.055;
     const MAX_GAIN: f32 = 1.9;
@@ -391,18 +487,20 @@ impl AutoGain {
 }
 
 /// Mild high-frequency taming: blends the dry signal with a lower-cutoff
-/// low-pass so sibilants / G.711 band-edge hash don't sound like a microwave.
+/// low-pass so sibilants / ADPCM band-edge hash don't sound harsh. At 24 kHz
+/// the passband is wide, so the cutoff sits near the top of the speech band
+/// instead of the old 2.2 kHz telephone voicing.
 struct Deharsh {
     lp: TwoPoleLowPass,
-    /// 0 = dry, 1 = fully low-passed. ~0.4 softens without muddying speech.
+    /// 0 = dry, 1 = fully low-passed. A light touch softens without dulling.
     amount: f32,
 }
 
 impl Deharsh {
     fn new(sample_rate: f32) -> Self {
         Self {
-            lp: TwoPoleLowPass::new(sample_rate, 2200.0),
-            amount: 0.38,
+            lp: TwoPoleLowPass::new(sample_rate, 9000.0),
+            amount: 0.25,
         }
     }
 
@@ -433,7 +531,7 @@ impl TwoPoleLowPass {
 
 /// ~24 dB/oct low-pass for anti-alias / reconstruction. Two poles alone left
 /// too much energy near Nyquist, which folded into a harsh metallic sheen
-/// after decimation to 8 kHz.
+/// after decimation to the wire rate.
 struct FourPoleLowPass {
     a: TwoPoleLowPass,
     b: TwoPoleLowPass,
@@ -503,18 +601,19 @@ impl Rng {
     }
 
     /// Triangular dither in roughly [-1, 1], scaled to ~1 LSB of 16-bit
-    /// before quantization so G.711's coarse steps hiss rather than grit.
+    /// before quantization so low-level detail hisses rather than grits.
     fn triangular_dither(&mut self) -> f32 {
         self.next_unit() - self.next_unit()
     }
 }
 
-/// G.711 telephone band is ~300–3400 Hz. Cut earlier with a steep filter so
-/// decimation to 8 kHz does not fold residual highs into the passband.
-const ANTI_ALIAS_CUTOFF_HZ: f32 = 2850.0;
+/// The 24 kHz wire rate carries ~12 kHz of bandwidth. Cut just under
+/// Nyquist with a steep filter so decimation to 24 kHz does not fold
+/// residual ultrasonic energy into the passband.
+const ANTI_ALIAS_CUTOFF_HZ: f32 = 10_500.0;
 
 /// Playback reconstruction cutoff (applied after upsampling).
-const PLAYBACK_SMOOTH_HZ: f32 = 3000.0;
+const PLAYBACK_SMOOTH_HZ: f32 = 10_500.0;
 
 /// DC / rumble cut. Kept low so speech stays natural, not thin.
 const HIGH_PASS_CUTOFF_HZ: f32 = 75.0;
@@ -523,10 +622,10 @@ const HIGH_PASS_CUTOFF_HZ: f32 = 75.0;
 /// run hot and leave no headroom for AGC or peaks.
 const INPUT_PAD: f32 = 0.65;
 
-/// Overall level into the μ-law encoder after processing (extra safety).
+/// Overall level into the ADPCM encoder after processing (extra safety).
 const ENCODE_LEVEL: f32 = 0.82;
 
-/// Playback volume trim so decoded full-scale G.711 is not ear-splitting.
+/// Playback volume trim so decoded full-scale audio is not ear-splitting.
 const PLAYBACK_GAIN: f32 = 0.72;
 
 /// Shared mic processing state used by every sample-format callback.
@@ -540,7 +639,10 @@ struct CapturePipeline {
     phase: f32,
     phase_step: f32,
     prev_shaped: f32,
-    frame_buf: Vec<u8>,
+    /// 24 kHz mono PCM accumulating toward one 20 ms wire frame.
+    frame_pcm: Vec<i16>,
+    /// ADPCM encoder state (predictor/step carry across frame boundaries).
+    encoder: adpcm::AdpcmEncoder,
     highpass: TwoPoleHighPass,
     lowpass: FourPoleLowPass,
     deharsh: Deharsh,
@@ -557,7 +659,7 @@ impl CapturePipeline {
         noise_gate: Arc<AtomicU32>,
         frame_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     ) -> Self {
-        let rate_hz = input_rate.max(8000);
+        let rate_hz = input_rate.max(adpcm::WIRE_SAMPLE_RATE);
         let rate = rate_hz as f32;
         Self {
             channels: channels.max(1),
@@ -566,10 +668,11 @@ impl CapturePipeline {
             noise_gate,
             frame_tx,
             phase: 0.0,
-            // Advance 8 kHz of "output time" per input sample.
-            phase_step: 8000.0 / rate,
+            // Advance one wire-rate tick of "output time" per input sample.
+            phase_step: adpcm::WIRE_SAMPLE_RATE as f32 / rate,
             prev_shaped: 0.0,
-            frame_buf: Vec::with_capacity(160),
+            frame_pcm: Vec::with_capacity(adpcm::FRAME_SAMPLES),
+            encoder: adpcm::AdpcmEncoder::new(),
             highpass: TwoPoleHighPass::new(rate, HIGH_PASS_CUTOFF_HZ),
             lowpass: FourPoleLowPass::new(rate, ANTI_ALIAS_CUTOFF_HZ),
             deharsh: Deharsh::new(rate),
@@ -628,11 +731,12 @@ impl CapturePipeline {
             let shaped = self.deharsh.process(shaped);
             let shaped = soft_limit(shaped * ENCODE_LEVEL);
 
-            // Linear-interpolated decimation to 8 kHz (less harsh than hold).
+            // Linear-interpolated decimation to the wire rate (less harsh
+            // than hold).
             self.phase += self.phase_step;
             while self.phase >= 1.0 {
                 // Fraction of the current [prev → shaped] step where the
-                // 8 kHz tick lands (phase crossed 1.0 during this sample).
+                // wire-rate tick lands (phase crossed 1.0 during this sample).
                 let phase_before = self.phase - self.phase_step;
                 let alpha =
                     ((1.0 - phase_before) / self.phase_step).clamp(0.0, 1.0);
@@ -641,9 +745,11 @@ impl CapturePipeline {
                 let dither = self.rng.triangular_dither() * (1.5 / i16::MAX as f32);
                 let sample_i16 =
                     ((lerped + dither).clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-                self.frame_buf.push(g711::linear_to_ulaw(sample_i16));
-                if self.frame_buf.len() >= 160 {
-                    let chunk = std::mem::replace(&mut self.frame_buf, Vec::with_capacity(160));
+                self.frame_pcm.push(sample_i16);
+                if self.frame_pcm.len() >= adpcm::FRAME_SAMPLES {
+                    let pcm =
+                        std::mem::replace(&mut self.frame_pcm, Vec::with_capacity(adpcm::FRAME_SAMPLES));
+                    let chunk = self.encoder.encode_frame(&pcm);
                     let _ = self.frame_tx.send(chunk);
                 }
             }
@@ -668,7 +774,7 @@ fn i32_to_f32(s: i32) -> f32 {
 /// Returns `Ok(())` once a capture thread is running against a real device.
 /// Unsupported sample formats and missing devices become `Err` with a
 /// user-facing message (Windows WASAPI often exposes I16, not only F32).
-pub(crate) fn spawn_capture_thread(
+pub(super) fn spawn_capture_thread(
     device_name: Option<String>,
     muted: Arc<AtomicBool>,
     noise_gate: Arc<AtomicU32>,
@@ -701,8 +807,11 @@ pub(crate) fn spawn_capture_thread(
     let channels = stream_config.channels.max(1) as usize;
     let input_rate = stream_config.sample_rate.0.max(8000);
 
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     std::thread::spawn(move || {
-        let err_fn = |_err| {};
+        let err_fn = |err| {
+            eprintln!("Talkyss call: microphone stream error: {err}");
+        };
         let stream = match sample_format {
             cpal::SampleFormat::F32 => {
                 let mut pipe =
@@ -771,22 +880,34 @@ pub(crate) fn spawn_capture_thread(
             _ => return,
         };
 
-        let Ok(stream) = stream else {
-            eprintln!("Talkyss call: could not open microphone stream");
-            return;
+        let stream = match stream {
+            Ok(stream) => stream,
+            Err(err) => {
+                let _ = ready_tx.send(Err(format!(
+                    "Could not open the microphone: {err}. Check Windows mic privacy settings."
+                )));
+                return;
+            }
         };
-        if stream.play().is_err() {
-            eprintln!("Talkyss call: could not start microphone stream");
+        if let Err(err) = stream.play() {
+            let _ = ready_tx.send(Err(format!("Could not start the microphone: {err}")));
             return;
         }
+        let _ = ready_tx.send(Ok(()));
         let _ = stop_rx.recv();
         drop(stream);
     });
 
-    Ok(())
+    // Block until the thread reports whether the stream really
+    // opened -- previously these failures only went to stderr, so a
+    // call could connect with a dead microphone and zero UI signal.
+    match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(result) => result,
+        Err(_) => Err("The microphone stream did not respond in time.".into()),
+    }
 }
 
-/// Shared playback state: 8 kHz mono → device rate/channels with cubic
+/// Shared playback state: 24 kHz wire mono → device rate/channels with cubic
 /// interpolation, reconstruction LPF, deharsh, soft peak limit, mute.
 struct PlaybackPipeline {
     channels: usize,
@@ -814,7 +935,7 @@ impl PlaybackPipeline {
         let rate = output_rate as f32;
         Self {
             channels: channels.max(1),
-            step: 8000.0_f32 / rate,
+            step: adpcm::WIRE_SAMPLE_RATE as f32 / rate,
             phase: 0.0,
             s0: 0.0,
             s1: 0.0,
@@ -846,7 +967,7 @@ impl PlaybackPipeline {
             self.s3 = self.pull_sample();
         }
         // Catmull-Rom between s1 and s2 — smoother than linear, less
-        // metallic image content after upsampling from 8 kHz.
+        // metallic image content after upsampling from the wire rate.
         let t = self.phase;
         let t2 = t * t;
         let t3 = t2 * t;
@@ -912,7 +1033,7 @@ impl PlaybackPipeline {
 }
 
 /// Plays back decoded audio from a shared jitter buffer.
-pub(crate) fn spawn_playback_thread(
+pub(super) fn spawn_playback_thread(
     device_name: Option<String>,
     jitter: Arc<Mutex<VecDeque<i16>>>,
     output_muted: Arc<AtomicBool>,
@@ -943,8 +1064,11 @@ pub(crate) fn spawn_playback_thread(
     let channels = stream_config.channels.max(1) as usize;
     let output_rate = stream_config.sample_rate.0.max(8000);
 
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     std::thread::spawn(move || {
-        let err_fn = |_err| {};
+        let err_fn = |err| {
+            eprintln!("Talkyss call: speaker stream error: {err}");
+        };
         let stream = match sample_format {
             cpal::SampleFormat::F32 => {
                 let mut pipe =
@@ -1009,19 +1133,31 @@ pub(crate) fn spawn_playback_thread(
             _ => return,
         };
 
-        let Ok(stream) = stream else {
-            eprintln!("Talkyss call: could not open speaker stream");
-            return;
+        let stream = match stream {
+            Ok(stream) => stream,
+            Err(err) => {
+                let _ = ready_tx.send(Err(format!(
+                    "Could not open the speaker: {err}."
+                )));
+                return;
+            }
         };
-        if stream.play().is_err() {
-            eprintln!("Talkyss call: could not start speaker stream");
+        if let Err(err) = stream.play() {
+            let _ = ready_tx.send(Err(format!("Could not start the speaker: {err}")));
             return;
         }
+        let _ = ready_tx.send(Ok(()));
         let _ = stop_rx.recv();
         drop(stream);
     });
 
-    Ok(())
+    // Block until the thread reports whether the stream really
+    // opened -- previously these failures only went to stderr, so a
+    // call could connect with a dead speaker and zero UI signal.
+    match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(result) => result,
+        Err(_) => Err("The speaker stream did not respond in time.".into()),
+    }
 }
 
 async fn fail(output: &mut EventSender<CallEvent>, message: impl Into<String>) {
@@ -1029,49 +1165,28 @@ async fn fail(output: &mut EventSender<CallEvent>, message: impl Into<String>) {
 }
 
 /// Registers the message handler that reassembles incoming screen-share
-/// frames. Chunks for a given frame arrive in order (the data channel is
-/// ordered by default), so reassembly just needs to notice when the
-/// frame id changes and when the last chunk of a frame has arrived --
-/// no out-of-order bookkeeping required.
+/// frames (see `ShareReassembler` for the chunk protocol).
 fn attach_data_channel_handlers(dc: Arc<RTCDataChannel>, output: EventSender<CallEvent>) {
-    let mut current_frame: Option<(u32, Vec<u8>)> = None;
+    let reassembler = Arc::new(Mutex::new(ShareReassembler::new()));
     dc.on_message(Box::new(move |msg: DataChannelMessage| {
-        let data = msg.data;
-        if data.is_empty() {
-            return Box::pin(async {});
-        }
-        match data[0] {
-            MSG_KIND_STOP => {
-                current_frame = None;
+        let message = reassembler
+            .lock()
+            .ok()
+            .and_then(|mut r| r.handle(&msg.data));
+        match message {
+            Some(ShareMessage::Stopped) => {
                 let mut tx = output.clone();
                 Box::pin(async move {
                     let _ = tx.send(CallEvent::ScreenShareStopped).await;
                 })
             }
-            MSG_KIND_FRAME if data.len() >= 9 => {
-                let frame_id = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
-                let chunk_index = u16::from_le_bytes([data[5], data[6]]);
-                let chunk_count = u16::from_le_bytes([data[7], data[8]]);
-                let payload = data.slice(9..);
-
-                if current_frame.as_ref().map(|(id, _)| *id) != Some(frame_id) {
-                    current_frame = Some((frame_id, Vec::new()));
-                }
-                if let Some((_, buf)) = current_frame.as_mut() {
-                    buf.extend_from_slice(&payload);
-                }
-
-                if chunk_index + 1 >= chunk_count {
-                    if let Some((_, buf)) = current_frame.take() {
-                        let mut tx = output.clone();
-                        return Box::pin(async move {
-                            let _ = tx.send(CallEvent::ScreenFrame(buf)).await;
-                        });
-                    }
-                }
-                Box::pin(async {})
+            Some(ShareMessage::Frame(jpeg)) => {
+                let mut tx = output.clone();
+                Box::pin(async move {
+                    let _ = tx.send(CallEvent::ScreenFrame(jpeg)).await;
+                })
             }
-            _ => Box::pin(async {}),
+            None => Box::pin(async {}),
         }
     }));
 }
@@ -1085,21 +1200,36 @@ async fn send_share_frame(dc: &RTCDataChannel, frame_id: u32, jpeg: &[u8]) {
     if dc.ready_state() != RTCDataChannelState::Open {
         return;
     }
-    let chunk_count = ((jpeg.len() + SHARE_CHUNK_SIZE - 1) / SHARE_CHUNK_SIZE).max(1) as u16;
-    for (index, chunk) in jpeg.chunks(SHARE_CHUNK_SIZE).enumerate() {
-        let mut msg = Vec::with_capacity(9 + chunk.len());
-        msg.push(MSG_KIND_FRAME);
-        msg.extend_from_slice(&frame_id.to_le_bytes());
-        msg.extend_from_slice(&(index as u16).to_le_bytes());
-        msg.extend_from_slice(&chunk_count.to_le_bytes());
-        msg.extend_from_slice(chunk);
+    for msg in share_frame_chunks(frame_id, jpeg) {
         if dc.send(&Bytes::from(msg)).await.is_err() {
             return;
         }
     }
 }
 
-pub async fn run_call(params: CallParams, mut output: EventSender<CallEvent>) {
+/// Resolves once the data channel reaches `Open` (or immediately if it
+/// already is). Returns false on timeout -- SCTP negotiation normally
+/// finishes right around when the call connects, so a channel that's still
+/// not open after `timeout` isn't going to get there by waiting longer.
+async fn wait_for_data_channel_open(dc: &RTCDataChannel, timeout: Duration) -> bool {
+    if dc.ready_state() == RTCDataChannelState::Open {
+        return true;
+    }
+    let (open_tx, open_rx) = tokio::sync::oneshot::channel::<()>();
+    dc.on_open(Box::new(move || {
+        let _ = open_tx.send(());
+        Box::pin(async {})
+    }));
+    // Re-check after registering the callback: the channel may have opened
+    // in the gap between the first check and `on_open` being installed, and
+    // `on_open` only fires on a *transition* into Open.
+    if dc.ready_state() == RTCDataChannelState::Open {
+        return true;
+    }
+    tokio::time::timeout(timeout, open_rx).await.is_ok()
+}
+
+pub(crate) async fn run_call(params: CallParams, mut output: EventSender<CallEvent>) {
     let CallParams {
         mut client,
         session_token,
@@ -1113,11 +1243,31 @@ pub async fn run_call(params: CallParams, mut output: EventSender<CallEvent>) {
         muted,
         output_muted,
         noise_gate,
+        gains,
         mut share_rx,
     } = params;
 
     let mut media_engine = MediaEngine::default();
-    if media_engine.register_default_codecs().is_err() {
+    // Only the Talkyss ADPCM codec is registered: the offer's audio m-line
+    // then contains nothing else, so a peer running an older (G.711-only)
+    // build finds no common codec and the call fails at negotiation instead
+    // of both sides playing garbage at each other.
+    if media_engine
+        .register_codec(
+            RTCRtpCodecParameters {
+                capability: RTCRtpCodecCapability {
+                    mime_type: adpcm::MIME_TYPE.to_string(),
+                    clock_rate: adpcm::WIRE_SAMPLE_RATE,
+                    channels: 1,
+                    ..Default::default()
+                },
+                payload_type: adpcm::RTP_PAYLOAD_TYPE,
+                ..Default::default()
+            },
+            RTPCodecType::Audio,
+        )
+        .is_err()
+    {
         fail(&mut output, "Could not set up audio codecs").await;
         return;
     }
@@ -1172,10 +1322,10 @@ pub async fn run_call(params: CallParams, mut output: EventSender<CallEvent>) {
         }
     };
 
-    let local_track = Arc::new(TrackLocalStaticSample::new(
+    let local_track = Arc::new(TrackLocalStaticRTP::new(
         RTCRtpCodecCapability {
-            mime_type: MIME_TYPE_PCMU.to_string(),
-            clock_rate: 8000,
+            mime_type: adpcm::MIME_TYPE.to_string(),
+            clock_rate: adpcm::WIRE_SAMPLE_RATE,
             channels: 1,
             ..Default::default()
         },
@@ -1205,14 +1355,28 @@ pub async fn run_call(params: CallParams, mut output: EventSender<CallEvent>) {
     }
 
     let jitter_for_track = Arc::clone(&jitter);
+    let gains_for_track = Arc::clone(&gains);
     pc.on_track(Box::new(move |track: Arc<TrackRemote>, _receiver, _transceiver| {
         let jitter = Arc::clone(&jitter_for_track);
+        let gains = Arc::clone(&gains_for_track);
         Box::pin(async move {
             let mut jitter_estimator = JitterEstimator::new();
             loop {
                 match track.read_rtp().await {
                     Ok((packet, _)) => {
-                        let samples = g711::decode(&packet.payload);
+                        // Foreign payload (mismatched app version) — drop,
+                        // never decode. Negotiation should already prevent
+                        // this; the magic tag is the belt-and-braces check.
+                        let Some(mut samples) = adpcm::decode_frame(&packet.payload) else {
+                            continue;
+                        };
+                        // 1:1 call: the remote always uses the "*" gain key.
+                        let g = gains
+                            .lock()
+                            .ok()
+                            .and_then(|m| m.get("*").copied())
+                            .unwrap_or(1.0);
+                        apply_gain(&mut samples, g);
                         let target = jitter_estimator.on_packet_arrival();
                         if let Ok(mut buf) = jitter.lock() {
                             buf.extend(samples);
@@ -1259,13 +1423,29 @@ pub async fn run_call(params: CallParams, mut output: EventSender<CallEvent>) {
 
     let track_for_send = Arc::clone(&local_track);
     tokio::spawn(async move {
+        // TrackLocalStaticRTP expects complete RTP packets: we own the
+        // sequence number and timestamp (one 20 ms frame per packet at the
+        // 24 kHz RTP clock). SSRC and payload type are filled in per-binding
+        // by the track itself.
+        let mut sequence_number: u16 = 0;
+        let mut timestamp: u32 = 0;
+        let mut first_packet = true;
         while let Some(chunk) = frame_rx.recv().await {
-            let _ = track_for_send
-                .write_sample(&Sample {
-                    data: Bytes::from(chunk),
-                    duration: Duration::from_millis(20),
+            let packet = rtp::packet::Packet {
+                header: rtp::header::Header {
+                    version: 2,
+                    marker: first_packet,
+                    sequence_number,
+                    timestamp,
                     ..Default::default()
-                })
+                },
+                payload: Bytes::from(chunk),
+            };
+            first_packet = false;
+            sequence_number = sequence_number.wrapping_add(1);
+            timestamp = timestamp.wrapping_add(adpcm::FRAME_SAMPLES as u32);
+            let _ = track_for_send
+                .write_rtp_with_extensions(&packet, &[])
                 .await;
         }
     });
@@ -1463,19 +1643,10 @@ pub async fn run_call(params: CallParams, mut output: EventSender<CallEvent>) {
             fail(&mut output, "Missing call offer").await;
             return;
         };
-        // Answerer receives the caller's screenshare data channel via this
-        // handler — without it, only the caller can share (and receive).
-        {
-            let data_channel_tx = data_channel_tx.clone();
-            let output_for_dc = output.clone();
-            pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
-                attach_data_channel_handlers(Arc::clone(&dc), output_for_dc.clone());
-                let tx = data_channel_tx.clone();
-                Box::pin(async move {
-                    let _ = tx.send(Some(dc));
-                })
-            }));
-        }
+        // The answerer receives the caller's screenshare data channel via
+        // the `on_data_channel` handler registered before the role split
+        // above (it covers both roles; registering a second one here would
+        // just replace it).
         let offer: RTCSessionDescription = match serde_json::from_str(&offer_json) {
             Ok(o) => o,
             Err(_) => {
@@ -1623,17 +1794,50 @@ pub async fn run_call(params: CallParams, mut output: EventSender<CallEvent>) {
                             let dc = data_channel_rx.borrow().clone();
                             match dc {
                                 Some(dc) => {
-                                    let (raw_tx, mut raw_rx) =
-                                        tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
                                     let stop_flag = Arc::new(AtomicBool::new(false));
-                                    screenshare::spawn_capture_thread(
-                                        target,
-                                        raw_tx,
-                                        Arc::clone(&stop_flag),
-                                    );
                                     let stop_flag_for_forward = Arc::clone(&stop_flag);
                                     let mut output_for_forward = output.clone();
                                     tokio::spawn(async move {
+                                        // The share button appears as soon
+                                        // as the call row flips to "active",
+                                        // which can be moments before SCTP
+                                        // finishes negotiating -- sending
+                                        // into a not-yet-open channel would
+                                        // drop every frame silently. Wait
+                                        // (bounded) for Open before starting
+                                        // capture so an early click still
+                                        // works instead of sharing into the
+                                        // void forever.
+                                        if !wait_for_data_channel_open(
+                                            &dc,
+                                            Duration::from_secs(10),
+                                        )
+                                        .await
+                                        {
+                                            if !stop_flag_for_forward.load(Ordering::Relaxed) {
+                                                let _ = output_for_forward
+                                                    .send(CallEvent::ScreenShareFailed(
+                                                        "Screen sharing couldn't start: the data \
+                                                         channel to the peer never opened."
+                                                            .to_string(),
+                                                    ))
+                                                    .await;
+                                            }
+                                            return;
+                                        }
+                                        // A Stop (or a newer Start) that
+                                        // arrived while we were waiting
+                                        // wins; don't start capturing now.
+                                        if stop_flag_for_forward.load(Ordering::Relaxed) {
+                                            return;
+                                        }
+                                        let (raw_tx, mut raw_rx) =
+                                            tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+                                        screenshare::spawn_capture_thread(
+                                            target,
+                                            raw_tx,
+                                            Arc::clone(&stop_flag_for_forward),
+                                        );
                                         let mut frame_id: u32 = 0;
                                         while let Some(jpeg) = raw_rx.recv().await {
                                             frame_id = frame_id.wrapping_add(1);
@@ -1643,7 +1847,12 @@ pub async fn run_call(params: CallParams, mut output: EventSender<CallEvent>) {
                                         // than via the Stop command below setting the
                                         // flag first) if the capture thread gave up --
                                         // the target window/monitor became unavailable.
+                                        // Tell the peer to drop the frozen last frame,
+                                        // otherwise it stays on their screen forever.
                                         if !stop_flag_for_forward.load(Ordering::Relaxed) {
+                                            let _ = dc
+                                                .send(&Bytes::from(vec![MSG_KIND_STOP]))
+                                                .await;
                                             let _ = output_for_forward
                                                 .send(CallEvent::ScreenShareFailed(
                                                     "Screen sharing stopped: the selected \
@@ -1679,6 +1888,11 @@ pub async fn run_call(params: CallParams, mut output: EventSender<CallEvent>) {
                 }
             }
         }
+    } else {
+        // Both signaling subscriptions failed to even open -- without
+        // this the engine just tears down silently and the banner
+        // vanishes with no explanation.
+        fail(&mut output, "Could not watch call signaling -- check your connection.").await;
     }
 
     if let Some(flag) = share_stop_flag.take() {
@@ -1705,4 +1919,113 @@ pub async fn run_call(params: CallParams, mut output: EventSender<CallEvent>) {
     let _ = capture_stop_tx.send(());
     let _ = playback_stop_tx.send(());
     let _ = pc.close().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A frame that fits in a single chunk must still come out whole.
+    #[test]
+    fn reassembles_single_chunk_frame() {
+        let jpeg = vec![0xFF, 0xD8, 0xFF, 0xD9];
+        let chunks = share_frame_chunks(7, &jpeg);
+        assert_eq!(chunks.len(), 1);
+        let mut reassembler = ShareReassembler::new();
+        match reassembler.handle(&chunks[0]) {
+            Some(ShareMessage::Frame(out)) => assert_eq!(out, jpeg),
+            other => panic!("expected a complete frame, got {other:?}"),
+        }
+    }
+
+    /// Multi-chunk frames reassemble byte-for-byte, in order.
+    #[test]
+    fn reassembles_multi_chunk_frame() {
+        let jpeg: Vec<u8> = (0..50_000u32).map(|i| (i % 251) as u8).collect();
+        let chunks = share_frame_chunks(3, &jpeg);
+        assert!(chunks.len() > 1);
+        let mut reassembler = ShareReassembler::new();
+        let mut completed = None;
+        for chunk in &chunks {
+            if let Some(message) = reassembler.handle(chunk) {
+                completed = Some(message);
+            }
+        }
+        match completed {
+            Some(ShareMessage::Frame(out)) => assert_eq!(out, jpeg),
+            other => panic!("expected a complete frame, got {other:?}"),
+        }
+    }
+
+    /// An empty frame (zero payload bytes) still produces one valid message.
+    #[test]
+    fn reassembles_empty_frame() {
+        let chunks = share_frame_chunks(1, &[]);
+        assert_eq!(chunks.len(), 1);
+        let mut reassembler = ShareReassembler::new();
+        match reassembler.handle(&chunks[0]) {
+            Some(ShareMessage::Frame(out)) => assert!(out.is_empty()),
+            other => panic!("expected a complete frame, got {other:?}"),
+        }
+    }
+
+    /// A stop message mid-frame drops the partial frame and reports Stopped.
+    #[test]
+    fn stop_abandons_partial_frame() {
+        let jpeg = vec![1u8; SHARE_CHUNK_SIZE * 2];
+        let chunks = share_frame_chunks(9, &jpeg);
+        let mut reassembler = ShareReassembler::new();
+        assert!(reassembler.handle(&chunks[0]).is_none());
+        match reassembler.handle(&[MSG_KIND_STOP]) {
+            Some(ShareMessage::Stopped) => {}
+            other => panic!("expected Stopped, got {other:?}"),
+        }
+        // After the stop, a fresh frame (new id) reassembles cleanly.
+        let fresh = share_frame_chunks(10, &jpeg);
+        let mut completed = None;
+        for chunk in &fresh {
+            if let Some(message) = reassembler.handle(chunk) {
+                completed = Some(message);
+            }
+        }
+        match completed {
+            Some(ShareMessage::Frame(out)) => assert_eq!(out, jpeg),
+            other => panic!("expected the fresh frame, got {other:?}"),
+        }
+    }
+
+    /// Garbage messages are ignored without disturbing the current frame.
+    #[test]
+    fn ignores_garbage() {
+        let mut reassembler = ShareReassembler::new();
+        assert!(reassembler.handle(&[]).is_none());
+        assert!(reassembler.handle(&[0x7F, 0x00]).is_none());
+        // Truncated frame header: kind byte says FRAME but header is short.
+        assert!(reassembler.handle(&[MSG_KIND_FRAME, 1, 2]).is_none());
+
+        let jpeg = vec![42u8; 100];
+        let chunks = share_frame_chunks(5, &jpeg);
+        match reassembler.handle(&chunks[0]) {
+            Some(ShareMessage::Frame(out)) => assert_eq!(out, jpeg),
+            other => panic!("expected a complete frame, got {other:?}"),
+        }
+    }
+
+    /// The gain helper: unity is a no-op, other gains scale and clamp.
+    #[test]
+    fn gain_scales_and_clamps() {
+        let mut samples = vec![0i16, 1000, -1000, i16::MAX, i16::MIN];
+        let original = samples.clone();
+        apply_gain(&mut samples, 1.0);
+        assert_eq!(samples, original);
+
+        apply_gain(&mut samples, 0.5);
+        assert_eq!(samples[1], 500);
+        assert_eq!(samples[2], -500);
+
+        let mut loud = vec![i16::MAX, i16::MIN];
+        apply_gain(&mut loud, 2.0);
+        assert_eq!(loud[0], i16::MAX);
+        assert_eq!(loud[1], i16::MIN);
+    }
 }

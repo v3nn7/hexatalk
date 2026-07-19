@@ -2,35 +2,22 @@
 //! formatting, presence/online helpers, ...). Split out of the old
 //! iced-only `style.rs` so the crate no longer depends on `iced`.
 
-use std::collections::BTreeMap;
-
 use chrono::TimeZone;
-use convex::Value;
 
-use crate::ONLINE_THRESHOLD_MS;
-
-pub(crate) fn is_online(last_seen_at: f64) -> bool {
-    if last_seen_at <= 0.0 {
-        return false;
-    }
-    let now = chrono::Utc::now().timestamp_millis() as f64;
-    (now - last_seen_at) < ONLINE_THRESHOLD_MS
-}
-
-pub(crate) fn format_time(sent_at_ms: f64) -> String {
-    match chrono::Local.timestamp_millis_opt(sent_at_ms as i64) {
+pub(super) fn format_time(sent_at_ms: i64) -> String {
+    match chrono::Local.timestamp_millis_opt(sent_at_ms) {
         chrono::LocalResult::Single(dt) => dt.format("%H:%M").to_string(),
         _ => String::new(),
     }
 }
 
-pub(crate) fn format_relative_time(sent_at_ms: f64) -> String {
-    if sent_at_ms <= 0.0 {
+pub(super) fn format_relative_time(sent_at_ms: i64) -> String {
+    if sent_at_ms <= 0 {
         return String::new();
     }
-    let now = chrono::Utc::now().timestamp_millis() as f64;
-    let delta_ms = (now - sent_at_ms).max(0.0);
-    let mins = (delta_ms / 60_000.0).floor() as i64;
+    let now = chrono::Utc::now().timestamp_millis();
+    let delta_ms = (now - sent_at_ms).max(0);
+    let mins = delta_ms / 60_000;
     if mins < 1 {
         return "Just now".to_string();
     }
@@ -45,15 +32,15 @@ pub(crate) fn format_relative_time(sent_at_ms: f64) -> String {
     if days < 7 {
         return format!("{days}d ago");
     }
-    match chrono::Local.timestamp_millis_opt(sent_at_ms as i64) {
+    match chrono::Local.timestamp_millis_opt(sent_at_ms) {
         chrono::LocalResult::Single(dt) => dt.format("%b %-d").to_string(),
         _ => String::new(),
     }
 }
 
-pub(crate) fn format_day(sent_at_ms: f64) -> String {
+pub(super) fn format_day(sent_at_ms: i64) -> String {
     let now = chrono::Local::now();
-    match chrono::Local.timestamp_millis_opt(sent_at_ms as i64) {
+    match chrono::Local.timestamp_millis_opt(sent_at_ms) {
         chrono::LocalResult::Single(dt) => {
             let today = now.date_naive();
             let msg_date = dt.date_naive();
@@ -111,18 +98,5 @@ pub(crate) fn next_presence_status(current: &str) -> &'static str {
         "idle" => "dnd",
         "dnd" => "invisible",
         _ => "online",
-    }
-}
-
-pub(crate) fn obj_str_list(obj: &BTreeMap<String, Value>, key: &str) -> Vec<String> {
-    match obj.get(key) {
-        Some(Value::Array(arr)) => arr
-            .iter()
-            .filter_map(|v| match v {
-                Value::String(s) => Some(s.clone()),
-                _ => None,
-            })
-            .collect(),
-        _ => Vec::new(),
     }
 }

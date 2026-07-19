@@ -10,10 +10,15 @@ export global Theme {
     out property <color> bg-tertiary: #050706;
     out property <color> bg-elevated: #0f1211;
     out property <color> bg-hover: #141816;
+    // Half-strength hover wash, for large surfaces (message rows) where the
+    // full bg-hover would read as a selection.
+    out property <color> bg-hover-soft: #14181680;
 
     // ---------- Accent (muted emerald) ----------
     out property <color> accent: #4db884;
     out property <color> accent-dim: #3d946b;
+    // Pressed state for accent-filled buttons (one step below accent-dim).
+    out property <color> accent-pressed: #347a58;
     out property <color> accent-soft: #4db88424;
     out property <color> accent-soft-strong: #4db8843d;
 

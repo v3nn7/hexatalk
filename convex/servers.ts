@@ -363,18 +363,55 @@ export const listChannels = query({
       .withIndex("by_server", (q) => q.eq("serverId", args.serverId))
       .take(200);
 
-    return channels
-      .map((c) => ({
-        conversationId: c._id,
-        name: c.name ?? "channel",
-        channelType: (c.channelType ?? "text") as "text" | "voice",
-      }))
-      .sort((a, b) => {
-        if (a.channelType !== b.channelType) {
-          return a.channelType === "text" ? -1 : 1;
+    const rows = await Promise.all(
+      channels.map(async (c) => {
+        // Unread @-mention badge for the sidebar channel row: count
+        // messages newer than my read marker that ping me (or @everyone).
+        // Membership rows carry lastReadAt; absent row = never read.
+        const membership = await ctx.db
+          .query("conversationMembers")
+          .withIndex("by_conversation_and_user", (q) =>
+            q.eq("conversationId", c._id).eq("userId", me._id),
+          )
+          .unique();
+        const lastReadAt = membership?.lastReadAt ?? 0;
+        const unread = (c.lastMessageAt ?? 0) > lastReadAt;
+
+        let mentionCount = 0;
+        if (unread) {
+          const recent = await ctx.db
+            .query("messages")
+            .withIndex("by_conversation", (q) =>
+              q.eq("conversationId", c._id),
+            )
+            .order("desc")
+            .take(100);
+          for (const message of recent) {
+            if (message._creationTime <= lastReadAt) break;
+            if (message.authorId === me._id || message.deleted) continue;
+            const pingsMe =
+              message.mentionEveryone === true ||
+              (message.mentionUserIds?.includes(me._id) ?? false);
+            if (pingsMe) {
+              mentionCount += 1;
+            }
+          }
         }
-        return a.name.localeCompare(b.name);
-      });
+
+        return {
+          conversationId: c._id,
+          name: c.name ?? "channel",
+          channelType: (c.channelType ?? "text") as "text" | "voice",
+          mentionCount,
+        };
+      }),
+    );
+    return rows.sort((a, b) => {
+      if (a.channelType !== b.channelType) {
+        return a.channelType === "text" ? -1 : 1;
+      }
+      return a.name.localeCompare(b.name);
+    });
   },
 });
 

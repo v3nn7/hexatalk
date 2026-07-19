@@ -23,18 +23,38 @@ const HKDF_INFO: &[u8] = b"talkyss-local-history-vault-v1";
 const MAX_MESSAGES: usize = 5000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoredMessage {
-    pub id: String,
-    pub author_id: String,
-    pub author_name: String,
-    pub author_avatar_color: String,
-    pub body: String,
-    pub sent_at: f64,
+pub(crate) struct StoredMessage {
+    pub(crate) id: String,
+    pub(crate) author_id: String,
+    pub(crate) author_name: String,
+    pub(crate) author_avatar_color: String,
+    pub(crate) body: String,
+    /// ms since epoch. Vaults written by older builds stored this as a
+    /// float; the custom deserializer accepts both so those still load.
+    #[serde(deserialize_with = "deserialize_ms")]
+    pub(crate) sent_at: i64,
     /// If true, JPEG/PNG bytes live in `media/<id>.bin` (also encrypted).
     #[serde(default)]
-    pub has_media: bool,
+    pub(crate) has_media: bool,
     #[serde(default)]
-    pub media_content_type: String,
+    pub(crate) media_content_type: String,
+}
+
+#[allow(dead_code)] // only referenced from the (currently dead) vault serde impl
+fn deserialize_ms<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Ms {
+        Int(i64),
+        Float(f64),
+    }
+    Ok(match Ms::deserialize(deserializer)? {
+        Ms::Int(i) => i,
+        Ms::Float(f) => f as i64,
+    })
 }
 
 fn talkyss_dir() -> PathBuf {
@@ -77,7 +97,7 @@ fn media_path(owner_user_id: &str, conversation_id: &str, message_id: &str) -> P
 }
 
 /// Derive a 32-byte vault key from the peerseal identity private key.
-pub fn vault_key_from_identity_private(private_key_32: &[u8; 32]) -> [u8; 32] {
+pub(crate) fn vault_key_from_identity_private(private_key_32: &[u8; 32]) -> [u8; 32] {
     let hk = Hkdf::<Sha256>::new(None, private_key_32);
     let mut out = [0u8; 32];
     hk.expand(HKDF_INFO, &mut out)
@@ -86,7 +106,7 @@ pub fn vault_key_from_identity_private(private_key_32: &[u8; 32]) -> [u8; 32] {
 }
 
 /// Load peerseal private key bytes from the same file format as peerseal Identity.
-pub fn load_peerseal_private(owner_user_id: &str) -> Option<[u8; 32]> {
+pub(crate) fn load_peerseal_private(owner_user_id: &str) -> Option<[u8; 32]> {
     let path = talkyss_dir().join(format!("peerseal_{owner_user_id}.key"));
     let text = std::fs::read_to_string(path).ok()?;
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
@@ -136,7 +156,7 @@ fn decrypt_blob(key: &[u8; 32], blob: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Load decrypted message list for a conversation (empty if missing / wrong key).
-pub fn load_chat(
+pub(crate) fn load_chat(
     owner_user_id: &str,
     conversation_id: &str,
     vault_key: &[u8; 32],
@@ -152,7 +172,7 @@ pub fn load_chat(
 }
 
 /// Replace-save full chat history (encrypted).
-pub fn save_chat(
+pub(crate) fn save_chat(
     owner_user_id: &str,
     conversation_id: &str,
     vault_key: &[u8; 32],
@@ -174,7 +194,7 @@ pub fn save_chat(
 }
 
 /// Append one message and persist.
-pub fn append_message(
+pub(crate) fn append_message(
     owner_user_id: &str,
     conversation_id: &str,
     vault_key: &[u8; 32],
@@ -190,7 +210,7 @@ pub fn append_message(
 }
 
 /// Encrypt and store media bytes for a message.
-pub fn save_media(
+pub(crate) fn save_media(
     owner_user_id: &str,
     conversation_id: &str,
     message_id: &str,
@@ -206,7 +226,7 @@ pub fn save_media(
 }
 
 /// Load and decrypt media for a message.
-pub fn load_media(
+pub(crate) fn load_media(
     owner_user_id: &str,
     conversation_id: &str,
     message_id: &str,
@@ -218,25 +238,25 @@ pub fn load_media(
 }
 
 /// Stable UI attachment URL for vault media (not a network URL).
-pub fn media_url_tag(message_id: &str) -> String {
+pub(crate) fn media_url_tag(message_id: &str) -> String {
     format!("vaultmedia:{message_id}")
 }
 
-pub fn is_media_url_tag(url: &str) -> bool {
+pub(crate) fn is_media_url_tag(url: &str) -> bool {
     url.starts_with("vaultmedia:")
 }
 
-pub fn media_id_from_url(url: &str) -> Option<&str> {
+pub(crate) fn media_id_from_url(url: &str) -> Option<&str> {
     url.strip_prefix("vaultmedia:")
 }
 
 /// Human path for settings / docs.
-pub fn vault_root_display(owner_user_id: &str) -> String {
+pub(crate) fn vault_root_display(owner_user_id: &str) -> String {
     vault_dir(owner_user_id).display().to_string()
 }
 
 /// Wipe one conversation's encrypted vault files (owner only, this device).
-pub fn wipe_chat(owner_user_id: &str, conversation_id: &str) {
+pub(crate) fn wipe_chat(owner_user_id: &str, conversation_id: &str) {
     let _ = std::fs::remove_file(chat_path(owner_user_id, conversation_id));
     let media_dir = media_path(owner_user_id, conversation_id, "_")
         .parent()
@@ -247,17 +267,17 @@ pub fn wipe_chat(owner_user_id: &str, conversation_id: &str) {
 }
 
 /// Drop the entire local vault tree for this account (all chats + media).
-pub fn wipe_all_vaults(owner_user_id: &str) {
+pub(crate) fn wipe_all_vaults(owner_user_id: &str) {
     let dir = vault_dir(owner_user_id);
     let _ = std::fs::remove_dir_all(dir);
 }
 
-pub fn talkyss_root() -> PathBuf {
+pub(crate) fn talkyss_root() -> PathBuf {
     talkyss_dir()
 }
 
 /// Debug helper: fingerprint of vault key (not secret) for UI.
-pub fn vault_key_fingerprint(vault_key: &[u8; 32]) -> String {
+pub(crate) fn vault_key_fingerprint(vault_key: &[u8; 32]) -> String {
     use sha2::Digest;
     let d = Sha256::digest(vault_key);
     format!(
@@ -268,6 +288,6 @@ pub fn vault_key_fingerprint(vault_key: &[u8; 32]) -> String {
 
 /// Encode optional short note (unused helper for future export).
 #[allow(dead_code)]
-pub fn encode_export_marker(owner: &str) -> String {
+pub(crate) fn encode_export_marker(owner: &str) -> String {
     BASE64_STANDARD.encode(format!("talkyss-vault:{owner}"))
 }

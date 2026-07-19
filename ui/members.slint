@@ -10,6 +10,7 @@ component MemberEntry inherits Rectangle {
     callback open_profile(string);
     height: content.preferred-height + 8px;
     background: touch.has-hover ? Theme.bg-hover : transparent;
+    animate background { duration: 120ms; }
     touch := TouchArea {
         mouse-cursor: MouseCursor.pointer;
         clicked => { root.open_profile(m.user_id); }
@@ -33,7 +34,7 @@ component MemberEntry inherits Rectangle {
             HorizontalLayout {
                 spacing: 4px;
                 alignment: start;
-                Text { text: m.display_name; font-size: 12px; color: Theme.text-primary; vertical-alignment: center; }
+                Text { text: m.display_name; font-size: Theme.text-sm; color: m.online ? Theme.text-primary : Theme.text-muted; vertical-alignment: center; }
                 if m.badge_text != "": Rectangle {
                     background: m.badge_bg;
                     height: 14px;
@@ -91,8 +92,10 @@ export component MembersDrawer inherits HorizontalLayout {
             // which clamps the whole window scene (see ResizeHandle).
             collapse-btn := Rectangle {
                 height: 24px;
-                Text { text: "«"; font-size: 14px; color: Theme.text-primary; horizontal-alignment: center; }
-                TouchArea { clicked => { root.toggle(); } }
+                background: collapse-touch.has-hover ? Theme.bg-hover : transparent;
+                animate background { duration: 120ms; }
+                Text { text: "«"; font-size: 14px; color: collapse-touch.has-hover ? Theme.accent : Theme.text-primary; horizontal-alignment: center; }
+                collapse-touch := TouchArea { clicked => { root.toggle(); } }
             }
             Rectangle { vertical-stretch: 1; }
             Text {
@@ -112,18 +115,22 @@ export component MembersDrawer inherits HorizontalLayout {
         VerticalLayout {
             HorizontalLayout {
                 padding: 10px;
-                Text { text: "MEMBERS"; font-size: 11px; color: Theme.text-muted; vertical-alignment: center; horizontal-stretch: 1; }
+                Text { text: "MEMBERS"; font-size: Theme.text-xs; font-family: Theme.font-medium; letter-spacing: 1px; color: Theme.text-muted; vertical-alignment: center; horizontal-stretch: 1; }
                 Rectangle {
                     width: 20px;
                     height: 20px;
-                    Text { text: "›"; font-size: 14px; color: Theme.text-muted; horizontal-alignment: center; vertical-alignment: center; }
-                    TouchArea { clicked => { root.toggle(); } }
+                    background: expand-touch.has-hover ? Theme.bg-hover : transparent;
+                    animate background { duration: 120ms; }
+                    Text { text: "›"; font-size: 14px; color: expand-touch.has-hover ? Theme.accent : Theme.text-muted; horizontal-alignment: center; vertical-alignment: center; }
+                    expand-touch := TouchArea { clicked => { root.toggle(); } }
                 }
             }
+            Rectangle { height: 1px; background: Theme.border-hairline; }
+            Rectangle { height: 6px; }
             Text {
                 x: 10px;
                 text: "\{root.online_count} online · \{root.total_count} total";
-                font-size: 10px;
+                font-size: Theme.text-xs;
                 color: Theme.text-muted;
             }
             Rectangle { height: 6px; }
@@ -132,11 +139,11 @@ export component MembersDrawer inherits HorizontalLayout {
                 viewport-height: members_col.preferred-height;
                 members_col := VerticalLayout {
                     width: parent.width;
-                    if root.online_members.length > 0: Text { text: "ONLINE — \{root.online_members.length}"; font-size: 10px; color: Theme.online; }
+                    if root.online_members.length > 0: Text { text: "ONLINE — \{root.online_members.length}"; font-size: Theme.text-xs; font-family: Theme.font-medium; color: Theme.online; }
                     for m in root.online_members: MemberEntry { m: m; open_profile(id) => { root.open_profile(id); } }
-                    if root.offline_members.length > 0: Text { text: "OFFLINE — \{root.offline_members.length}"; font-size: 10px; color: Theme.text-muted; }
+                    if root.offline_members.length > 0: Text { text: "OFFLINE — \{root.offline_members.length}"; font-size: Theme.text-xs; font-family: Theme.font-medium; color: Theme.text-muted; }
                     for m in root.offline_members: MemberEntry { m: m; open_profile(id) => { root.open_profile(id); } }
-                    if root.bot_members.length > 0: Text { text: "BOTS — \{root.bot_members.length}"; font-size: 10px; color: Theme.accent; }
+                    if root.bot_members.length > 0: Text { text: "BOTS — \{root.bot_members.length}"; font-size: Theme.text-xs; font-family: Theme.font-medium; color: Theme.accent; }
                     for m in root.bot_members: MemberEntry { m: m; open_profile(id) => { root.open_profile(id); } }
                 }
             }

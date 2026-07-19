@@ -20,7 +20,7 @@ const BAKED_RELAY: &str = env!("PEERSEAL_RELAY");
 
 /// Commands from the UI thread into the peerseal worker.
 #[derive(Debug)]
-pub enum PeerCmd {
+pub(crate) enum PeerCmd {
     /// Guest: Convex delivered a host invite (`ps1:…`).
     InvitePayload(String),
     /// Host: Convex successfully stored the invite — safe to open relay room.
@@ -39,12 +39,12 @@ pub enum PeerCmd {
 
 /// Events from the peerseal worker back to the UI.
 #[derive(Debug, Clone)]
-pub enum PeerEvent {
+pub(crate) enum PeerEvent {
     Status(String),
     /// Host created an invite — publish to Convex.
     HostInvite {
         payload: String,
-        expires_at_ms: f64,
+        expires_at_ms: i64,
     },
     Connected {
         sas_emojis: String,
@@ -61,11 +61,11 @@ pub enum PeerEvent {
 }
 
 /// Who should host the peerseal invite for this pair (stable, deterministic).
-pub fn is_peerseal_host(local_user_id: &str, peer_user_id: &str) -> bool {
+pub(crate) fn is_peerseal_host(local_user_id: &str, peer_user_id: &str) -> bool {
     local_user_id < peer_user_id
 }
 
-pub fn peerseal_identity_path(user_id: &str) -> PathBuf {
+fn peerseal_identity_path(user_id: &str) -> PathBuf {
     let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(base)
         .join("Talkyss")
@@ -73,7 +73,7 @@ pub fn peerseal_identity_path(user_id: &str) -> PathBuf {
 }
 
 /// Load or create a peerseal identity and return (identity, base64 public key).
-pub fn load_peerseal_identity(user_id: &str) -> Result<(Identity, String), String> {
+pub(crate) fn load_peerseal_identity(user_id: &str) -> Result<(Identity, String), String> {
     let path = peerseal_identity_path(user_id);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -93,7 +93,7 @@ fn resolve_relay() -> Result<String, String> {
 }
 
 /// Spawn a peerseal worker for one DM. Returns a command sender; events go to `event_tx`.
-pub fn spawn_dm_session(
+pub(crate) fn spawn_dm_session(
     local_user_id: String,
     peer_user_id: String,
     conversation_id: String,
@@ -272,7 +272,7 @@ async fn host_connect_with_retry(
             .create_invite(Duration::from_secs(120))
             .map_err(|e| e.to_string())?;
         let payload = invite.to_qr_string().map_err(|e| e.to_string())?;
-        let expires_at_ms = (invite.expires_at as f64) * 1000.0;
+        let expires_at_ms = invite.expires_at as i64 * 1000;
 
         // 1) Ask UI to put invite on Convex FIRST.
         let _ = emit(
@@ -604,6 +604,11 @@ async fn drain_photo(session: &mut Session) -> Result<Vec<u8>, String> {
         match session.recv_app().await.map_err(|e| e.to_string())? {
             AppMessage::MediaFrame { data, .. } => buf.extend_from_slice(&data),
             AppMessage::MediaEnd { .. } => return Ok(buf),
+            // Keepalive/control frames can legitimately arrive mid-transfer;
+            // skip them instead of aborting the whole photo (which used to
+            // also desync the stream — the remaining frames were then
+            // misread as top-level messages).
+            AppMessage::Ping(_) | AppMessage::Pong(_) | AppMessage::SasAck(_) => {}
             other => {
                 return Err(format!("unexpected during photo: {other:?}"));
             }

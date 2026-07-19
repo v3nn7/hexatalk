@@ -7,10 +7,12 @@ use std::env;
 
 use convex::ConvexClient;
 
-use crate::rt::Task;
-use crate::*;
+use crate::net::rt::Task;
+use crate::crypto;
+use crate::state::message::Message;
+use crate::state::types::Session;
 
-pub(crate) fn connect_task(deployment_url: String) -> Task<Message> {
+pub(super) fn connect_task(deployment_url: String) -> Task<Message> {
     Task::perform(
         async move {
             ConvexClient::new(&deployment_url)
@@ -24,12 +26,12 @@ pub(crate) fn connect_task(deployment_url: String) -> Task<Message> {
     )
 }
 
-pub(crate) fn session_file_path() -> std::path::PathBuf {
+fn session_file_path() -> std::path::PathBuf {
     let base = env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
     std::path::Path::new(&base).join("Talkyss").join("session.txt")
 }
 
-pub(crate) fn save_session_to_disk(session: &Session) {
+pub(super) fn save_session_to_disk(session: &Session) {
     let path = session_file_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -37,33 +39,33 @@ pub(crate) fn save_session_to_disk(session: &Session) {
     let _ = std::fs::write(&path, &session.token);
 }
 
-pub(crate) fn load_session_token_from_disk() -> Option<String> {
+pub(super) fn load_session_token_from_disk() -> Option<String> {
     std::fs::read_to_string(session_file_path())
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
 
-pub(crate) fn clear_session_file() {
+pub(super) fn clear_session_file() {
     let _ = std::fs::remove_file(session_file_path());
 }
 
-pub(crate) fn talkyss_data_dir() -> std::path::PathBuf {
+pub(super) fn talkyss_data_dir() -> std::path::PathBuf {
     let base = env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
     std::path::Path::new(&base).join("Talkyss")
 }
 
-pub(crate) fn identity_key_path(user_id: &str) -> std::path::PathBuf {
+fn identity_key_path(user_id: &str) -> std::path::PathBuf {
     talkyss_data_dir().join(format!("identity_{user_id}.key"))
 }
 
-pub(crate) fn panel_prefs_path() -> std::path::PathBuf {
+fn panel_prefs_path() -> std::path::PathBuf {
     talkyss_data_dir().join("panel_prefs.txt")
 }
 
 /// Loads (channel_list_width, members_panel_preferred_width), falling back
 /// to the app's defaults if the file is missing or malformed.
-pub(crate) fn load_panel_prefs() -> (f32, f32) {
+pub(super) fn load_panel_prefs() -> (f32, f32) {
     let defaults = (260.0, 220.0);
     let Ok(contents) = std::fs::read_to_string(panel_prefs_path()) else {
         return defaults;
@@ -78,7 +80,7 @@ pub(crate) fn load_panel_prefs() -> (f32, f32) {
     }
 }
 
-pub(crate) fn save_panel_prefs(channel_list_width: f32, members_panel_preferred_width: f32) {
+pub(super) fn save_panel_prefs(channel_list_width: f32, members_panel_preferred_width: f32) {
     let path = panel_prefs_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -89,7 +91,7 @@ pub(crate) fn save_panel_prefs(channel_list_width: f32, members_panel_preferred_
 /// Loads this account's local E2EE identity key from disk, generating and
 /// persisting a new one on first use. The private key never leaves this
 /// file; only its public half is ever sent to the server.
-pub(crate) fn load_or_create_identity_key(user_id: &str) -> crypto::IdentityKeyPair {
+fn load_or_create_identity_key(user_id: &str) -> crypto::IdentityKeyPair {
     let path = identity_key_path(user_id);
     if let Ok(bytes) = std::fs::read(&path) {
         if let Ok(raw) = <[u8; 32]>::try_from(bytes.as_slice()) {

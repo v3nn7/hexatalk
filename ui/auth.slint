@@ -36,9 +36,18 @@ export component AuthScreen inherits Rectangle {
             drop-shadow-offset-y: Theme.shadow-offset;
             drop-shadow-color: Theme.shadow-color;
 
+            // Square accent spine along the card's top edge.
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: 2px;
+                background: Theme.accent;
+            }
+
             VerticalLayout {
                 padding: 36px;
-                spacing: 10px;
+                spacing: 12px;
                 alignment: start;
 
                 VerticalLayout {

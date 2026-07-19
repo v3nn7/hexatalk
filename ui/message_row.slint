@@ -8,7 +8,8 @@ import { ChatMessageRow } from "chat_types.slint";
 component ActionLink inherits Text {
     callback clicked;
     color: area.has-hover ? Theme.accent : Theme.text-muted;
-    font-size: 10px;
+    font-size: Theme.text-xs;
+    animate color { duration: 120ms; }
     area := TouchArea { clicked => { root.clicked(); } }
 }
 
@@ -24,9 +25,16 @@ export component MessageRow inherits Rectangle {
     callback purge(string);
     callback open_attachment(string);
 
-    background: hover.has-hover ? Theme.bg-elevated : transparent;
+    // Mention highlight: a warm (warning-tinted) wash + accent bar when the
+    // message pings me; a much fainter wash without a bar for @everyone.
+    background: msg.mentions_me
+        ? (hover.has-hover ? #d1bc4d2e : #d1bc4d1a)
+        : (msg.mentions_everyone
+            ? (hover.has-hover ? #d1bc4d17 : #d1bc4d0a)
+            : (hover.has-hover ? Theme.bg-hover-soft : transparent));
     border-width: 1px;
     border-color: transparent;
+    animate background { duration: 120ms; }
 
     // ListView delegates must have a well-defined own height -- without
     // this binding every row collapsed and all messages rendered on top of
@@ -39,6 +47,26 @@ export component MessageRow inherits Rectangle {
         // for the action bar -- but TouchArea must exist to read has-hover.
     }
 
+    // Pinged rows get a bright warning-colored accent bar (takes precedence
+    // over the quieter "own message" bar below).
+    if msg.mentions_me && !msg.is_call_log: Rectangle {
+        x: 0;
+        y: 0;
+        width: 2px;
+        height: parent.height;
+        background: Theme.warning;
+    }
+
+    // Own messages get a quiet square accent bar on the left edge --
+    // recognizable at a glance without any rounding or glow.
+    if msg.mine && !msg.mentions_me && !msg.is_call_log: Rectangle {
+        x: 0;
+        y: 0;
+        width: 2px;
+        height: parent.height;
+        background: Theme.accent-dim;
+    }
+
     content := VerticalLayout {
 
     if msg.is_call_log: VerticalLayout {
@@ -46,20 +74,19 @@ export component MessageRow inherits Rectangle {
         spacing: 4px;
         Text {
             text: msg.body;
-            font-size: 12px;
+            font-size: Theme.text-sm;
             color: msg.body_danger ? Theme.danger : Theme.text-muted;
             horizontal-alignment: center;
-        }
-        if hover.has-hover && (msg.can_delete || msg.can_purge): HorizontalLayout {
-            alignment: center;
-            spacing: 10px;
-            if msg.can_delete: ActionLink { text: "Delete"; clicked => { root.delete(msg.id); } }
-            if msg.can_purge: ActionLink { text: "Delete forever"; clicked => { root.purge(msg.id); } }
         }
     }
 
     if !msg.is_call_log: HorizontalLayout {
-        padding: 6px;
+        padding-left: 6px;
+        padding-right: 6px;
+        // Grouped continuation rows sit tighter under their parent message;
+        // a new author block gets more air above it.
+        padding-top: msg.grouped ? 3px : 10px;
+        padding-bottom: 3px;
         spacing: 12px;
         // No `alignment` here (default `stretch`): the avatar column is
         // pinned to 36px via `horizontal-stretch: 0` below, and the message
@@ -88,7 +115,8 @@ export component MessageRow inherits Rectangle {
                 alignment: start;
                 Text {
                     text: msg.author_name;
-                    font-size: 14px;
+                    font-size: Theme.text-md;
+                    font-family: Theme.font-medium;
                     color: msg.mine ? Theme.accent : white;
                     vertical-alignment: center;
                 }
@@ -107,11 +135,18 @@ export component MessageRow inherits Rectangle {
                 }
                 Text {
                     text: msg.meta;
-                    font-size: 10px;
+                    font-size: Theme.text-xs;
                     font-family: Theme.font-medium;
                     color: Theme.text-muted;
                     vertical-alignment: center;
                 }
+            }
+
+            if msg.ping_label != "": Text {
+                text: msg.ping_label;
+                font-size: Theme.text-xs;
+                font-family: Theme.font-medium;
+                color: Theme.warning;
             }
 
             if msg.reply_line != "": Text {
@@ -123,7 +158,7 @@ export component MessageRow inherits Rectangle {
 
             if msg.body != "": Text {
                 text: msg.body;
-                font-size: 14px;
+                font-size: Theme.text-md;
                 color: msg.body_danger ? Theme.danger : Theme.text-primary;
                 wrap: word-wrap;
             }
@@ -133,7 +168,8 @@ export component MessageRow inherits Rectangle {
                 height: 240px;
                 background: Theme.bg-tertiary;
                 border-width: 1px;
-                border-color: Theme.border;
+                border-color: att_touch.has-hover ? Theme.border-strong : Theme.border;
+                animate border-color { duration: 120ms; }
                 VerticalLayout {
                     padding: 4px;
                     spacing: 4px;
@@ -146,7 +182,7 @@ export component MessageRow inherits Rectangle {
                     }
                     Text {
                         text: "click to enlarge";
-                        font-size: 10px;
+                        font-size: Theme.text-xs;
                         color: Theme.accent;
                         horizontal-alignment: center;
                     }
@@ -155,7 +191,7 @@ export component MessageRow inherits Rectangle {
             }
             if msg.has_attachment && msg.attachment.width <= 0: Text {
                 text: "[loading image...]";
-                font-size: 12px;
+                font-size: Theme.text-sm;
                 color: Theme.text-muted;
             }
 
@@ -163,9 +199,13 @@ export component MessageRow inherits Rectangle {
                 spacing: 4px;
                 alignment: start;
                 for r in msg.reactions: Rectangle {
-                    background: r.reacted_by_me ? Theme.accent-soft : Theme.bg-tertiary;
+                    background: r.reacted_by_me
+                        ? (pill_touch.has-hover ? Theme.accent-soft-strong : Theme.accent-soft)
+                        : (pill_touch.has-hover ? Theme.bg-hover : Theme.bg-tertiary);
                     border-width: 1px;
-                    border-color: r.reacted_by_me ? Theme.accent : Theme.border;
+                    border-color: r.reacted_by_me ? Theme.accent : (pill_touch.has-hover ? Theme.border-strong : Theme.border);
+                    animate background { duration: 120ms; }
+                    animate border-color { duration: 120ms; }
                     width: pill-text.preferred-width + 16px;
                     height: 22px;
                     pill-text := Text {
@@ -178,25 +218,45 @@ export component MessageRow inherits Rectangle {
                     pill_touch := TouchArea { clicked => { root.react(msg.id, r.emoji); } }
                 }
             }
-
-            if hover.has-hover && (msg.can_edit || msg.can_delete || msg.can_purge || msg.can_react): HorizontalLayout {
-                spacing: 10px;
-                alignment: start;
-                if msg.can_react: HorizontalLayout {
-                    spacing: 4px;
-                    for e in root.quick_emojis: ActionLink {
-                        text: e;
-                        font-size: 14px;
-                        clicked => { root.react(msg.id, e); }
-                    }
-                }
-                if msg.can_react: ActionLink { text: "Reply"; clicked => { root.reply(msg.id, msg.author_name, msg.body); } }
-                if msg.can_react: ActionLink { text: "Copy"; clicked => { root.copy(msg.body); } }
-                if msg.can_edit: ActionLink { text: "Edit"; clicked => { root.edit(msg.id, msg.body, msg.encrypted); } }
-                if msg.can_delete: ActionLink { text: "Delete"; clicked => { root.delete(msg.id); } }
-                if msg.can_purge: ActionLink { text: "Delete forever"; clicked => { root.purge(msg.id); } }
-            }
         }
     }
     } // content
+
+    // Floating action bar -- an overlay pinned to the row's top-right
+    // corner, so its appearance never changes the row height. The old
+    // in-flow bar grew the row on hover, the layout shifted, the cursor
+    // ended up outside the row, hover dropped, the bar vanished... a loop
+    // that made reactions/reply impossible to click.
+    action_bar := Rectangle {
+        visible: (hover.has-hover || bar_bg.has-hover) && (msg.can_edit || msg.can_delete || msg.can_purge || msg.can_react);
+        x: parent.width - self.width - 8px;
+        y: 4px;
+        width: bar_col.preferred-width + 16px;
+        height: bar_col.preferred-height + 8px;
+        background: Theme.bg-elevated;
+        border-width: 1px;
+        border-color: Theme.border-strong;
+        // Keeps has-hover alive while moving across the bar's padding; the
+        // ActionLinks sit above it in z-order and take their own clicks.
+        bar_bg := TouchArea {}
+        bar_col := HorizontalLayout {
+            x: 8px;
+            y: 4px;
+            spacing: 10px;
+            alignment: start;
+            if msg.can_react: HorizontalLayout {
+                spacing: 4px;
+                for e in root.quick_emojis: ActionLink {
+                    text: e;
+                    font-size: 14px;
+                    clicked => { root.react(msg.id, e); }
+                }
+            }
+            if msg.can_react && !msg.is_call_log: ActionLink { text: "Reply"; clicked => { root.reply(msg.id, msg.author_name, msg.body); } }
+            if msg.can_react && !msg.is_call_log: ActionLink { text: "Copy"; clicked => { root.copy(msg.body); } }
+            if msg.can_edit: ActionLink { text: "Edit"; clicked => { root.edit(msg.id, msg.body, msg.encrypted); } }
+            if msg.can_delete: ActionLink { text: "Delete"; clicked => { root.delete(msg.id); } }
+            if msg.can_purge: ActionLink { text: "Delete forever"; clicked => { root.purge(msg.id); } }
+        }
+    }
 }

@@ -21,7 +21,7 @@ import { SSChannelRow, SSMemberRow, SSRoleRow, SSPermRow } from "server_settings
 import {
     ServerRow, ConversationRow, FriendRow, IncomingRequestRow, OutgoingRequestRow,
     PeopleHitRow, SuggestionRow, BlockedRow, ChannelRow, AdminUserRow, GroupCandidateRow,
-    ChatMessageRow, MemberRow, ShareTargetRow, RoleTagRow,
+    ChatMessageRow, MemberRow, ShareTargetRow, RoleTagRow, VoiceUserVolumeRow,
 } from "chat_types.slint";
 
 export { AuthMode, SidebarTab }
@@ -206,6 +206,7 @@ export component AppWindow inherits Window {
     in property <string> settings_version_line;
     in property <string> settings_vault_hint;
     in property <string> settings_update_check_status;
+    in property <bool> settings_update_ready: false;
     in property <string> settings_ping_status;
 
     callback settings_close;
@@ -242,6 +243,7 @@ export component AppWindow inherits Window {
     callback settings_output_device_selected(string);
     callback settings_noise_gate_changed(float);
     callback settings_check_for_update;
+    callback settings_restart_update;
     callback settings_measure_ping;
 
     if root.current-screen == Screen.Settings: SettingsScreen {
@@ -284,6 +286,7 @@ export component AppWindow inherits Window {
         version_line: root.settings_version_line;
         vault_hint: root.settings_vault_hint;
         update_check_status: root.settings_update_check_status;
+        update_ready: root.settings_update_ready;
         ping_status: root.settings_ping_status;
 
         close => { root.settings_close(); }
@@ -320,6 +323,7 @@ export component AppWindow inherits Window {
         output_device_selected(d) => { root.settings_output_device_selected(d); }
         noise_gate_changed(v) => { root.settings_noise_gate_changed(v); }
         check_for_update => { root.settings_check_for_update(); }
+        restart_update => { root.settings_restart_update(); }
         measure_ping => { root.settings_measure_ping(); }
     }
 
@@ -608,6 +612,7 @@ export component AppWindow inherits Window {
     in property <bool> chat_in_voice: false;
     in property <string> chat_room_voice_status;
     in property <string> chat_voice_users_label;
+    in property <[VoiceUserVolumeRow]> chat_voice_users: [];
     in property <[ChatMessageRow]> chat_messages: [];
     in property <[string]> chat_quick_emojis: [];
     in property <bool> chat_is_editing: false;
@@ -615,6 +620,7 @@ export component AppWindow inherits Window {
     in property <string> chat_send_label: "Send";
     in property <bool> chat_crypto_ready: true;
     in-out property <string> chat_message_input;
+    in property <[string]> chat_mention_suggestions: [];
     in property <bool> chat_has_pending_attachment: false;
     in property <image> chat_pending_attachment_preview;
     in property <bool> chat_has_pending_reply: false;
@@ -630,6 +636,7 @@ export component AppWindow inherits Window {
     callback chat_join_voice;
     callback chat_leave_voice;
     callback chat_message_input_edited(string);
+    callback chat_mention_pick(string);
     callback chat_send;
     callback chat_pick_attachment;
     callback chat_remove_attachment;
@@ -642,6 +649,7 @@ export component AppWindow inherits Window {
     callback chat_delete(string);
     callback chat_purge(string);
     callback chat_open_attachment(string);
+    callback chat_voice_volume_changed(string, float);
 
     // ---- Members drawer ----
     in property <bool> chat_members_collapsed: true;
@@ -672,6 +680,7 @@ export component AppWindow inherits Window {
     in property <image> chat_remote_frame;
     in property <string> chat_remote_frame_title;
     in property <bool> chat_share_expanded: false;
+    in property <float> banner_peer_volume: 1.0;
 
     callback chat_call_accept;
     callback chat_call_decline;
@@ -709,6 +718,7 @@ export component AppWindow inherits Window {
             remote_frame: root.chat_remote_frame;
             remote_frame_title: root.chat_remote_frame_title;
             share_expanded: root.chat_share_expanded;
+            peer_volume: root.banner_peer_volume;
             accept => { root.chat_call_accept(); }
             decline => { root.chat_call_decline(); }
             hang_up => { root.chat_call_hang_up(); }
@@ -718,6 +728,7 @@ export component AppWindow inherits Window {
             stop_share => { root.chat_stop_share(); }
             start_share(id) => { root.chat_start_share(id); }
             toggle_share_size => { root.chat_toggle_share_size(); }
+            volume_changed(v) => { root.chat_voice_volume_changed("*", v); }
         }
 
         HorizontalLayout {
@@ -860,6 +871,7 @@ export component AppWindow inherits Window {
                 in_voice: root.chat_in_voice;
                 room_voice_status: root.chat_room_voice_status;
                 voice_users_label: root.chat_voice_users_label;
+                voice_users: root.chat_voice_users;
                 messages: root.chat_messages;
                 quick_emojis: root.chat_quick_emojis;
                 is_editing: root.chat_is_editing;
@@ -867,6 +879,7 @@ export component AppWindow inherits Window {
                 send_label: root.chat_send_label;
                 crypto_ready: root.chat_crypto_ready;
                 message_input <=> root.chat_message_input;
+                mention_suggestions: root.chat_mention_suggestions;
                 has_pending_attachment: root.chat_has_pending_attachment;
                 pending_attachment_preview: root.chat_pending_attachment_preview;
                 has_pending_reply: root.chat_has_pending_reply;
@@ -882,6 +895,7 @@ export component AppWindow inherits Window {
                 join_voice => { root.chat_join_voice(); }
                 leave_voice => { root.chat_leave_voice(); }
                 message_input_edited(t) => { root.chat_message_input_edited(t); }
+                mention_pick(name) => { root.chat_mention_pick(name); }
                 send => { root.chat_send(); }
                 pick_attachment => { root.chat_pick_attachment(); }
                 remove_attachment => { root.chat_remove_attachment(); }
@@ -894,6 +908,7 @@ export component AppWindow inherits Window {
                 delete(id) => { root.chat_delete(id); }
                 purge(id) => { root.chat_purge(id); }
                 open_attachment(url) => { root.chat_open_attachment(url); }
+                voice_volume_changed(id, v) => { root.chat_voice_volume_changed(id, v); }
             }
 
             if root.chat_selected_server: MembersDrawer {

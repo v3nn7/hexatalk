@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import { mutation, internalMutation, query, MutationCtx, QueryCtx } from "./_generated/server";
 import { currentUser } from "./session";
-import { Id } from "./_generated/dataModel";
+import { Doc, Id } from "./_generated/dataModel";
 import { conversationAllowsStorage } from "./prefs";
 
 async function requireMembership(
@@ -20,7 +20,7 @@ async function requireMembership(
   }
 }
 
-export const REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🎉"];
+export const REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🔥", "🎉", "👀"];
 
 export const list = query({
   args: {
@@ -134,6 +134,7 @@ export const list = query({
           replyTo,
           deleted,
           edited: message.editedAt !== undefined,
+          pinned: message.pinned ?? false,
           sentAt: message._creationTime,
         };
       }),
@@ -174,6 +175,7 @@ export const toggleReaction = mutation({
         messageId: args.messageId,
         userId: me._id,
         emoji: args.emoji,
+        createdAt: Date.now(),
       });
     }
     return null;
@@ -181,6 +183,153 @@ export const toggleReaction = mutation({
 });
 
 const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+
+// Discord-style cap so a channel can't accumulate unbounded pins.
+const MAX_PINS_PER_CONVERSATION = 50;
+
+/**
+ * Who may pin/unpin mirrors `remove`: the message author or a platform
+ * admin -- plus, for server channels, the server owner (the closest thing
+ * a server has to a channel admin in this codebase).
+ */
+async function canPinMessage(
+  ctx: MutationCtx,
+  me: Doc<"users">,
+  message: Doc<"messages">,
+): Promise<boolean> {
+  if (message.authorId === me._id || me.role === "admin") {
+    return true;
+  }
+  const conversation = await ctx.db.get("conversations", message.conversationId);
+  if (conversation?.kind === "channel" && conversation.serverId) {
+    const server = await ctx.db.get("servers", conversation.serverId);
+    if (server?.ownerId === me._id) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export const pinMessage = mutation({
+  args: {
+    sessionToken: v.string(),
+    messageId: v.id("messages"),
+  },
+  handler: async (ctx, args) => {
+    const me = await currentUser(ctx, args.sessionToken);
+    const message = await ctx.db.get("messages", args.messageId);
+    if (!message) {
+      throw new Error("Message not found");
+    }
+    if (message.deleted) {
+      throw new Error("You can't pin a deleted message");
+    }
+    if (message.kind === "call") {
+      throw new Error("Call history can't be pinned");
+    }
+    await requireMembership(ctx, message.conversationId, me._id);
+    if (!(await canPinMessage(ctx, me, message))) {
+      throw new Error("You don't have permission to pin this message");
+    }
+    if (message.pinned) {
+      return null;
+    }
+
+    const existingPins = await ctx.db
+      .query("messages")
+      .withIndex("by_conversation", (q) =>
+        q.eq("conversationId", message.conversationId),
+      )
+      .take(500);
+    const pinCount = existingPins.filter((m) => m.pinned === true).length;
+    if (pinCount >= MAX_PINS_PER_CONVERSATION) {
+      throw new Error(
+        `This chat already has ${MAX_PINS_PER_CONVERSATION} pinned messages`,
+      );
+    }
+
+    await ctx.db.patch("messages", message._id, {
+      pinned: true,
+      pinnedAt: Date.now(),
+      pinnedBy: me._id,
+    });
+    return null;
+  },
+});
+
+export const unpinMessage = mutation({
+  args: {
+    sessionToken: v.string(),
+    messageId: v.id("messages"),
+  },
+  handler: async (ctx, args) => {
+    const me = await currentUser(ctx, args.sessionToken);
+    const message = await ctx.db.get("messages", args.messageId);
+    if (!message) {
+      throw new Error("Message not found");
+    }
+    await requireMembership(ctx, message.conversationId, me._id);
+    if (!(await canPinMessage(ctx, me, message))) {
+      throw new Error("You don't have permission to unpin this message");
+    }
+    if (!message.pinned) {
+      return null;
+    }
+    await ctx.db.patch("messages", message._id, {
+      pinned: undefined,
+      pinnedAt: undefined,
+      pinnedBy: undefined,
+    });
+    return null;
+  },
+});
+
+/**
+ * Pinned messages of one conversation for the header panel. Newest pin
+ * first. Deleted pins drop out entirely (their bodies are tombstoned in
+ * `list` too). Encrypted bodies go out whole -- truncating a ciphertext
+ * blob would corrupt it; the client decrypts + truncates (same convention
+ * as reply snippets in `list`).
+ */
+export const listPinned = query({
+  args: {
+    sessionToken: v.string(),
+    conversationId: v.id("conversations"),
+  },
+  handler: async (ctx, args) => {
+    const me = await currentUser(ctx, args.sessionToken);
+    await requireMembership(ctx, args.conversationId, me._id);
+
+    const messages = await ctx.db
+      .query("messages")
+      .withIndex("by_conversation", (q) =>
+        q.eq("conversationId", args.conversationId),
+      )
+      .take(500);
+
+    return messages
+      .filter((m) => m.pinned === true && !m.deleted && m.kind !== "call")
+      .sort((a, b) => (b.pinnedAt ?? 0) - (a.pinnedAt ?? 0))
+      .slice(0, MAX_PINS_PER_CONVERSATION)
+      .map((m) => {
+        const encrypted = m.encrypted ?? false;
+        const snippet = encrypted
+          ? m.body
+          : m.body.length > 80
+            ? `${m.body.slice(0, 80)}...`
+            : m.body;
+        return {
+          id: m._id,
+          authorId: m.authorId,
+          authorName: m.authorName,
+          snippet,
+          encrypted,
+          pinned: true,
+          sentAt: m._creationTime,
+        };
+      });
+  },
+});
 
 export const generateAttachmentUploadUrl = mutation({
   args: { sessionToken: v.string() },
@@ -204,6 +353,11 @@ export const send = mutation({
     attachmentStorageId: v.optional(v.id("_storage")),
     replyToMessageId: v.optional(v.id("messages")),
     encrypted: v.optional(v.boolean()),
+    // Mention metadata, parsed client-side from the PLAINTEXT body (the
+    // client owns the plaintext for E2EE chats). Optional: older clients
+    // don't send these at all.
+    mentionUserIds: v.optional(v.array(v.id("users"))),
+    mentionEveryone: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const me = await currentUser(ctx, args.sessionToken);
@@ -270,6 +424,31 @@ export const send = mutation({
       }
     }
 
+    // Sanitize mention metadata: only real members of this conversation can
+    // be recorded as mentioned (the client computes these, but never trust
+    // it blindly), and @everyone only pings in channels/groups -- in 1:1
+    // DMs the token is just text.
+    let mentionUserIds: Id<"users">[] | undefined;
+    if (args.mentionUserIds && args.mentionUserIds.length > 0) {
+      const members = await ctx.db
+        .query("conversationMembers")
+        .withIndex("by_conversation", (q) =>
+          q.eq("conversationId", args.conversationId),
+        )
+        .take(500);
+      const memberIds = new Set(members.map((m) => m.userId));
+      const filtered = [...new Set(args.mentionUserIds)].filter((id) =>
+        memberIds.has(id),
+      );
+      if (filtered.length > 0) {
+        mentionUserIds = filtered;
+      }
+    }
+    const mentionEveryone =
+      args.mentionEveryone === true && (kind === "channel" || kind === "group")
+        ? true
+        : undefined;
+
     await ctx.db.insert("messages", {
       conversationId: args.conversationId,
       authorId: me._id,
@@ -279,6 +458,8 @@ export const send = mutation({
       attachmentStorageId: args.attachmentStorageId,
       replyToMessageId,
       encrypted: args.encrypted ? true : undefined,
+      mentionUserIds,
+      mentionEveryone,
     });
     await ctx.db.patch("conversations", args.conversationId, {
       lastMessageAt: Date.now(),

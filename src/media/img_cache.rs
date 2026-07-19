@@ -59,9 +59,3 @@ pub(crate) fn image_for(
     DECODED.with(|d| d.borrow_mut().insert(url.to_string(), img.clone()));
     Some(img)
 }
-
-/// Drop a cached decode (e.g. when an avatar is removed/changed) so the next
-/// lookup re-decodes from fresh bytes.
-pub(crate) fn invalidate(url: &str) {
-    DECODED.with(|d| d.borrow_mut().remove(url));
-}

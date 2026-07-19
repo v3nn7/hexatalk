@@ -18,8 +18,14 @@ use futures::StreamExt;
 use maplit::btreemap;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::rt::{job, Job, Task};
-use crate::*;
+use crate::net::rt::{job, Job, Task};
+use crate::crypto;
+use crate::media::call;
+use crate::net::peer;
+use crate::tray;
+use crate::net::convex_parse::{expect_null, obj_bool, obj_f64, obj_ms, obj_object, obj_object_array, obj_opt_str, obj_str, obj_str_list, parse_object_array, value_as_bool};
+use crate::state::message::Message;
+use crate::state::types::{AdminUserRow, BlockedUser, CallRole, ChannelSummary, ChatMessage, ConversationSummary, Friend, FriendSuggestion, IncomingRequest, MemberRoleTag, MyCallInfo, OutgoingRequest, ServerMemberRow, ServerRoleRow, ServerSummary, Session, SocialStats, VoiceUserRow};
 
 pub(crate) fn roles_subscription(
     client: ConvexClient,
@@ -102,10 +108,11 @@ pub(crate) fn room_voice_subscription(
     muted: Arc<AtomicBool>,
     output_muted: Arc<AtomicBool>,
     noise_gate: Arc<AtomicU32>,
+    gains: Arc<std::sync::Mutex<std::collections::HashMap<String, f32>>>,
     tx: UnboundedSender<Message>,
 ) -> Job {
     job(format!("room-voice:{key}"), async move {
-        let params = crate::room_voice::RoomVoiceParams {
+        let params = crate::media::room_voice::RoomVoiceParams {
             client,
             session_token: token,
             user_id,
@@ -115,9 +122,10 @@ pub(crate) fn room_voice_subscription(
             muted,
             output_muted,
             noise_gate,
+            gains,
         };
         let (event_tx, mut event_rx) = futures::channel::mpsc::channel(16);
-        tokio::spawn(crate::room_voice::run_room_voice(params, event_tx));
+        tokio::spawn(crate::media::room_voice::run_room_voice(params, event_tx));
         while let Some(event) = event_rx.next().await {
             if tx.send(Message::RoomVoiceEngineEvent(event)).is_err() {
                 break;
@@ -245,7 +253,7 @@ pub(crate) fn friends_subscription(
                     user_id: obj_str(&obj, "userId"),
                     username: obj_str(&obj, "username"),
                     display_name: obj_str(&obj, "displayName"),
-                    last_seen_at: obj_f64(&obj, "lastSeenAt"),
+                    last_seen_at: obj_ms(&obj, "lastSeenAt"),
                     presence: {
                         let p = obj_str(&obj, "presence");
                         if p.is_empty() {
@@ -261,7 +269,7 @@ pub(crate) fn friends_subscription(
                     nickname: obj_str(&obj, "nickname"),
                     favorite: obj.get("favorite").map(value_as_bool).unwrap_or(false),
                     private_note: obj_str(&obj, "privateNote"),
-                    friends_since: obj_f64(&obj, "friendsSince"),
+                    friends_since: obj_ms(&obj, "friendsSince"),
                     mutual_servers: obj_str_list(&obj, "mutualServers"),
                     is_staff: obj.get("isStaff").map(value_as_bool).unwrap_or(false),
                 })
@@ -342,6 +350,8 @@ pub(crate) fn channels_subscription(
                             t
                         }
                     },
+                    // Absent pre-deploy -> 0 (badge hidden).
+                    mention_count: obj_f64(&obj, "mentionCount") as u32,
                 })
                 .collect();
             if tx.send(Message::ChannelsUpdated(channels)).is_err() {
@@ -390,7 +400,7 @@ pub(crate) fn members_subscription(
                             r
                         }
                     },
-                    last_seen_at: obj_f64(&obj, "lastSeenAt"),
+                    last_seen_at: obj_ms(&obj, "lastSeenAt"),
                     roles: obj_object_array(&obj, "roles")
                         .into_iter()
                         .map(|r| MemberRoleTag {
@@ -447,7 +457,7 @@ pub(crate) fn requests_subscription(
                     from_avatar_color: obj_str(&obj, "fromAvatarColor"),
                     from_avatar_image_url: obj_str(&obj, "fromAvatarImageUrl"),
                     note: obj_str(&obj, "note"),
-                    sent_at: obj_f64(&obj, "sentAt"),
+                    sent_at: obj_ms(&obj, "sentAt"),
                     from_status_message: obj_str(&obj, "fromStatusMessage"),
                     mutual_servers: obj_str_list(&obj, "mutualServers"),
                     presence: {
@@ -495,7 +505,7 @@ pub(crate) fn outgoing_requests_subscription(
                     to_avatar_color: obj_str(&obj, "toAvatarColor"),
                     to_avatar_image_url: obj_str(&obj, "toAvatarImageUrl"),
                     note: obj_str(&obj, "note"),
-                    sent_at: obj_f64(&obj, "sentAt"),
+                    sent_at: obj_ms(&obj, "sentAt"),
                 })
                 .collect();
             if tx.send(Message::OutgoingRequestsUpdated(requests)).is_err() {
@@ -636,8 +646,10 @@ pub(crate) fn conversations_subscription(
                     title: obj_str(&obj, "title"),
                     kind: obj_str(&obj, "kind"),
                     peer_user_id: obj_opt_str(&obj, "peerUserId"),
-                    last_message_at: obj_f64(&obj, "lastMessageAt"),
+                    last_message_at: obj_ms(&obj, "lastMessageAt"),
                     unread: obj_bool(&obj, "unread"),
+                    // Absent pre-deploy -> 0 (badge hidden).
+                    mention_count: obj_f64(&obj, "mentionCount") as u32,
                 })
                 .collect();
             if tx.send(Message::ConversationsUpdated(conversations)).is_err() {
@@ -728,6 +740,7 @@ pub(crate) fn call_subscription(
     share_control_slot: Arc<
         std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<call::ShareCommand>>>,
     >,
+    gains: Arc<std::sync::Mutex<std::collections::HashMap<String, f32>>>,
     tx: UnboundedSender<Message>,
 ) -> Job {
     job(format!("call-subscription:{key}"), async move {
@@ -762,6 +775,7 @@ pub(crate) fn call_subscription(
             muted,
             output_muted,
             noise_gate,
+            gains,
             share_rx,
         };
 
@@ -852,13 +866,71 @@ pub(crate) fn messages_subscription(
                                 .collect(),
                             reply_to,
                             encrypted: is_encrypted,
-                            sent_at: obj_f64(&obj, "sentAt"),
+                            sent_at: obj_ms(&obj, "sentAt"),
                             deleted: obj_bool(&obj, "deleted"),
                             edited: obj_bool(&obj, "edited"),
+                            pinned: obj_bool(&obj, "pinned"),
                         }
                     })
                     .collect();
                 if tx.send(Message::MessagesUpdated(messages)).is_err() {
+                    break;
+                }
+            }
+        },
+    )
+}
+
+/// Watches `messages:listPinned` for the open conversation; rows arrive as
+/// `ChatMessage`s (body = snippet; encrypted blobs stay ciphertext for the
+/// update loop to decrypt, same convention as `messages_subscription`).
+pub(crate) fn pins_subscription(
+    client: ConvexClient,
+    token: String,
+    conversation_id: String,
+    tx: UnboundedSender<Message>,
+) -> Job {
+    job(
+        format!("pins-subscription:{conversation_id}"),
+        async move {
+            let mut client = client;
+            let Ok(mut sub) = client
+                .subscribe(
+                    "messages:listPinned",
+                    btreemap! {
+                        "sessionToken".to_string() => Value::String(token),
+                        "conversationId".to_string() => Value::String(conversation_id),
+                    },
+                )
+                .await
+            else {
+                return;
+            };
+            while let Some(result) = sub.next().await {
+                let pinned = parse_object_array(result)
+                    .into_iter()
+                    .map(|obj| ChatMessage {
+                        id: obj_str(&obj, "id"),
+                        author_id: obj_str(&obj, "authorId"),
+                        author_name: obj_str(&obj, "authorName"),
+                        author_avatar_color: String::new(),
+                        author_avatar_url: String::new(),
+                        author_is_bot: false,
+                        body: obj_str(&obj, "snippet"),
+                        kind: "text".into(),
+                        attachment_url: String::new(),
+                        attachment_key: None,
+                        attachment_nonce: None,
+                        reactions: Vec::new(),
+                        reply_to: None,
+                        encrypted: obj_bool(&obj, "encrypted"),
+                        sent_at: obj_ms(&obj, "sentAt"),
+                        deleted: false,
+                        edited: false,
+                        pinned: true,
+                    })
+                    .collect();
+                if tx.send(Message::PinnedMessagesUpdated(pinned)).is_err() {
                     break;
                 }
             }

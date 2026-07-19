@@ -59,36 +59,36 @@ const HKDF_INFO_CK: &[u8] = b"talkyss-ck-v3";
 /// A user's long-term X25519 identity key pair. The private half never leaves
 /// this device; only the public half is uploaded to Convex.
 #[derive(Clone)]
-pub struct IdentityKeyPair {
+pub(crate) struct IdentityKeyPair {
     secret: StaticSecret,
 }
 
 impl IdentityKeyPair {
-    pub fn generate() -> Self {
+    pub(crate) fn generate() -> Self {
         Self {
             secret: StaticSecret::random(),
         }
     }
 
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
         Self {
             secret: StaticSecret::from(bytes),
         }
     }
 
-    pub fn to_bytes(&self) -> [u8; 32] {
+    pub(crate) fn to_bytes(&self) -> [u8; 32] {
         self.secret.to_bytes()
     }
 
-    pub fn public_key_bytes(&self) -> [u8; 32] {
+    pub(crate) fn public_key_bytes(&self) -> [u8; 32] {
         *PublicKey::from(&self.secret).as_bytes()
     }
 
-    pub fn public_key_base64(&self) -> String {
+    pub(crate) fn public_key_base64(&self) -> String {
         BASE64_STANDARD.encode(self.public_key_bytes())
     }
 
-    pub fn shared_secret_with(&self, their_public_key_base64: &str) -> Option<[u8; 32]> {
+    pub(crate) fn shared_secret_with(&self, their_public_key_base64: &str) -> Option<[u8; 32]> {
         let their = decode_public_b64(their_public_key_base64)?;
         Some(
             self.secret
@@ -98,7 +98,7 @@ impl IdentityKeyPair {
     }
 }
 
-pub fn fingerprint_for_public_b64(public_key_base64: &str) -> String {
+pub(crate) fn fingerprint_for_public_b64(public_key_base64: &str) -> String {
     let Ok(raw) = BASE64_STANDARD.decode(public_key_base64) else {
         return String::new();
     };
@@ -138,18 +138,18 @@ fn kdf_ck(ck: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
 
 /// Plaintext envelope stored inside the ratchet ciphertext.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessagePayload {
-    pub text: String,
+pub(crate) struct MessagePayload {
+    pub(crate) text: String,
     /// Random AES-256 key for the attachment blob (base64), if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub att_key: Option<String>,
+    pub(crate) att_key: Option<String>,
     /// GCM nonce for the attachment blob (base64), if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub att_nonce: Option<String>,
+    pub(crate) att_nonce: Option<String>,
 }
 
 impl MessagePayload {
-    pub fn text_only(text: impl Into<String>) -> Self {
+    pub(crate) fn text_only(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
             att_key: None,
@@ -157,17 +157,17 @@ impl MessagePayload {
         }
     }
 
-    pub fn encode(&self) -> String {
+    pub(crate) fn encode(&self) -> String {
         serde_json::to_string(self).expect("MessagePayload serializes")
     }
 
-    pub fn decode(raw: &str) -> Option<Self> {
+    pub(crate) fn decode(raw: &str) -> Option<Self> {
         serde_json::from_str(raw).ok()
     }
 }
 
 /// Encrypt raw attachment bytes. Returns (ciphertext, key_b64, nonce_b64).
-pub fn encrypt_attachment(plain: &[u8]) -> (Vec<u8>, String, String) {
+pub(crate) fn encrypt_attachment(plain: &[u8]) -> (Vec<u8>, String, String) {
     let mut key = [0u8; 32];
     OsRng.fill_bytes(&mut key);
     let mut nonce_bytes = [0u8; NONCE_LEN];
@@ -185,7 +185,7 @@ pub fn encrypt_attachment(plain: &[u8]) -> (Vec<u8>, String, String) {
 }
 
 /// Decrypt attachment bytes produced by [`encrypt_attachment`].
-pub fn decrypt_attachment(key_b64: &str, nonce_b64: &str, ciphertext: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn decrypt_attachment(key_b64: &str, nonce_b64: &str, ciphertext: &[u8]) -> Option<Vec<u8>> {
     let key = BASE64_STANDARD.decode(key_b64).ok()?;
     let nonce_bytes = BASE64_STANDARD.decode(nonce_b64).ok()?;
     if key.len() != 32 || nonce_bytes.len() != NONCE_LEN {
@@ -218,7 +218,7 @@ struct PersistedSession {
 
 /// Dual-chain ratchet session for one DM peer, persisted under APPDATA.
 #[derive(Clone)]
-pub struct RatchetSession {
+pub(crate) struct RatchetSession {
     path: PathBuf,
     peer_user_id: String,
     peer_public_key: [u8; 32],
@@ -237,14 +237,14 @@ impl RatchetSession {
     }
 
     /// Drop persisted ratchet state for one DM pair (and any legacy TKR2 file).
-    pub fn clear(base_dir: &Path, local_user_id: &str, peer_user_id: &str) {
+    pub(crate) fn clear(base_dir: &Path, local_user_id: &str, peer_user_id: &str) {
         let _ = std::fs::remove_file(Self::session_path(base_dir, local_user_id, peer_user_id));
         let legacy = base_dir.join(format!("ratchet_{local_user_id}_{peer_user_id}.json"));
         let _ = std::fs::remove_file(legacy);
     }
 
     /// Delete every ratchet_*.json under the Talkyss data dir.
-    pub fn clear_all(base_dir: &Path) {
+    pub(crate) fn clear_all(base_dir: &Path) {
         let Ok(entries) = std::fs::read_dir(base_dir) else {
             return;
         };
@@ -260,7 +260,7 @@ impl RatchetSession {
     }
 
     /// Load an existing session or create a fresh one from identity DH.
-    pub fn load_or_create(
+    pub(crate) fn load_or_create(
         base_dir: &Path,
         local_user_id: &str,
         peer_user_id: &str,
@@ -353,7 +353,7 @@ impl RatchetSession {
         })
     }
 
-    pub fn save(&self) -> std::io::Result<()> {
+    pub(crate) fn save(&self) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -403,7 +403,7 @@ impl RatchetSession {
     }
 
     /// Encrypt a payload. `aad` should be stable per conversation.
-    pub fn encrypt(&mut self, plaintext: &str, aad: &[u8]) -> Option<String> {
+    pub(crate) fn encrypt(&mut self, plaintext: &str, aad: &[u8]) -> Option<String> {
         let (next_ck, mk) = kdf_ck(&self.send_ck);
         self.send_ck = next_ck;
         let n = self.send_n;
@@ -433,7 +433,7 @@ impl RatchetSession {
         Some(BASE64_STANDARD.encode(out))
     }
 
-    pub fn decrypt(&mut self, blob_b64: &str, aad: &[u8]) -> Option<String> {
+    pub(crate) fn decrypt(&mut self, blob_b64: &str, aad: &[u8]) -> Option<String> {
         let blob = BASE64_STANDARD.decode(blob_b64).ok()?;
         if blob.len() < 4 + 1 + 4 + NONCE_LEN + 16 {
             return None;
@@ -497,7 +497,7 @@ fn decrypt_with_mk(
 
 /// Local cache so the UI can re-render history without replaying the ratchet.
 #[derive(Default, Serialize, Deserialize)]
-pub struct DecryptCache {
+pub(crate) struct DecryptCache {
     /// key: `message_id + ":" + sha256(ciphertext)[0..16 hex]`
     entries: HashMap<String, String>,
     /// Ciphertext-hash → plaintext, for reply-quote lookups without message id.
@@ -510,7 +510,7 @@ impl DecryptCache {
         base_dir.join(format!("decrypt_cache_{local_user_id}_{peer_user_id}.json"))
     }
 
-    pub fn load(base_dir: &Path, local_user_id: &str, peer_user_id: &str) -> Self {
+    pub(crate) fn load(base_dir: &Path, local_user_id: &str, peer_user_id: &str) -> Self {
         let path = Self::path(base_dir, local_user_id, peer_user_id);
         std::fs::read_to_string(path)
             .ok()
@@ -518,7 +518,7 @@ impl DecryptCache {
             .unwrap_or_default()
     }
 
-    pub fn save(&self, base_dir: &Path, local_user_id: &str, peer_user_id: &str) {
+    pub(crate) fn save(&self, base_dir: &Path, local_user_id: &str, peer_user_id: &str) {
         let path = Self::path(base_dir, local_user_id, peer_user_id);
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -529,12 +529,12 @@ impl DecryptCache {
     }
 
     /// Drop cache for this pair (used after protocol upgrades / chat clear).
-    pub fn clear(base_dir: &Path, local_user_id: &str, peer_user_id: &str) {
+    pub(crate) fn clear(base_dir: &Path, local_user_id: &str, peer_user_id: &str) {
         let _ = std::fs::remove_file(Self::path(base_dir, local_user_id, peer_user_id));
     }
 
     /// Delete every decrypt_cache_*.json under the Talkyss data dir.
-    pub fn clear_all(base_dir: &Path) {
+    pub(crate) fn clear_all(base_dir: &Path) {
         let Ok(entries) = std::fs::read_dir(base_dir) else {
             return;
         };
@@ -560,20 +560,20 @@ impl DecryptCache {
         format!("{message_id}:{}", Self::ct_hash(ciphertext))
     }
 
-    pub fn get(&self, message_id: &str, ciphertext: &str) -> Option<String> {
+    pub(crate) fn get(&self, message_id: &str, ciphertext: &str) -> Option<String> {
         self.entries
             .get(&Self::entry_key(message_id, ciphertext))
             .cloned()
             .or_else(|| self.get_by_ciphertext(ciphertext))
     }
 
-    pub fn get_by_ciphertext(&self, ciphertext: &str) -> Option<String> {
+    pub(crate) fn get_by_ciphertext(&self, ciphertext: &str) -> Option<String> {
         self.by_ciphertext
             .get(&Self::ct_hash(ciphertext))
             .cloned()
     }
 
-    pub fn put(&mut self, message_id: &str, ciphertext: &str, plaintext: String) {
+    pub(crate) fn put(&mut self, message_id: &str, ciphertext: &str, plaintext: String) {
         self.entries
             .insert(Self::entry_key(message_id, ciphertext), plaintext.clone());
         self.by_ciphertext
@@ -596,7 +596,7 @@ impl DecryptCache {
 }
 
 /// True when `s` is a base64-encoded TKR3 ratchet blob (not plaintext).
-pub fn looks_like_ratchet_blob(s: &str) -> bool {
+pub(crate) fn looks_like_ratchet_blob(s: &str) -> bool {
     BASE64_STANDARD
         .decode(s)
         .ok()
@@ -604,7 +604,7 @@ pub fn looks_like_ratchet_blob(s: &str) -> bool {
 }
 
 /// Build AAD for a DM: conversation id + both user ids (sorted).
-pub fn dm_aad(conversation_id: &str, user_a: &str, user_b: &str) -> Vec<u8> {
+fn dm_aad(conversation_id: &str, user_a: &str, user_b: &str) -> Vec<u8> {
     let (a, b) = if user_a < user_b {
         (user_a, user_b)
     } else {
@@ -632,12 +632,12 @@ const GROUP_WIRE_MAGIC: &[u8; 4] = b"TGK1";
 const HKDF_INFO_GROUP_WRAP: &[u8] = b"talkyss-group-wrap-v1";
 const HKDF_INFO_GROUP_MSG: &[u8] = b"talkyss-group-msg-v1";
 
-pub fn group_aad(conversation_id: &str, epoch: u32) -> Vec<u8> {
+fn group_aad(conversation_id: &str, epoch: u32) -> Vec<u8> {
     format!("talkyss-group-v1|{conversation_id}|{epoch}").into_bytes()
 }
 
 /// True when `s` looks like a TGK1 group ciphertext blob.
-pub fn looks_like_group_blob(s: &str) -> bool {
+pub(crate) fn looks_like_group_blob(s: &str) -> bool {
     BASE64_STANDARD
         .decode(s)
         .ok()
@@ -645,7 +645,7 @@ pub fn looks_like_group_blob(s: &str) -> bool {
 }
 
 /// Generate a fresh 32-byte group conversation key.
-pub fn generate_group_key() -> [u8; 32] {
+pub(crate) fn generate_group_key() -> [u8; 32] {
     let mut key = [0u8; 32];
     OsRng.fill_bytes(&mut key);
     key
@@ -653,7 +653,7 @@ pub fn generate_group_key() -> [u8; 32] {
 
 /// Seal a group key to a member's X25519 public key.
 /// Returns (eph_public_b64, sealed_key_b64) where sealed is nonce||ct of the 32-byte key.
-pub fn seal_group_key_for(
+pub(crate) fn seal_group_key_for(
     recipient_public_b64: &str,
     group_key: &[u8; 32],
 ) -> Option<(String, String)> {
@@ -677,7 +677,7 @@ pub fn seal_group_key_for(
 }
 
 /// Unseal a group key using our long-term identity private key.
-pub fn unseal_group_key(
+pub(crate) fn unseal_group_key(
     identity: &IdentityKeyPair,
     eph_public_b64: &str,
     sealed_key_b64: &str,
@@ -707,7 +707,7 @@ fn group_message_key(group_key: &[u8; 32], epoch: u32) -> [u8; 32] {
 }
 
 /// Encrypt a plaintext envelope for a group/channel conversation.
-pub fn encrypt_group_message(
+pub(crate) fn encrypt_group_message(
     group_key: &[u8; 32],
     epoch: u32,
     conversation_id: &str,
@@ -737,7 +737,7 @@ pub fn encrypt_group_message(
 }
 
 /// Decrypt a TGK1 blob. Returns plaintext string.
-pub fn decrypt_group_message(
+pub(crate) fn decrypt_group_message(
     group_key: &[u8; 32],
     conversation_id: &str,
     blob_b64: &str,
@@ -770,14 +770,14 @@ pub fn decrypt_group_message(
 
 /// In-memory + on-disk cache of unsealed group keys per conversation.
 #[derive(Clone)]
-pub struct GroupKeyStore {
+pub(crate) struct GroupKeyStore {
     /// conversation_id -> (epoch, key)
     keys: HashMap<String, (u32, [u8; 32])>,
     path: PathBuf,
 }
 
 impl GroupKeyStore {
-    pub fn load(base_dir: &Path, local_user_id: &str) -> Self {
+    pub(crate) fn load(base_dir: &Path, local_user_id: &str) -> Self {
         let path = base_dir.join(format!("group_keys_{local_user_id}.json"));
         let keys = std::fs::read_to_string(&path)
             .ok()
@@ -817,16 +817,16 @@ impl GroupKeyStore {
         }
     }
 
-    pub fn get(&self, conversation_id: &str) -> Option<(u32, [u8; 32])> {
+    pub(crate) fn get(&self, conversation_id: &str) -> Option<(u32, [u8; 32])> {
         self.keys.get(conversation_id).copied()
     }
 
-    pub fn put(&mut self, conversation_id: &str, epoch: u32, key: [u8; 32]) {
+    pub(crate) fn put(&mut self, conversation_id: &str, epoch: u32, key: [u8; 32]) {
         self.keys.insert(conversation_id.to_string(), (epoch, key));
         self.save();
     }
 
-    pub fn clear_conversation(&mut self, conversation_id: &str) {
+    pub(crate) fn clear_conversation(&mut self, conversation_id: &str) {
         self.keys.remove(conversation_id);
         self.save();
     }
@@ -843,7 +843,7 @@ struct StoredGroupKey {
 // ---------------------------------------------------------------------------
 
 #[allow(dead_code)]
-pub fn encrypt(shared_secret: &[u8; 32], plaintext: &str) -> String {
+pub(crate) fn encrypt(shared_secret: &[u8; 32], plaintext: &str) -> String {
     let mut salt = [0u8; SALT_LEN];
     OsRng.fill_bytes(&mut salt);
     let mut nonce_bytes = [0u8; NONCE_LEN];
@@ -862,7 +862,7 @@ pub fn encrypt(shared_secret: &[u8; 32], plaintext: &str) -> String {
 }
 
 #[allow(dead_code)]
-pub fn decrypt(shared_secret: &[u8; 32], blob_base64: &str) -> Option<String> {
+pub(crate) fn decrypt(shared_secret: &[u8; 32], blob_base64: &str) -> Option<String> {
     let blob = BASE64_STANDARD.decode(blob_base64).ok()?;
     if blob.len() < SALT_LEN + NONCE_LEN {
         return None;

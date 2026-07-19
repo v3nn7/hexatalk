@@ -6,8 +6,8 @@
 //! browser, no separate installer. Fully silent; the only visible trace is
 //! a toast once the download finishes and the "About" status line.
 
-use crate::rt::Task;
-use crate::*;
+use crate::net::rt::Task;
+use crate::state::message::Message;
 
 // astrakit.pro is set up as a public custom domain in front of the R2
 // bucket, so plain anonymous GETs work here (unlike the raw
@@ -15,8 +15,8 @@ use crate::*;
 // requests). Upload `version.txt` (just the version string, e.g. "1.1.0")
 // and the latest `Talkyss.exe` to the bucket root on every release.
 pub(crate) const CURRENT_APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub(crate) const UPDATE_VERSION_URL: &str = "https://astrakit.pro/version.txt";
-pub(crate) const UPDATE_DOWNLOAD_URL: &str = "https://astrakit.pro/Talkyss.exe";
+const UPDATE_VERSION_URL: &str = "https://astrakit.pro/version.txt";
+const UPDATE_DOWNLOAD_URL: &str = "https://astrakit.pro/Talkyss.exe";
 
 #[derive(Debug, Clone)]
 pub(crate) enum UpdateOutcome {
@@ -91,7 +91,7 @@ async fn run_update_check() -> UpdateOutcome {
 /// Compares two `major.minor.patch`-style version strings numerically
 /// (falls back to treating an unparsable remote version as "not newer",
 /// so a malformed `version.txt` can't trigger a bogus update notice).
-pub(crate) fn is_newer_version(remote: &str, local: &str) -> bool {
+fn is_newer_version(remote: &str, local: &str) -> bool {
     fn parts(v: &str) -> Vec<u64> {
         v.trim()
             .trim_start_matches('v')
@@ -109,22 +109,34 @@ pub(crate) fn is_newer_version(remote: &str, local: &str) -> bool {
 /// Spawns a detached helper that waits for this process to fully exit (so
 /// Windows releases its lock on the running .exe), then moves the staged
 /// download over it. Not launched immediately -- called right before the
-/// app's own `iced::exit()` call sites so it never races the still-running
-/// process. Does not relaunch the app; the swap just means the *next*
+/// app's own quit call sites so it never races the still-running process.
+/// With `relaunch` the helper also starts the fresh exe afterwards (the
+/// "Restart & install" flow); without it the swap just means the *next*
 /// launch (shortcut, Start Menu, ...) picks up the new build.
 #[cfg(windows)]
-pub(crate) fn stage_exe_swap(staged_path: &std::path::Path) {
+pub(crate) fn stage_exe_swap(staged_path: &std::path::Path, relaunch: bool) {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     let Ok(exe_path) = std::env::current_exe() else {
         return;
     };
-    let script = format!(
-        "ping -n 2 127.0.0.1 >nul & move /Y \"{}\" \"{}\"",
-        staged_path.display(),
-        exe_path.display(),
-    );
+    // `current_exe()` may return an extended-length path (`\\?\C:\...`) which
+    // breaks `move`/`start` inside cmd (Windows reports it cannot find "\\").
+    // Strip the prefix so the helper script sees plain DOS paths.
+    fn dos_path(p: &std::path::Path) -> String {
+        let s = p.display().to_string();
+        s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s)
+    }
+    let staged = dos_path(staged_path);
+    let exe = dos_path(&exe_path);
+    let script = if relaunch {
+        format!(
+            "ping -n 2 127.0.0.1 >nul & move /Y \"{staged}\" \"{exe}\" & start \"\" \"{exe}\"",
+        )
+    } else {
+        format!("ping -n 2 127.0.0.1 >nul & move /Y \"{staged}\" \"{exe}\"",)
+    };
     let _ = std::process::Command::new("cmd")
         .args(["/C", &script])
         .creation_flags(CREATE_NO_WINDOW)
@@ -132,4 +144,4 @@ pub(crate) fn stage_exe_swap(staged_path: &std::path::Path) {
 }
 
 #[cfg(not(windows))]
-pub(crate) fn stage_exe_swap(_staged_path: &std::path::Path) {}
+pub(crate) fn stage_exe_swap(_staged_path: &std::path::Path, _relaunch: bool) {}
