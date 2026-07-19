@@ -92,7 +92,7 @@ impl IdentityKeyPair {
         let their = decode_public_b64(their_public_key_base64)?;
         Some(
             self.secret
-                .diffie_hellman(&PublicKey::from(their))
+                .diffie_hellman(&their.get_public_key())
                 .to_bytes(),
         )
     }
@@ -111,9 +111,29 @@ pub(crate) fn fingerprint_for_public_b64(public_key_base64: &str) -> String {
         .join("")
 }
 
-fn decode_public_b64(public_key_base64: &str) -> Option<[u8; 32]> {
-    let bytes = BASE64_STANDARD.decode(public_key_base64).ok()?;
-    bytes.try_into().ok()
+#[repr(align(64))]
+struct AlignedKey {
+    key: [u8; 32],
+    _padding: [u8; 32],
+}
+
+impl AlignedKey {
+    pub fn get_public_key(&self) -> PublicKey {
+        PublicKey::from(self.key)
+    }
+}
+
+fn decode_public_b64(public_key_base64: &str) -> Option<AlignedKey> {
+    let bytes = AlignedKey {
+        key: BASE64_STANDARD
+            .decode(public_key_base64)
+            .ok()?
+            .try_into()
+            .ok()?,
+        _padding: [0u8; 32],
+    };
+
+    Some(bytes)
 }
 
 fn hkdf_32(ikm: &[u8], salt: Option<&[u8]>, info: &[u8]) -> [u8; 32] {
@@ -291,7 +311,7 @@ impl RatchetSession {
 
         let sk_raw = identity.shared_secret_with(peer_public_key_b64)?;
         let root = hkdf_32(&sk_raw, None, HKDF_INFO_ROOT);
-        let peer_public_key = decode_public_b64(peer_public_key_b64)?;
+        let peer_public_key = decode_public_b64(peer_public_key_b64)?.key;
 
         // Both peers derive identical chain seeds from the same root + the
         // sorted user-id pair (encoded into the HKDF infos via order only).
@@ -339,7 +359,7 @@ impl RatchetSession {
         Some(Self {
             path: path.to_path_buf(),
             peer_user_id: p.peer_user_id,
-            peer_public_key: decode_public_b64(&p.peer_public_key)?,
+            peer_public_key: decode_public_b64(&p.peer_public_key)?.key,
             my_chain_id: p.my_chain_id,
             send_ck: {
                 let b = BASE64_STANDARD.decode(&p.send_ck).ok()?;
@@ -648,7 +668,7 @@ pub(crate) fn seal_group_key_for(
     let their = decode_public_b64(recipient_public_b64)?;
     let eph = StaticSecret::random();
     let eph_pub = PublicKey::from(&eph);
-    let shared = eph.diffie_hellman(&PublicKey::from(their));
+    let shared = eph.diffie_hellman(&their.get_public_key());
     let wrap_key = hkdf_32(shared.as_bytes(), None, HKDF_INFO_GROUP_WRAP);
     let mut nonce_bytes = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut nonce_bytes);
@@ -676,7 +696,7 @@ pub(crate) fn unseal_group_key(
         return None;
     }
     let (nonce_bytes, ct) = sealed.split_at(NONCE_LEN);
-    let shared = identity.secret.diffie_hellman(&PublicKey::from(eph_bytes));
+    let shared = identity.secret.diffie_hellman(&eph_bytes.get_public_key());
     let wrap_key = hkdf_32(shared.as_bytes(), None, HKDF_INFO_GROUP_WRAP);
     let cipher = Aes256Gcm::new_from_slice(&wrap_key).ok()?;
     let nonce = Nonce::from_slice(nonce_bytes);
