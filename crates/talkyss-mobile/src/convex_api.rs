@@ -145,6 +145,8 @@ pub enum NetEvent {
     /// Current member's permission bitmask for the server just opened (see
     /// `PERM_*` constants) — `None` while not yet loaded.
     MyServerPermissions(u32),
+    /// Raw JSON string from messages:search (debug / future UI).
+    SearchResults(String),
 }
 
 struct LiveWatch {
@@ -223,6 +225,44 @@ impl Backend {
 
     pub fn ensure_connected(&self) {
         // HTTP is stateless — nothing to open.
+    }
+
+    /// Register FCM/device token (no-op until FCM_SERVER_KEY is set server-side).
+    pub fn register_push_token(&self, session_token: String, token: String) {
+        let http = self.http.clone();
+        self.rt.spawn(async move {
+            let args = json!({
+                "sessionToken": session_token.clone(),
+                "token": token,
+                "platform": "android",
+            });
+            let _ = convex_call(&http, "mutation", "push:registerToken", args).await;
+            let touch = json!({
+                "sessionToken": session_token,
+                "deviceName": "Android",
+                "platform": "android",
+            });
+            let _ = convex_call(&http, "mutation", "prefs:touchSession", touch).await;
+        });
+    }
+
+    pub fn search_messages(&self, session_token: String, query: String) {
+        let http = self.http.clone();
+        let tx = self.tx.clone();
+        self.rt.spawn(async move {
+            let args = json!({
+                "sessionToken": session_token,
+                "query": query,
+            });
+            match convex_call(&http, "query", "messages:search", args).await {
+                Ok(v) => {
+                    let _ = tx.send(NetEvent::SearchResults(format!("{v}")));
+                }
+                Err(e) => {
+                    let _ = tx.send(NetEvent::AuthErr(e));
+                }
+            }
+        });
     }
 
     pub fn sign_in(&self, username: String, password: String) {

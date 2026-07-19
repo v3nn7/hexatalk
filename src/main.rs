@@ -209,6 +209,9 @@ struct UiSnapshot {
     profile: Option<ProfileRaw>,
     settings: Option<SettingsRaw>,
     server_settings: Option<ServerSettingsRaw>,
+    command_palette_open: bool,
+    command_palette_query: String,
+    command_palette_results: Vec<String>,
 }
 
 struct ServerSettingsRaw {
@@ -352,6 +355,9 @@ struct ChatRaw {
     call_output_muted: bool,
     call_status_text: Option<String>,
     is_sharing: bool,
+    share_system_audio: bool,
+    remote_stream_muted: bool,
+    share_stats_line: String,
     share_picker_open: bool,
     share_targets: Vec<screenshare::ShareTarget>,
     has_remote_share_frame: bool,
@@ -531,6 +537,9 @@ impl UiSnapshot {
             call_output_muted: app.call_output_muted.load(Ordering::Relaxed),
             call_status_text: app.call_status_text.clone(),
             is_sharing: app.is_sharing,
+            share_system_audio: app.share_system_audio,
+            remote_stream_muted: app.remote_stream_muted,
+            share_stats_line: app.share_stats_line.clone(),
             share_picker_open: app.share_picker_open,
             share_targets: app.share_targets.clone(),
             has_remote_share_frame: app.remote_share_frame.is_some(),
@@ -559,6 +568,13 @@ impl UiSnapshot {
             profile,
             settings,
             server_settings,
+            command_palette_open: app.command_palette_open,
+            command_palette_query: app.command_palette_query.clone(),
+            command_palette_results: app
+                .command_palette_hits
+                .iter()
+                .map(|(_, line, _)| line.clone())
+                .collect(),
         }
     }
 
@@ -572,6 +588,16 @@ impl UiSnapshot {
         ui.set_auth_busy(self.auth_busy);
         ui.set_connect_status(self.connect_status.clone().into());
         ui.set_app_version_line(self.app_version_line.clone().into());
+        ui.set_command_palette_open(self.command_palette_open);
+        ui.set_command_palette_query(self.command_palette_query.clone().into());
+        ui.set_command_palette_results(
+            self.command_palette_results
+                .iter()
+                .map(|s| slint::SharedString::from(s.as_str()))
+                .collect::<Vec<_>>()
+                .as_slice()
+                .into(),
+        );
         if let Some(chat) = &self.chat {
             apply_chat(chat, &self.image_cache, ui);
         }
@@ -587,7 +613,7 @@ impl UiSnapshot {
     }
 }
 
-const ROLE_PERM_LABELS: [(u32, &str); 8] = [
+const ROLE_PERM_LABELS: [(u32, &str); 9] = [
     (PERM_VIEW_CHANNELS, "View channels"),
     (PERM_SEND_MESSAGES, "Send messages"),
     (PERM_MANAGE_CHANNELS, "Manage channels"),
@@ -596,6 +622,7 @@ const ROLE_PERM_LABELS: [(u32, &str); 8] = [
     (PERM_MANAGE_SERVER, "Manage server"),
     (PERM_CONNECT_VOICE, "Connect to voice"),
     (PERM_SPEAK, "Speak"),
+    (crate::state::types::PERM_ANNOUNCE, "Post announcements"),
 ];
 
 fn apply_server_settings(
@@ -1301,6 +1328,13 @@ fn apply_chat(
     ui.set_chat_show_call_button(is_direct && c.my_call.is_none());
     let is_server_channel = matches!(c.active_conversation_kind.as_deref(), Some("channel") | Some("voice"));
     ui.set_chat_is_server_channel(is_server_channel);
+    let channel_muted = c
+        .active_conversation
+        .as_ref()
+        .and_then(|id| c.channels.iter().find(|ch| &ch.conversation_id == id))
+        .map(|ch| ch.muted)
+        .unwrap_or(false);
+    ui.set_chat_channel_muted(channel_muted);
     ui.set_chat_store_enabled(c.chat_store_enabled);
     ui.set_chat_store_allowed(c.chat_store_allowed);
     ui.set_chat_clear_chat_busy(c.clear_chat_busy);
@@ -1352,13 +1386,25 @@ fn apply_chat(
     ui.set_chat_quick_emojis(QUICK_REACT_EMOJIS.iter().map(|e| slint::SharedString::from(*e)).collect::<Vec<_>>().as_slice().into());
     let is_editing = c.editing_message_id.is_some();
     ui.set_chat_is_editing(is_editing);
-    let mut placeholder = if is_editing { "Edit message..." } else { "Type a message..." }.to_string();
+    let channel_can_send = c
+        .active_conversation
+        .as_ref()
+        .and_then(|id| c.channels.iter().find(|ch| &ch.conversation_id == id))
+        .map(|ch| ch.can_send)
+        .unwrap_or(true);
+    let mut placeholder = if is_editing {
+        "Edit message...".to_string()
+    } else if !channel_can_send {
+        "Only staff can post in announcements".to_string()
+    } else {
+        "Type a message...".to_string()
+    };
     if is_direct && !peer_connected_now {
         placeholder = "Waiting for secure channel…".to_string();
     }
     ui.set_chat_input_placeholder(placeholder.into());
     ui.set_chat_send_label(if is_editing { "Save" } else { "Send" }.into());
-    let crypto_ready = !is_direct || peer_connected_now;
+    let crypto_ready = (!is_direct || peer_connected_now) && channel_can_send;
     ui.set_chat_crypto_ready(crypto_ready);
     ui.set_chat_message_input(c.message_input.clone().into());
     ui.set_chat_mention_suggestions(
@@ -1454,9 +1500,13 @@ fn apply_chat(
         ui.set_chat_has_remote_frame(c.has_remote_share_frame && remote_frame_img.is_some());
         ui.set_chat_remote_frame_title(format!("{}'s screen", call.peer_display_name).into());
         ui.set_chat_share_expanded(c.share_view_expanded);
+        ui.set_chat_share_stats_line(c.share_stats_line.clone().into());
+        ui.set_chat_remote_stream_muted(c.remote_stream_muted);
+        ui.set_chat_share_system_audio(c.share_system_audio);
     } else {
         ui.set_chat_call_visible(false);
         ui.set_chat_has_remote_frame(false);
+        ui.set_chat_share_stats_line("".into());
     }
 
     // Patch avatar/attachment images now that we're on the UI thread and
@@ -1613,6 +1663,22 @@ fn wire_callbacks(ui: &slint_ui::AppWindow, tx: UnboundedSender<Message>) {
     ui.on_escape_pressed(move || {
         let _ = t.send(Message::EscapePressed);
     });
+    let t = tx.clone();
+    ui.on_open_command_palette(move || {
+        let _ = t.send(Message::OpenCommandPalette);
+    });
+    let t = tx.clone();
+    ui.on_command_palette_close(move || {
+        let _ = t.send(Message::CloseCommandPalette);
+    });
+    let t = tx.clone();
+    ui.on_command_palette_query_changed(move |q| {
+        let _ = t.send(Message::CommandPaletteQueryChanged(q.to_string()));
+    });
+    let t = tx.clone();
+    ui.on_command_palette_pick(move |i| {
+        let _ = t.send(Message::CommandPalettePick(i as usize));
+    });
 
     wire_chat_callbacks(ui, &tx);
     wire_profile_callbacks(ui, &tx);
@@ -1743,6 +1809,7 @@ fn wire_chat_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Message>) 
     // ---- Chat area ----
     on0!(on_chat_start_call, Message::StartCall);
     on0!(on_chat_toggle_store, Message::ToggleStoreHistoryThisChat);
+    on0!(on_chat_toggle_channel_mute, Message::ToggleChannelMute);
     on0!(on_chat_toggle_clear_confirm, Message::ToggleClearChatConfirm);
     on0!(on_chat_confirm_clear, Message::ConfirmClearChat);
     on0!(on_chat_join_voice, Message::JoinVoiceChannel);
@@ -1785,6 +1852,8 @@ fn wire_chat_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Message>) 
     on0!(on_chat_stop_share, Message::StopShare);
     on1!(on_chat_start_share, |id: slint::SharedString| Message::StartShare(id.to_string()));
     on0!(on_chat_toggle_share_size, Message::ToggleShareViewSize);
+    on0!(on_chat_toggle_stream_mute, Message::ToggleStreamMute);
+    on0!(on_chat_toggle_share_system_audio, Message::ToggleShareSystemAudio);
 }
 
 /// Wires the `profile_*` Slint callbacks -- port of src/view/profile.rs's

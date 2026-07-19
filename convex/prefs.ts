@@ -107,6 +107,97 @@ export const signOutOtherSessions = mutation({
   },
 });
 
+/** List active sessions for the security / devices UI. */
+export const listSessions = query({
+  args: { sessionToken: v.string() },
+  handler: async (ctx, args) => {
+    const me = await currentUser(ctx, args.sessionToken);
+    const sessions = await ctx.db
+      .query("sessions")
+      .withIndex("by_userId", (q) => q.eq("userId", me._id))
+      .take(50);
+    const now = Date.now();
+    return sessions
+      .filter((s) => s.expiresAt > now)
+      .map((s) => ({
+        sessionId: s._id,
+        deviceName: s.deviceName ?? "Unknown device",
+        platform: s.platform ?? "unknown",
+        createdAt: s.createdAt ?? s._creationTime,
+        lastActiveAt: s.lastActiveAt ?? s.createdAt ?? s._creationTime,
+        isCurrent: s.token === args.sessionToken,
+        expiresAt: s.expiresAt,
+      }))
+      .sort((a, b) => b.lastActiveAt - a.lastActiveAt);
+  },
+});
+
+/** Revoke one session by id (cannot revoke others' sessions). */
+export const revokeSession = mutation({
+  args: {
+    sessionToken: v.string(),
+    sessionId: v.id("sessions"),
+  },
+  handler: async (ctx, args) => {
+    const me = await currentUser(ctx, args.sessionToken);
+    const row = await ctx.db.get("sessions", args.sessionId);
+    if (!row || row.userId !== me._id) {
+      throw new Error("Session not found");
+    }
+    if (row.token === args.sessionToken) {
+      throw new Error("Use Log out to end this device's session");
+    }
+    await ctx.db.delete("sessions", args.sessionId);
+    return null;
+  },
+});
+
+/** Touch lastActiveAt + optional device label on the current session. */
+export const touchSession = mutation({
+  args: {
+    sessionToken: v.string(),
+    deviceName: v.optional(v.string()),
+    platform: v.optional(
+      v.union(
+        v.literal("desktop"),
+        v.literal("android"),
+        v.literal("ios"),
+        v.literal("web"),
+        v.literal("bot"),
+        v.literal("unknown"),
+      ),
+    ),
+  },
+  handler: async (ctx, args) => {
+    const session = await ctx.db
+      .query("sessions")
+      .withIndex("by_token", (q) => q.eq("token", args.sessionToken))
+      .unique();
+    if (!session || session.expiresAt < Date.now()) {
+      throw new Error("Session expired, please log in again");
+    }
+    const patch: {
+      lastActiveAt: number;
+      deviceName?: string;
+      platform?:
+        | "desktop"
+        | "android"
+        | "ios"
+        | "web"
+        | "bot"
+        | "unknown";
+    } = { lastActiveAt: Date.now() };
+    if (args.deviceName !== undefined) {
+      patch.deviceName = args.deviceName.trim().slice(0, 80) || "Unknown device";
+    }
+    if (args.platform !== undefined) {
+      patch.platform = args.platform;
+    }
+    await ctx.db.patch("sessions", session._id, patch);
+    return null;
+  },
+});
+
 export const setConversationStore = mutation({
   args: {
     sessionToken: v.string(),

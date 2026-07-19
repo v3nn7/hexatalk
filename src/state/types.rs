@@ -357,6 +357,13 @@ pub(crate) struct ChannelSummary {
     pub(crate) channel_type: String, // "text" | "voice"
     /// Unread messages that @-mention me (or @everyone) -- red sidebar badge.
     pub(crate) mention_count: u32,
+    pub(crate) category_id: String,
+    pub(crate) position: i64,
+    pub(crate) is_announcement: bool,
+    pub(crate) is_system: bool,
+    pub(crate) muted: bool,
+    pub(crate) can_send: bool,
+    pub(crate) permissions: u32,
 }
 
 /// One custom role explicitly assigned to a member (the implicit
@@ -442,3 +449,4 @@ pub(crate) const PERM_MANAGE_ROLES: u32 = 1 << 4;
 pub(crate) const PERM_MANAGE_SERVER: u32 = 1 << 5;
 pub(crate) const PERM_CONNECT_VOICE: u32 = 1 << 6;
 pub(crate) const PERM_SPEAK: u32 = 1 << 7;
+pub(crate) const PERM_ANNOUNCE: u32 = 1 << 8;

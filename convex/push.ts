@@ -1,10 +1,13 @@
 import { v } from "convex/values";
-import { mutation, query } from "./_generated/server";
+import { mutation, query, internalQuery } from "./_generated/server";
 import { currentUser } from "./session";
+import { Id } from "./_generated/dataModel";
+import { isEffectivelyMuted } from "./channels";
 
 /**
  * Register / refresh a device push token for the signed-in user.
- * Actual FCM/APNs send is wired later (needs server keys in Convex env).
+ * Actual FCM/APNs send is wired later (needs server keys in Convex env):
+ * set FCM_SERVER_KEY / APNS_* in Convex dashboard, then call sendToUser.
  */
 export const registerToken = mutation({
   args: {
@@ -79,6 +82,39 @@ export const listMine = query({
       platform: r.platform,
       updatedAt: r.updatedAt,
       tokenPreview: `${r.token.slice(0, 8)}…`,
+    }));
+  },
+});
+
+/**
+ * Tokens eligible for a conversation notify (respects mute prefs).
+ * Used by future FCM/APNs action — returns [] when muted or no tokens.
+ */
+export const tokensForConversationNotify = internalQuery({
+  args: {
+    userId: v.id("users"),
+    conversationId: v.id("conversations"),
+    isMention: v.optional(v.boolean()),
+    isEveryone: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    const muted = await isEffectivelyMuted(
+      ctx,
+      args.userId as Id<"users">,
+      args.conversationId as Id<"conversations">,
+      {
+        isMention: args.isMention === true,
+        isEveryone: args.isEveryone === true,
+      },
+    );
+    if (muted) return [];
+    const rows = await ctx.db
+      .query("pushTokens")
+      .withIndex("by_user", (q) => q.eq("userId", args.userId))
+      .take(20);
+    return rows.map((r) => ({
+      token: r.token,
+      platform: r.platform,
     }));
   },
 });

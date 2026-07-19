@@ -39,6 +39,12 @@ fn build_invite_link(code: &str) -> String {
     format!("talkyss://invite/{code}")
 }
 
+fn hostname_best_effort() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "device".into())
+}
+
 /// Pulls the invite code out of a pasted `talkyss://invite/<code>` (or
 /// `https://.../invite/<code>`) link, falling back to treating the whole
 /// trimmed input as a bare code if it doesn't look like a link.
@@ -199,11 +205,38 @@ impl App {
                 self.auth_error = None;
                 save_session_to_disk(&session);
                 let avatar_url = session.avatar_image_url.clone();
+                let touch_token = session.token.clone();
                 self.session = Some(session);
                 self.show_toast("Signed in");
+                let touch = if let Some(client) = self.client.clone() {
+                    let mut client = client;
+                    let device = format!(
+                        "{} · {}",
+                        std::env::consts::OS,
+                        hostname_best_effort()
+                    );
+                    Task::perform(
+                        async move {
+                            let _ = client
+                                .mutation(
+                                    "prefs:touchSession",
+                                    btreemap! {
+                                        "sessionToken".to_string() => Value::String(touch_token),
+                                        "deviceName".to_string() => Value::String(device),
+                                        "platform".to_string() => Value::String("desktop".into()),
+                                    },
+                                )
+                                .await;
+                        },
+                        |_| Message::CallActionFinished(Ok(())),
+                    )
+                } else {
+                    Task::none()
+                };
                 Task::batch([
                     self.fetch_missing_avatars(std::iter::once(avatar_url)),
                     self.ensure_identity_key(),
+                    touch,
                 ])
             }
             Message::AuthFinished(Err(err)) => {
@@ -692,8 +725,21 @@ impl App {
                 self.conversations_loaded = true;
                 self.conversations = list;
                 if let Some(title) = notify_title {
-                    play_beep(BEEP_MESSAGE);
-                    notify_desktop("Talkyss", &format!("New message · {title}"));
+                    // Skip toast for muted channels (still show if not in channels list).
+                    let muted = self.channels.iter().any(|c| {
+                        c.muted
+                            && self
+                                .conversations
+                                .iter()
+                                .any(|conv| {
+                                    conv.title == title
+                                        && conv.conversation_id == c.conversation_id
+                                })
+                    });
+                    if !muted {
+                        play_beep(BEEP_MESSAGE);
+                        notify_desktop("Talkyss", &format!("New message · {title}"));
+                    }
                 }
                 // Keep the open chat marked read as new traffic arrives --
                 // but only when there is something genuinely unread. An
@@ -4637,10 +4683,35 @@ impl App {
                     }
                     call::CallEvent::ScreenShareStopped => {
                         self.remote_share_frame = None;
+                        self.share_stats_line.clear();
                     }
                     call::CallEvent::ScreenShareFailed(msg) => {
                         self.is_sharing = false;
+                        self.share_stats_line.clear();
                         self.chat_error = Some(msg);
+                    }
+                    call::CallEvent::ShareStats {
+                        fps,
+                        kbps,
+                        last_frame_bytes,
+                        system_audio,
+                    } => {
+                        let audio = if system_audio { " · sys audio" } else { "" };
+                        self.share_stats_line = format!(
+                            "{fps:.1} fps · {kbps:.0} kbps · {:.0} KB/frame{audio}",
+                            last_frame_bytes as f32 / 1024.0
+                        );
+                    }
+                    call::CallEvent::PeerMuteStream(muted) => {
+                        // Peer muted our outbound system audio.
+                        if let Some(tx) = &self.share_control_tx {
+                            let _ = tx.send(call::ShareCommand::SetSystemAudio(!muted));
+                        }
+                        self.share_system_audio = !muted;
+                        if muted {
+                            self.chat_error =
+                                Some("Peer muted your stream audio".into());
+                        }
                     }
                 }
                 Task::none()
@@ -4671,16 +4742,101 @@ impl App {
                 };
                 self.share_picker_open = false;
                 if let Some(tx) = &self.share_control_tx {
-                    let _ = tx.send(call::ShareCommand::Start(target));
+                    let _ = tx.send(call::ShareCommand::Start {
+                        target,
+                        include_system_audio: self.share_system_audio,
+                    });
                     self.is_sharing = true;
                 }
                 Task::none()
             }
             Message::StopShare => {
                 self.is_sharing = false;
+                self.share_stats_line.clear();
                 if let Some(tx) = &self.share_control_tx {
                     let _ = tx.send(call::ShareCommand::Stop);
                 }
+                Task::none()
+            }
+            Message::ToggleStreamMute => {
+                self.remote_stream_muted = !self.remote_stream_muted;
+                if let Some(tx) = &self.share_control_tx {
+                    let _ = tx.send(call::ShareCommand::SetRemoteStreamMuted(
+                        self.remote_stream_muted,
+                    ));
+                }
+                Task::none()
+            }
+            Message::ToggleShareSystemAudio => {
+                self.share_system_audio = !self.share_system_audio;
+                if self.is_sharing {
+                    if let Some(tx) = &self.share_control_tx {
+                        let _ = tx.send(call::ShareCommand::SetSystemAudio(
+                            self.share_system_audio,
+                        ));
+                    }
+                }
+                Task::none()
+            }
+            Message::ToggleChannelMute => {
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                let Some(conv_id) = self.active_conversation.clone() else {
+                    return Task::none();
+                };
+                let currently_muted = self
+                    .channels
+                    .iter()
+                    .find(|c| c.conversation_id == conv_id)
+                    .map(|c| c.muted)
+                    .unwrap_or(false);
+                let muted = !currently_muted;
+                // Optimistic UI until listChannels subscription refreshes.
+                if let Some(ch) = self
+                    .channels
+                    .iter_mut()
+                    .find(|c| c.conversation_id == conv_id)
+                {
+                    ch.muted = muted;
+                }
+                let mut client = client;
+                Task::perform(
+                    async move {
+                        let result = client
+                            .mutation(
+                                "channels:setMute",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(session.token),
+                                    "scope".to_string() => Value::String("conversation".into()),
+                                    "targetId".to_string() => Value::String(conv_id),
+                                    "muted".to_string() => Value::Boolean(muted),
+                                },
+                            )
+                            .await
+                            .map_err(|e| humanize_error(&e.to_string()))?;
+                        expect_null(result).map_err(|e| humanize_error(&e))?;
+                        Ok(muted)
+                    },
+                    |r| match r {
+                        Ok(m) => Message::ChannelMuteFinished(Ok(m)),
+                        Err(e) => Message::ChannelMuteFinished(Err(e)),
+                    },
+                )
+            }
+            Message::ChannelMuteFinished(Ok(muted)) => {
+                self.show_toast(if muted {
+                    "Channel muted"
+                } else {
+                    "Channel unmuted"
+                });
+                Task::none()
+            }
+            Message::ChannelMuteFinished(Err(err)) => {
+                self.chat_error = Some(err);
                 Task::none()
             }
             Message::ToggleShareViewSize => {
@@ -4695,8 +4851,94 @@ impl App {
                 self.attachment_preview_url = None;
                 Task::none()
             }
+            Message::OpenCommandPalette => {
+                if self.session.is_none() {
+                    return Task::none();
+                }
+                self.command_palette_open = true;
+                self.command_palette_query.clear();
+                self.command_palette_hits.clear();
+                Task::none()
+            }
+            Message::CloseCommandPalette => {
+                self.command_palette_open = false;
+                self.command_palette_query.clear();
+                self.command_palette_hits.clear();
+                Task::none()
+            }
+            Message::CommandPaletteQueryChanged(q) => {
+                self.command_palette_query = q.clone();
+                if q.trim().len() < 2 {
+                    self.command_palette_hits.clear();
+                    return Task::none();
+                }
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                let mut client = client;
+                Task::perform(
+                    async move {
+                        let result = client
+                            .query(
+                                "messages:search",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(session.token),
+                                    "query".to_string() => Value::String(q),
+                                },
+                            )
+                            .await
+                            .map_err(|e| humanize_error(&e.to_string()))?;
+                        let rows = parse_object_array(result);
+                        let hits = rows
+                            .into_iter()
+                            .map(|obj| {
+                                let conv = obj_str(&obj, "conversationId");
+                                let name = obj_str(&obj, "conversationName");
+                                let author = obj_str(&obj, "authorName");
+                                let body = obj_str(&obj, "body");
+                                let mid = obj_str(&obj, "messageId");
+                                let line = format!("#{name} · {author}: {body}");
+                                (conv, line, mid)
+                            })
+                            .collect::<Vec<_>>();
+                        Ok(hits)
+                    },
+                    Message::CommandPaletteSearchFinished,
+                )
+            }
+            Message::CommandPaletteSearchFinished(Ok(hits)) => {
+                if self.command_palette_open {
+                    self.command_palette_hits = hits;
+                }
+                Task::none()
+            }
+            Message::CommandPaletteSearchFinished(Err(err)) => {
+                self.show_toast(err);
+                Task::none()
+            }
+            Message::CommandPalettePick(idx) => {
+                if let Some((conv_id, _, _)) = self.command_palette_hits.get(idx).cloned() {
+                    self.command_palette_open = false;
+                    self.command_palette_query.clear();
+                    self.command_palette_hits.clear();
+                    // Prefer channel open when the hit is a server channel we know;
+                    // otherwise open as a DM/group conversation.
+                    if self.channels.iter().any(|c| c.conversation_id == conv_id) {
+                        return self.update(Message::OpenChannel(conv_id));
+                    }
+                    return self.update(Message::OpenConversationDirect(conv_id));
+                }
+                Task::none()
+            }
             Message::EscapePressed => {
-                if !self.mention_suggestions.is_empty() {
+                if self.command_palette_open {
+                    self.command_palette_open = false;
+                    self.command_palette_query.clear();
+                    self.command_palette_hits.clear();
+                } else if !self.mention_suggestions.is_empty() {
                     self.mention_suggestions.clear();
                 } else if self.attachment_preview_url.is_some() {
                     self.attachment_preview_url = None;

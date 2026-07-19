@@ -2,7 +2,14 @@ import { v } from "convex/values";
 import { mutation, query, MutationCtx, QueryCtx } from "./_generated/server";
 import { currentUser } from "./session";
 import { Id } from "./_generated/dataModel";
-import { assignedRoleIds, ensureDefaultRole, requirePerm, Perm } from "./roles";
+import {
+  assignedRoleIds,
+  ensureDefaultRole,
+  requirePerm,
+  Perm,
+  DEFAULT_STAFF_PERMS,
+  channelPermissions,
+} from "./roles";
 
 // Excludes visually-similar characters (0/O, 1/I/L) so invite codes read
 // back correctly when someone copies them by hand.
@@ -59,10 +66,34 @@ export const createServer = mutation({
     // in roles.ts) — no need to assign it explicitly, and the owner gets
     // ALL_PERMS regardless of any role.
     await ensureDefaultRole(ctx, serverId);
+    // Staff role: can manage channels + post in #announcements.
+    await ctx.db.insert("serverRoles", {
+      serverId,
+      name: "Staff",
+      color: "#FAA61A",
+      position: 1,
+      permissions: DEFAULT_STAFF_PERMS,
+    });
     await ctx.db.insert("serverMembers", {
       serverId,
       userId: me._id,
       joinedAt: Date.now(),
+    });
+
+    // Always-visible announcements: everyone reads, only staff/owner write.
+    const announcementsId = await ctx.db.insert("conversations", {
+      kind: "channel",
+      name: "announcements",
+      createdBy: me._id,
+      serverId,
+      channelType: "text",
+      isAnnouncement: true,
+      isSystem: true,
+      position: -1000,
+    });
+    await ctx.db.insert("conversationMembers", {
+      conversationId: announcementsId,
+      userId: me._id,
     });
 
     const conversationId = await ctx.db.insert("conversations", {
@@ -71,6 +102,7 @@ export const createServer = mutation({
       createdBy: me._id,
       serverId,
       channelType: "text",
+      position: 0,
     });
     await ctx.db.insert("conversationMembers", {
       conversationId,
@@ -84,10 +116,16 @@ export const createServer = mutation({
       createdBy: me._id,
       serverId,
       channelType: "voice",
+      position: 1,
     });
     await ctx.db.insert("conversationMembers", {
       conversationId: voiceId,
       userId: me._id,
+    });
+
+    // New members land in general (not announcements).
+    await ctx.db.patch("servers", serverId, {
+      welcomeChannelId: conversationId,
     });
 
     return serverId;
@@ -409,20 +447,53 @@ export const listChannels = query({
           }
         }
 
+        const perms = await channelPermissions(ctx, c._id, me._id);
+        if ((perms & Perm.VIEW_CHANNELS) !== Perm.VIEW_CHANNELS) {
+          return null;
+        }
+
+        const muteRow = await ctx.db
+          .query("notificationPrefs")
+          .withIndex("by_user_and_scope_and_target", (q) =>
+            q
+              .eq("userId", me._id)
+              .eq("scope", "conversation")
+              .eq("targetId", String(c._id)),
+          )
+          .unique();
+        const now = Date.now();
+        const muted =
+          !!muteRow?.muted &&
+          (!muteRow.mutedUntil || muteRow.mutedUntil > now);
+
         return {
           conversationId: c._id,
           name: c.name ?? "channel",
           channelType: (c.channelType ?? "text") as "text" | "voice",
           mentionCount,
+          categoryId: c.categoryId ?? null,
+          position: c.position ?? 0,
+          isAnnouncement: c.isAnnouncement === true,
+          isSystem: c.isSystem === true,
+          muted,
+          canSend: (perms & Perm.SEND_MESSAGES) === Perm.SEND_MESSAGES,
+          permissions: perms,
         };
       }),
     );
-    return rows.sort((a, b) => {
-      if (a.channelType !== b.channelType) {
-        return a.channelType === "text" ? -1 : 1;
-      }
-      return a.name.localeCompare(b.name);
-    });
+    return rows
+      .filter((r): r is NonNullable<typeof r> => r !== null)
+      .sort((a, b) => {
+        // Announcements always pin to the top of text channels.
+        if (a.isAnnouncement !== b.isAnnouncement) {
+          return a.isAnnouncement ? -1 : 1;
+        }
+        if (a.channelType !== b.channelType) {
+          return a.channelType === "text" ? -1 : 1;
+        }
+        if (a.position !== b.position) return a.position - b.position;
+        return a.name.localeCompare(b.name);
+      });
   },
 });
 
@@ -899,6 +970,9 @@ export const renameChannel = mutation({
       throw new Error("Channel not found");
     }
     await requirePerm(ctx, channel.serverId, me._id, Perm.MANAGE_CHANNELS);
+    if (channel.isSystem) {
+      throw new Error("System channels can't be renamed");
+    }
 
     const name = slugifyChannelName(args.name);
     if (name.length === 0) {
@@ -919,6 +993,9 @@ export const deleteChannel = mutation({
     }
     const serverId = channel.serverId;
     await requirePerm(ctx, serverId, me._id, Perm.MANAGE_CHANNELS);
+    if (channel.isSystem || channel.isAnnouncement) {
+      throw new Error("System / announcements channels can't be deleted");
+    }
 
     const siblingChannels = await ctx.db
       .query("conversations")

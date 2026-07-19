@@ -61,6 +61,20 @@ export default defineSchema({
     userId: v.id("users"),
     token: v.string(),
     expiresAt: v.number(),
+    // Device metadata for security UI (list / revoke).
+    deviceName: v.optional(v.string()),
+    platform: v.optional(
+      v.union(
+        v.literal("desktop"),
+        v.literal("android"),
+        v.literal("ios"),
+        v.literal("web"),
+        v.literal("bot"),
+        v.literal("unknown"),
+      ),
+    ),
+    createdAt: v.optional(v.number()),
+    lastActiveAt: v.optional(v.number()),
   })
     .index("by_token", ["token"])
     .index("by_userId", ["userId"]),
@@ -125,9 +139,61 @@ export default defineSchema({
     channelType: v.optional(v.union(v.literal("text"), v.literal("voice"))),
     // Current group-key epoch for encrypted group/channel messages (TGK1).
     keyEpoch: v.optional(v.number()),
+    // Discord-like category (null = uncategorized).
+    categoryId: v.optional(v.id("channelCategories")),
+    // Sort order within category / server (lower = higher in list).
+    position: v.optional(v.number()),
+    // Staff-only write channel (announcements). Everyone can read.
+    isAnnouncement: v.optional(v.boolean()),
+    // System channels cannot be deleted/renamed by regular manage-channel.
+    isSystem: v.optional(v.boolean()),
   })
     .index("by_directKey", ["directKey"])
-    .index("by_server", ["serverId"]),
+    .index("by_server", ["serverId"])
+    .index("by_server_and_category", ["serverId", "categoryId"]),
+
+  // Channel category headers (Discord-style collapsible groups).
+  channelCategories: defineTable({
+    serverId: v.id("servers"),
+    name: v.string(),
+    position: v.number(),
+  }).index("by_server", ["serverId"]),
+
+  // Per-channel permission overwrites (role or member). Discord model:
+  // base = role union, then apply deny, then apply allow.
+  channelOverwrites: defineTable({
+    conversationId: v.id("conversations"),
+    serverId: v.id("servers"),
+    // role | member
+    targetType: v.union(v.literal("role"), v.literal("member")),
+    // serverRoles id or users id depending on targetType.
+    targetId: v.string(),
+    allow: v.number(),
+    deny: v.number(),
+  })
+    .index("by_conversation", ["conversationId"])
+    .index("by_server", ["serverId"])
+    .index("by_conversation_and_target", [
+      "conversationId",
+      "targetType",
+      "targetId",
+    ]),
+
+  // Mute / notification prefs per conversation or whole server.
+  notificationPrefs: defineTable({
+    userId: v.id("users"),
+    // conversation | server
+    scope: v.union(v.literal("conversation"), v.literal("server")),
+    targetId: v.string(),
+    muted: v.boolean(),
+    // 0 = forever while muted; otherwise mute ends at this ms epoch.
+    mutedUntil: v.optional(v.number()),
+    // When muted, still notify on @mentions / @everyone.
+    suppressMentions: v.optional(v.boolean()),
+    updatedAt: v.number(),
+  })
+    .index("by_user", ["userId"])
+    .index("by_user_and_scope_and_target", ["userId", "scope", "targetId"]),
 
   servers: defineTable({
     name: v.string(),

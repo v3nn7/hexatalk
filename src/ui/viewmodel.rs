@@ -257,16 +257,25 @@ pub(crate) fn channel_rows(
     channels
         .iter()
         .filter(|c| (c.channel_type == "voice") == voice)
-        .map(|c| ui::ChannelRow {
-            conversation_id: c.conversation_id.clone().into(),
-            label: if voice {
-                format!("v  {}", c.name)
+        .map(|c| {
+            let prefix = if voice {
+                "v"
+            } else if c.is_announcement {
+                "!"
             } else {
-                format!("#  {}", c.name)
+                "#"
+            };
+            let mute_mark = if c.muted { " 🔇" } else { "" };
+            ui::ChannelRow {
+                conversation_id: c.conversation_id.clone().into(),
+                label: format!("{prefix}  {}{mute_mark}", c.name).into(),
+                is_voice: voice,
+                active: active_id == Some(c.conversation_id.as_str()),
+                is_announcement: c.is_announcement,
+                muted: c.muted,
+                can_send: c.can_send,
+                category_id: c.category_id.clone().into(),
             }
-            .into(),
-            is_voice: voice,
-            active: active_id == Some(c.conversation_id.as_str()),
         })
         .collect()
 }

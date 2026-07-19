@@ -356,6 +356,17 @@ pub(crate) fn channels_subscription(
                     },
                     // Absent pre-deploy -> 0 (badge hidden).
                     mention_count: obj_f64(&obj, "mentionCount") as u32,
+                    category_id: obj_str(&obj, "categoryId"),
+                    position: obj_f64(&obj, "position") as i64,
+                    is_announcement: obj_bool(&obj, "isAnnouncement"),
+                    is_system: obj_bool(&obj, "isSystem"),
+                    muted: obj_bool(&obj, "muted"),
+                    // Default true so older deployments still allow send.
+                    can_send: obj
+                        .get("canSend")
+                        .map(|v| matches!(v, Value::Boolean(true)))
+                        .unwrap_or(true),
+                    permissions: obj_f64(&obj, "permissions") as u32,
                 })
                 .collect();
             if tx.send(Message::ChannelsUpdated(channels)).is_err() {

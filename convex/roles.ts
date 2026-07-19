@@ -13,6 +13,8 @@ export const Perm = {
   MANAGE_SERVER: 1 << 5,
   CONNECT_VOICE: 1 << 6,
   SPEAK: 1 << 7,
+  /** Post in announcement / staff-read-only channels. */
+  ANNOUNCE: 1 << 8,
 } as const;
 
 export const DEFAULT_EVERYONE_PERMS =
@@ -20,6 +22,13 @@ export const DEFAULT_EVERYONE_PERMS =
   Perm.SEND_MESSAGES |
   Perm.CONNECT_VOICE |
   Perm.SPEAK;
+
+/** Default "Staff" role on new servers — manage + announce, not kick. */
+export const DEFAULT_STAFF_PERMS =
+  DEFAULT_EVERYONE_PERMS |
+  Perm.MANAGE_CHANNELS |
+  Perm.MANAGE_ROLES |
+  Perm.ANNOUNCE;
 
 export const ALL_PERMS =
   Perm.VIEW_CHANNELS |
@@ -29,7 +38,8 @@ export const ALL_PERMS =
   Perm.MANAGE_ROLES |
   Perm.MANAGE_SERVER |
   Perm.CONNECT_VOICE |
-  Perm.SPEAK;
+  Perm.SPEAK |
+  Perm.ANNOUNCE;
 
 const ROLE_COLORS = [
   "#33FF66",
@@ -107,6 +117,91 @@ export async function requirePerm(
     throw new Error("Missing permission");
   }
   return { server, membership, perms };
+}
+
+/**
+ * Discord-style channel permission resolution:
+ * 1) base = union of @everyone + assigned roles (owner = ALL)
+ * 2) apply role overwrites: perms = (perms & ~deny) | allow
+ * 3) apply member overwrite last
+ */
+export async function channelPermissions(
+  ctx: QueryCtx | MutationCtx,
+  conversationId: Id<"conversations">,
+  userId: Id<"users">,
+): Promise<number> {
+  const conversation = await ctx.db.get("conversations", conversationId);
+  if (!conversation || conversation.kind !== "channel" || !conversation.serverId) {
+    // DMs / groups: full chat rights for members.
+    return ALL_PERMS;
+  }
+  const server = await ctx.db.get("servers", conversation.serverId);
+  if (!server) return 0;
+  const membership = await requireServerMember(ctx, conversation.serverId, userId);
+  let perms = await memberPermissions(ctx, server, membership);
+
+  const overwrites = await ctx.db
+    .query("channelOverwrites")
+    .withIndex("by_conversation", (q) => q.eq("conversationId", conversationId))
+    .take(100);
+
+  const assigned = new Set(assignedRoleIds(membership).map(String));
+  // Also treat @everyone (position 0) as a role overwrite target.
+  const allRoles = await ctx.db
+    .query("serverRoles")
+    .withIndex("by_server", (q) => q.eq("serverId", conversation.serverId!))
+    .take(50);
+  const everyone = allRoles.find((r) => r.position === 0);
+
+  // Role overwrites first (everyone, then assigned roles by position).
+  const roleOw = overwrites.filter((o) => o.targetType === "role");
+  const orderedRoleIds: string[] = [];
+  if (everyone) orderedRoleIds.push(String(everyone._id));
+  for (const r of allRoles
+    .filter((r) => r.position !== 0)
+    .sort((a, b) => a.position - b.position)) {
+    if (assigned.has(String(r._id))) orderedRoleIds.push(String(r._id));
+  }
+  for (const roleId of orderedRoleIds) {
+    const ow = roleOw.find((o) => o.targetId === roleId);
+    if (!ow) continue;
+    perms = (perms & ~ow.deny) | ow.allow;
+  }
+
+  const memberOw = overwrites.find(
+    (o) => o.targetType === "member" && o.targetId === String(userId),
+  );
+  if (memberOw) {
+    perms = (perms & ~memberOw.deny) | memberOw.allow;
+  }
+
+  // Announcement channels: SEND_MESSAGES only via ANNOUNCE (or full manage).
+  if (conversation.isAnnouncement) {
+    const mayAnnounce =
+      (perms & Perm.ANNOUNCE) === Perm.ANNOUNCE ||
+      (perms & Perm.MANAGE_SERVER) === Perm.MANAGE_SERVER ||
+      server.ownerId === userId;
+    if (!mayAnnounce) {
+      perms &= ~Perm.SEND_MESSAGES;
+    } else {
+      perms |= Perm.SEND_MESSAGES;
+    }
+  }
+
+  return perms;
+}
+
+export async function requireChannelPerm(
+  ctx: QueryCtx | MutationCtx,
+  conversationId: Id<"conversations">,
+  userId: Id<"users">,
+  perm: number,
+) {
+  const perms = await channelPermissions(ctx, conversationId, userId);
+  if ((perms & perm) !== perm) {
+    throw new Error("Missing permission");
+  }
+  return perms;
 }
 
 /** Ensure a brand-new server has an @everyone-style default role. */

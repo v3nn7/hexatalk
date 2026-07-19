@@ -202,8 +202,15 @@ impl TalkyssApp {
                     self.screen = Screen::Home;
                     self.busy = false;
                     self.error = None;
+                    // Placeholder device token until FCM is wired; still
+                    // exercises push:registerToken + prefs:touchSession.
+                    self.backend.register_push_token(
+                        s.token.clone(),
+                        format!("android-dev-{}", s.user_id),
+                    );
                     self.backend.subscribe_home(s.token);
                 }
+                NetEvent::SearchResults(_) => {}
                 NetEvent::AuthErr(e) => {
                     self.busy = false;
                     self.error = Some(crate::convex_api::clean_error(&e));

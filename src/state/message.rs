@@ -335,6 +335,18 @@ pub(crate) enum Message {
     StartShare(String),
     StopShare,
     ToggleShareViewSize,
+    /// Mute remote share stream audio (viewer → peer signal).
+    ToggleStreamMute,
+    /// Include system audio (loopback) in outbound share.
+    ToggleShareSystemAudio,
+    /// Mute notifications for the active channel/conversation.
+    ToggleChannelMute,
+    ChannelMuteFinished(Result<bool, String>),
+    OpenCommandPalette,
+    CloseCommandPalette,
+    CommandPaletteQueryChanged(String),
+    CommandPaletteSearchFinished(Result<Vec<(String, String, String)>, String>),
+    CommandPalettePick(usize),
     EscapePressed,
 
     OpenProfile(String),

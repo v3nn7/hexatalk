@@ -227,6 +227,16 @@ pub(crate) struct App {
     pub(crate) share_picker_open: bool,
     pub(crate) share_targets: Vec<screenshare::ShareTarget>,
     pub(crate) is_sharing: bool,
+    /// Prefer including loopback system audio when sharing (if device exists).
+    pub(crate) share_system_audio: bool,
+    /// Viewer muted the remote share stream audio.
+    pub(crate) remote_stream_muted: bool,
+    /// Go-live quality line (fps / kbps).
+    pub(crate) share_stats_line: String,
+    pub(crate) command_palette_open: bool,
+    pub(crate) command_palette_query: String,
+    /// (conversation_id, display_line, message_id)
+    pub(crate) command_palette_hits: Vec<(String, String, String)>,
     pub(crate) remote_share_frame: Option<Arc<[u8]>>,
     pub(crate) share_view_expanded: bool,
 
@@ -428,6 +438,12 @@ impl App {
                 share_picker_open: false,
                 share_targets: Vec::new(),
                 is_sharing: false,
+                share_system_audio: true,
+                remote_stream_muted: false,
+                share_stats_line: String::new(),
+                command_palette_open: false,
+                command_palette_query: String::new(),
+                command_palette_hits: Vec::new(),
                 remote_share_frame: None,
                 share_view_expanded: false,
                 settings_open: false,

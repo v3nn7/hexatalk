@@ -8,7 +8,7 @@
 import "../assets/fonts/Roboto-Regular.ttf";
 import "../assets/fonts/Roboto-Medium.ttf";
 import { Theme } from "theme.slint";
-import { StatsChip } from "widgets.slint";
+import { StatsChip, TextInputField } from "widgets.slint";
 import { AuthScreen, AuthMode } from "auth.slint";
 import { ServerRail } from "rail.slint";
 import { Sidebar, SidebarTab } from "sidebar.slint";
@@ -611,6 +611,7 @@ export component AppWindow inherits Window {
     in property <string> chat_sas_label;
     in property <bool> chat_show_call_button: false;
     in property <bool> chat_is_server_channel: false;
+    in property <bool> chat_channel_muted: false;
     in property <bool> chat_store_enabled: true;
     in property <bool> chat_store_allowed: true;
     in property <bool> chat_clear_chat_busy: false;
@@ -638,6 +639,7 @@ export component AppWindow inherits Window {
 
     callback chat_start_call;
     callback chat_toggle_store;
+    callback chat_toggle_channel_mute;
     callback chat_toggle_clear_confirm;
     callback chat_confirm_clear;
     callback chat_join_voice;
@@ -688,6 +690,9 @@ export component AppWindow inherits Window {
     in property <string> chat_remote_frame_title;
     in property <bool> chat_share_expanded: false;
     in property <float> banner_peer_volume: 1.0;
+    in property <string> chat_share_stats_line;
+    in property <bool> chat_remote_stream_muted: false;
+    in property <bool> chat_share_system_audio: true;
 
     callback chat_call_accept;
     callback chat_call_decline;
@@ -698,6 +703,8 @@ export component AppWindow inherits Window {
     callback chat_stop_share;
     callback chat_start_share(string);
     callback chat_toggle_share_size;
+    callback chat_toggle_stream_mute;
+    callback chat_toggle_share_system_audio;
 
     if root.current-screen == Screen.Chat: Rectangle {
         // Window has several mutually-exclusive top-level screen children
@@ -726,6 +733,9 @@ export component AppWindow inherits Window {
             remote_frame_title: root.chat_remote_frame_title;
             share_expanded: root.chat_share_expanded;
             peer_volume: root.banner_peer_volume;
+            share_stats_line: root.chat_share_stats_line;
+            remote_stream_muted: root.chat_remote_stream_muted;
+            share_system_audio: root.chat_share_system_audio;
             accept => { root.chat_call_accept(); }
             decline => { root.chat_call_decline(); }
             hang_up => { root.chat_call_hang_up(); }
@@ -736,6 +746,8 @@ export component AppWindow inherits Window {
             start_share(id) => { root.chat_start_share(id); }
             toggle_share_size => { root.chat_toggle_share_size(); }
             volume_changed(v) => { root.chat_voice_volume_changed("*", v); }
+            toggle_stream_mute => { root.chat_toggle_stream_mute(); }
+            toggle_share_system_audio => { root.chat_toggle_share_system_audio(); }
         }
 
         HorizontalLayout {
@@ -876,6 +888,7 @@ export component AppWindow inherits Window {
                 sas_label: root.chat_sas_label;
                 show_call_button: root.chat_show_call_button;
                 is_server_channel: root.chat_is_server_channel;
+                channel_muted: root.chat_channel_muted;
                 store_enabled: root.chat_store_enabled;
                 store_allowed: root.chat_store_allowed;
                 clear_chat_busy: root.chat_clear_chat_busy;
@@ -903,6 +916,7 @@ export component AppWindow inherits Window {
 
                 start_call => { root.chat_start_call(); }
                 toggle_store => { root.chat_toggle_store(); }
+                toggle_channel_mute => { root.chat_toggle_channel_mute(); }
                 toggle_clear_confirm => { root.chat_toggle_clear_confirm(); }
                 confirm_clear => { root.chat_confirm_clear(); }
                 join_voice => { root.chat_join_voice(); }
@@ -946,15 +960,93 @@ export component AppWindow inherits Window {
     // etc. -- see Message::EscapePressed in update.rs). A transparent
     // overlay FocusScope: doesn't block clicks (no TouchArea of its own),
     // just listens for Escape when nothing more specific has focus.
+    // Ctrl+K opens the command palette / message search.
     callback escape_pressed;
+    callback open_command_palette;
+    in property <bool> command_palette_open: false;
+    in-out property <string> command_palette_query;
+    in property <[string]> command_palette_results: [];
+    callback command_palette_query_changed(string);
+    callback command_palette_pick(int);
+    callback command_palette_close;
+
     escape_scope := FocusScope {
         init => { self.focus(); }
         key-pressed(event) => {
             if (event.text == Key.Escape) {
                 root.escape_pressed();
                 accept
+            } else if (event.modifiers.control && event.text == "k") {
+                root.open_command_palette();
+                accept
             } else {
                 reject
+            }
+        }
+    }
+
+    // Command palette / message search overlay (Ctrl+K).
+    if root.command_palette_open: Rectangle {
+        width: size_ref.width;
+        height: size_ref.height;
+        background: #00000088;
+        TouchArea { clicked => { root.command_palette_close(); } }
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: parent.height * 0.12;
+            width: min(560px, parent.width - 48px);
+            height: min(420px, parent.height * 0.7);
+            background: Theme.bg-elevated;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+                Text {
+                    text: "Search messages & jump";
+                    font-size: 14px;
+                    font-family: Theme.font-medium;
+                    color: Theme.text-primary;
+                }
+                Text {
+                    text: "Type at least 2 characters. Encrypted history is skipped.";
+                    font-size: 11px;
+                    color: Theme.text-muted;
+                    wrap: word-wrap;
+                }
+                TextInputField {
+                    placeholder: "Search…";
+                    value <=> root.command_palette_query;
+                    edited(t) => { root.command_palette_query_changed(t); }
+                }
+                Flickable {
+                    vertical-stretch: 1;
+                    viewport-height: results_col.preferred-height;
+                    results_col := VerticalLayout {
+                        width: parent.width;
+                        spacing: 4px;
+                        if root.command_palette_results.length == 0: Text {
+                            text: "No results yet.";
+                            font-size: 12px;
+                            color: Theme.text-muted;
+                        }
+                        for r[i] in root.command_palette_results: Rectangle {
+                            height: 40px;
+                            background: rt.has-hover ? Theme.bg-hover : transparent;
+                            rt := TouchArea { clicked => { root.command_palette_pick(i); } }
+                            Text {
+                                x: 8px;
+                                width: parent.width - 16px;
+                                height: parent.height;
+                                text: r;
+                                font-size: 12px;
+                                color: Theme.text-primary;
+                                overflow: elide;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
             }
         }
     }

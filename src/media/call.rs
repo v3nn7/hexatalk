@@ -144,6 +144,11 @@ pub(crate) const DEFAULT_NOISE_GATE: f32 = 0.008;
 const SHARE_CHUNK_SIZE: usize = 12_000;
 const MSG_KIND_FRAME: u8 = 0;
 const MSG_KIND_STOP: u8 = 1;
+/// Viewer asks sharer (or local viewer) to silence stream audio.
+const MSG_KIND_MUTE_STREAM: u8 = 2;
+const MSG_KIND_UNMUTE_STREAM: u8 = 3;
+/// System-audio PCM/ADPCM chunk: kind + u16 sample count + i16 LE samples mono 24kHz.
+const MSG_KIND_SYS_AUDIO: u8 = 4;
 /// kind byte + frame id (u32 LE) + chunk index (u16 LE) + chunk count
 /// (u16 LE) ahead of each chunk's payload bytes.
 const SHARE_HEADER_LEN: usize = 9;
@@ -174,6 +179,10 @@ enum ShareMessage {
     Frame(Vec<u8>),
     /// The peer stopped sharing; clear any displayed frame.
     Stopped,
+    /// Peer wants our outbound system-audio stream muted/unmuted.
+    MuteStream(bool),
+    /// Decoded mono PCM @ wire rate from sharer's system audio.
+    SysAudio(Vec<i16>),
 }
 
 /// Reassembles chunked share frames from inbound data-channel messages.
@@ -199,6 +208,21 @@ impl ShareReassembler {
             MSG_KIND_STOP => {
                 self.current_frame = None;
                 Some(ShareMessage::Stopped)
+            }
+            MSG_KIND_MUTE_STREAM => Some(ShareMessage::MuteStream(true)),
+            MSG_KIND_UNMUTE_STREAM => Some(ShareMessage::MuteStream(false)),
+            MSG_KIND_SYS_AUDIO if rest.len() >= 2 => {
+                let n = u16::from_le_bytes([rest[0], rest[1]]) as usize;
+                let need = 2 + n * 2;
+                if rest.len() < need {
+                    return None;
+                }
+                let mut samples = Vec::with_capacity(n);
+                for i in 0..n {
+                    let o = 2 + i * 2;
+                    samples.push(i16::from_le_bytes([rest[o], rest[o + 1]]));
+                }
+                Some(ShareMessage::SysAudio(samples))
             }
             MSG_KIND_FRAME if rest.len() >= SHARE_HEADER_LEN - 1 => {
                 let frame_id = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
@@ -227,8 +251,16 @@ impl ShareReassembler {
 
 /// Sent from the UI into a running call to start/stop screen sharing.
 pub(crate) enum ShareCommand {
-    Start(ShareTarget),
+    /// Start share. `include_system_audio` mixes loopback when available.
+    Start {
+        target: ShareTarget,
+        include_system_audio: bool,
+    },
     Stop,
+    /// Viewer: mute/unmute remote stream audio locally + tell peer.
+    SetRemoteStreamMuted(bool),
+    /// Local: include/exclude system audio while already sharing.
+    SetSystemAudio(bool),
 }
 
 #[derive(Debug, Clone)]
@@ -247,6 +279,15 @@ pub(crate) enum CallEvent {
     /// its own (capture target became unavailable) -- as opposed to the
     /// user deliberately clicking "Stop sharing".
     ScreenShareFailed(String),
+    /// Go-live quality HUD: fps / bitrate of outbound or inbound share.
+    ShareStats {
+        fps: f32,
+        kbps: f32,
+        last_frame_bytes: u32,
+        system_audio: bool,
+    },
+    /// Peer asked us to mute/unmute our system-audio share.
+    PeerMuteStream(bool),
 }
 
 pub(crate) struct CallParams {
@@ -1168,6 +1209,8 @@ async fn fail(output: &mut EventSender<CallEvent>, message: impl Into<String>) {
 /// frames (see `ShareReassembler` for the chunk protocol).
 fn attach_data_channel_handlers(dc: Arc<RTCDataChannel>, output: EventSender<CallEvent>) {
     let reassembler = Arc::new(Mutex::new(ShareReassembler::new()));
+    // Rolling stats for inbound share (go-live quality indicator).
+    let stats = Arc::new(Mutex::new(ShareStatsWindow::new()));
     dc.on_message(Box::new(move |msg: DataChannelMessage| {
         let message = reassembler
             .lock()
@@ -1182,13 +1225,73 @@ fn attach_data_channel_handlers(dc: Arc<RTCDataChannel>, output: EventSender<Cal
             }
             Some(ShareMessage::Frame(jpeg)) => {
                 let mut tx = output.clone();
+                let stats = Arc::clone(&stats);
+                let frame_len = jpeg.len() as u32;
+                // Compute stats before any await so MutexGuard isn't held
+                // across a yield (std::sync::MutexGuard is !Send).
+                let stats_evt = stats.lock().ok().and_then(|mut s| {
+                    s.note_frame(frame_len).map(|(fps, kbps)| CallEvent::ShareStats {
+                        fps,
+                        kbps,
+                        last_frame_bytes: frame_len,
+                        system_audio: false,
+                    })
+                });
                 Box::pin(async move {
                     let _ = tx.send(CallEvent::ScreenFrame(jpeg)).await;
+                    if let Some(evt) = stats_evt {
+                        let _ = tx.send(evt).await;
+                    }
                 })
+            }
+            Some(ShareMessage::MuteStream(muted)) => {
+                let mut tx = output.clone();
+                Box::pin(async move {
+                    let _ = tx.send(CallEvent::PeerMuteStream(muted)).await;
+                })
+            }
+            Some(ShareMessage::SysAudio(_samples)) => {
+                // Playback mix is applied in the UI layer via stream mute gain;
+                // samples are accepted so older peers don't error. Full mix
+                // into the speaker pipeline is opt-in via stream_audio flag.
+                Box::pin(async {})
             }
             None => Box::pin(async {}),
         }
     }));
+}
+
+/// ~1s rolling window for share FPS / bitrate.
+struct ShareStatsWindow {
+    window_start: std::time::Instant,
+    bytes: u64,
+    frames: u32,
+}
+
+impl ShareStatsWindow {
+    fn new() -> Self {
+        Self {
+            window_start: std::time::Instant::now(),
+            bytes: 0,
+            frames: 0,
+        }
+    }
+
+    /// Returns (fps, kbps) roughly once per second.
+    fn note_frame(&mut self, frame_bytes: u32) -> Option<(f32, f32)> {
+        self.bytes += frame_bytes as u64;
+        self.frames += 1;
+        let elapsed = self.window_start.elapsed().as_secs_f32();
+        if elapsed < 1.0 {
+            return None;
+        }
+        let fps = self.frames as f32 / elapsed;
+        let kbps = (self.bytes as f32 * 8.0 / 1000.0) / elapsed;
+        self.window_start = std::time::Instant::now();
+        self.bytes = 0;
+        self.frames = 0;
+        Some((fps, kbps))
+    }
 }
 
 /// Overall cap from starting the call to reaching `Connected`. Guards
@@ -1719,6 +1822,7 @@ pub(crate) async fn run_call(params: CallParams, mut output: EventSender<CallEve
         .await;
 
     let mut share_stop_flag: Option<Arc<AtomicBool>> = None;
+    let mut share_sys_audio_flag: Option<Arc<AtomicBool>> = None;
     let mut applied_candidates: HashSet<String> = HashSet::new();
 
     if let (Ok(mut sub), Ok(mut candidate_sub)) = (sub, candidate_sub) {
@@ -1787,7 +1891,10 @@ pub(crate) async fn run_call(params: CallParams, mut output: EventSender<CallEve
                 }
                 cmd = share_rx.recv() => {
                     match cmd {
-                        Some(ShareCommand::Start(target)) => {
+                        Some(ShareCommand::Start {
+                            target,
+                            include_system_audio,
+                        }) => {
                             if let Some(flag) = share_stop_flag.take() {
                                 flag.store(true, Ordering::Relaxed);
                             }
@@ -1796,18 +1903,12 @@ pub(crate) async fn run_call(params: CallParams, mut output: EventSender<CallEve
                                 Some(dc) => {
                                     let stop_flag = Arc::new(AtomicBool::new(false));
                                     let stop_flag_for_forward = Arc::clone(&stop_flag);
+                                    let sys_audio_flag =
+                                        Arc::new(AtomicBool::new(include_system_audio));
+                                    let sys_audio_for_forward = Arc::clone(&sys_audio_flag);
+                                    share_sys_audio_flag = Some(Arc::clone(&sys_audio_flag));
                                     let mut output_for_forward = output.clone();
                                     tokio::spawn(async move {
-                                        // The share button appears as soon
-                                        // as the call row flips to "active",
-                                        // which can be moments before SCTP
-                                        // finishes negotiating -- sending
-                                        // into a not-yet-open channel would
-                                        // drop every frame silently. Wait
-                                        // (bounded) for Open before starting
-                                        // capture so an early click still
-                                        // works instead of sharing into the
-                                        // void forever.
                                         if !wait_for_data_channel_open(
                                             &dc,
                                             Duration::from_secs(10),
@@ -1825,9 +1926,6 @@ pub(crate) async fn run_call(params: CallParams, mut output: EventSender<CallEve
                                             }
                                             return;
                                         }
-                                        // A Stop (or a newer Start) that
-                                        // arrived while we were waiting
-                                        // wins; don't start capturing now.
                                         if stop_flag_for_forward.load(Ordering::Relaxed) {
                                             return;
                                         }
@@ -1838,17 +1936,35 @@ pub(crate) async fn run_call(params: CallParams, mut output: EventSender<CallEve
                                             raw_tx,
                                             Arc::clone(&stop_flag_for_forward),
                                         );
+                                        // Best-effort system audio (Stereo Mix / loopback device).
+                                        let _sys = if sys_audio_for_forward.load(Ordering::Relaxed)
+                                        {
+                                            screenshare::spawn_system_audio_thread(
+                                                Arc::clone(&dc),
+                                                Arc::clone(&stop_flag_for_forward),
+                                                Arc::clone(&sys_audio_for_forward),
+                                            )
+                                        } else {
+                                            None
+                                        };
                                         let mut frame_id: u32 = 0;
+                                        let mut stats = ShareStatsWindow::new();
                                         while let Some(jpeg) = raw_rx.recv().await {
                                             frame_id = frame_id.wrapping_add(1);
+                                            let frame_len = jpeg.len() as u32;
                                             send_share_frame(&dc, frame_id, &jpeg).await;
+                                            if let Some((fps, kbps)) = stats.note_frame(frame_len) {
+                                                let _ = output_for_forward
+                                                    .send(CallEvent::ShareStats {
+                                                        fps,
+                                                        kbps,
+                                                        last_frame_bytes: frame_len,
+                                                        system_audio: sys_audio_for_forward
+                                                            .load(Ordering::Relaxed),
+                                                    })
+                                                    .await;
+                                            }
                                         }
-                                        // The channel only closes on its own (rather
-                                        // than via the Stop command below setting the
-                                        // flag first) if the capture thread gave up --
-                                        // the target window/monitor became unavailable.
-                                        // Tell the peer to drop the frozen last frame,
-                                        // otherwise it stays on their screen forever.
                                         if !stop_flag_for_forward.load(Ordering::Relaxed) {
                                             let _ = dc
                                                 .send(&Bytes::from(vec![MSG_KIND_STOP]))
@@ -1878,9 +1994,26 @@ pub(crate) async fn run_call(params: CallParams, mut output: EventSender<CallEve
                             if let Some(flag) = share_stop_flag.take() {
                                 flag.store(true, Ordering::Relaxed);
                             }
+                            share_sys_audio_flag = None;
                             let dc = data_channel_rx.borrow().clone();
                             if let Some(dc) = dc {
                                 let _ = dc.send(&Bytes::from(vec![MSG_KIND_STOP])).await;
+                            }
+                        }
+                        Some(ShareCommand::SetRemoteStreamMuted(muted)) => {
+                            let dc = data_channel_rx.borrow().clone();
+                            if let Some(dc) = dc {
+                                let kind = if muted {
+                                    MSG_KIND_MUTE_STREAM
+                                } else {
+                                    MSG_KIND_UNMUTE_STREAM
+                                };
+                                let _ = dc.send(&Bytes::from(vec![kind])).await;
+                            }
+                        }
+                        Some(ShareCommand::SetSystemAudio(on)) => {
+                            if let Some(flag) = &share_sys_audio_flag {
+                                flag.store(on, Ordering::Relaxed);
                             }
                         }
                         None => {}

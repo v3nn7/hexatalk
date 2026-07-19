@@ -318,7 +318,7 @@ export component SettingsScreen inherits Rectangle {
                         Text { text: "Online · Idle · Do not disturb · Invisible. Invisible hides you like offline."; font-size: 11px; color: Theme.text-muted; wrap: word-wrap; }
                         FieldLabel { text: "Sessions"; }
                         SecondaryButton { text: "Sign out other devices"; clicked => { root.sign_out_others(); } }
-                        Text { text: "Keeps this session; revokes every other login token on this account."; font-size: 11px; color: Theme.text-muted; wrap: word-wrap; }
+                        Text { text: "Keeps this session; revokes every other login token on this account. Device list: prefs:listSessions / prefs:revokeSession (backend ready)."; font-size: 11px; color: Theme.text-muted; wrap: word-wrap; }
                         Text { text: "Per-chat Store ON/OFF is in the DM header (not on server channels)."; font-size: 11px; color: Theme.text-muted; wrap: word-wrap; }
                         if root.is_staff: Rectangle {
                             background: Theme.bg-tertiary;
@@ -419,6 +419,12 @@ export component SettingsScreen inherits Rectangle {
                             Text { text: "Aggressive"; font-size: 10px; color: Theme.text-muted; }
                         }
                         Text { text: "Cuts background hiss between words. Applies live, even mid-call."; font-size: 11px; color: Theme.text-muted; wrap: word-wrap; }
+                        Text {
+                            text: "Local DSP (on-device, free): soft noise gate + high-pass rumble cut + AGC (auto gain) + deharsh LPF. No cloud processing, low CPU.";
+                            font-size: 11px;
+                            color: Theme.text-muted;
+                            wrap: word-wrap;
+                        }
                     }
 
                     if root.category == SettingsCategory.About: SectionCard {

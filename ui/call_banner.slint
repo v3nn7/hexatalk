@@ -48,6 +48,9 @@ export component CallBanner inherits Rectangle {
     in property <string> remote_frame_title;
     in property <bool> share_expanded: false;
     in property <float> peer_volume: 1.0;
+    in property <string> share_stats_line;
+    in property <bool> remote_stream_muted: false;
+    in property <bool> share_system_audio: true;
 
     callback accept;
     callback decline;
@@ -59,6 +62,8 @@ export component CallBanner inherits Rectangle {
     callback start_share(string);
     callback toggle_share_size;
     callback volume_changed(float);
+    callback toggle_stream_mute;
+    callback toggle_share_system_audio;
 
     height: root.visible_ ? content.preferred-height : 0px;
     clip: true;
@@ -97,6 +102,10 @@ export component CallBanner inherits Rectangle {
                     text: root.is_sharing ? "Stop sharing" : "Share screen";
                     clicked => { root.is_sharing ? root.stop_share() : root.toggle_share_picker(); }
                 }
+                if root.is_active && root.has_remote_frame: BannerButton {
+                    text: root.remote_stream_muted ? "Unmute stream" : "Mute stream";
+                    clicked => { root.toggle_stream_mute(); }
+                }
                 if root.is_active: BannerButton { text: "Hang up"; filled: true; accent_color: Theme.danger; clicked => { root.hang_up(); } }
             }
         }
@@ -118,6 +127,14 @@ export component CallBanner inherits Rectangle {
                     changed(v) => { root.volume_changed(v); }
                 }
                 Text { text: Math.round(root.peer_volume * 100) + "%"; font-size: 11px; color: Theme.text-muted; vertical-alignment: center; }
+                if root.share_stats_line != "": Text {
+                    text: root.share_stats_line;
+                    font-size: 11px;
+                    color: Theme.accent;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
             }
         }
 
@@ -129,11 +146,16 @@ export component CallBanner inherits Rectangle {
             // open windows the old one-row overflowed off the side of the
             // window and most targets (app windows in particular) were
             // unreachable.
-            height: 240px;
+            height: 260px;
             VerticalLayout {
                 padding: 10px;
                 spacing: 6px;
                 Text { text: "Share your whole screen or a single app window:"; font-size: 12px; color: Theme.text-muted; }
+                BannerButton {
+                    text: root.share_system_audio ? "System audio: ON" : "System audio: OFF";
+                    clicked => { root.toggle_share_system_audio(); }
+                }
+                Text { text: "System audio needs a loopback device (Stereo Mix / VB-Cable)."; font-size: 11px; color: Theme.text-muted; wrap: word-wrap; }
                 if root.share_targets.length == 0: Text { text: "Loading sources..."; font-size: 12px; color: Theme.text-muted; }
                 ScrollView {
                     vertical-stretch: 1;

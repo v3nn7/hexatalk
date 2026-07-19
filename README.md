@@ -1,74 +1,78 @@
 # Talkyss
 
-Desktopowy komunikator w Ruście (GUI: [iced](https://iced.rs)) z realtime bazą
-danych [Convex](https://convex.dev). Brak własnego serwera / P2P — Convex to
-zarządzana, hostowana w chmurze baza danych z synchronizacją realtime, do
-której klient Rust łączy się bezpośrednio przez WebSocket.
+Natywny komunikator desktop (Rust + **Slint**) z realtime bazą
+[Convex](https://convex.dev). Dodatkowo: mobile Android (egui), bot SDK,
+P2P **peerseal** (E2EE), WebRTC głos / screen share, serwery w stylu Discord.
 
-## Funkcje
+## Funkcje (aktualne)
 
-- Rejestracja i logowanie (własny system: hasła hashowane PBKDF2 + tokeny sesji,
-  bez zewnętrznego dostawcy — patrz `convex/auth.ts`).
-- Dodawanie znajomych po nazwie użytkownika, zaproszenia do akceptacji/odrzucenia.
-- Osobne czaty 1:1 (direct messages) z każdym znajomym, synchronizowane w czasie
-  rzeczywistym.
-- Ciemny motyw, dymki wiadomości (własne po prawej, cudze po lewej), znaczniki
-  czasu.
+### Czat i social
+- Rejestracja / logowanie (PBKDF2 + sesje), limity logowania
+- Znajomi, zaproszenia, bloki, nicki / ulubione
+- DM 1:1 (opcjonalnie live peerseal E2EE), grupy, kanały serwerowe
+- Reakcje, reply, mentions, pin, załączniki, typing, presence
+
+### Serwery (Discord-like)
+- Role + bitfield permissions (`VIEW`, `SEND`, `MANAGE_*`, `VOICE`, **`ANNOUNCE`**)
+- **Kategorie kanałów** + position
+- **Permission overwrites** per kanał (rola / członek)
+- **#announcements** — zawsze na górze, wszyscy czytają, piszą tylko staff (`ANNOUNCE` / owner)
+- Mute kanału / serwera (`notificationPrefs`) — desktop nie spamuje toastami
+
+### Głos i media
+- Call 1:1 WebRTC + ADPCM
+- Voice rooms (full-mesh)
+- Screen share (JPEG over data channel)
+- **System audio** (best-effort: Stereo Mix / VB-Cable / loopback)
+- **Mute stream** po stronie oglądającego (+ sygnał do sharera)
+- **Go-live quality HUD**: fps / kbps / KB/frame
+- Lokalne DSP: noise gate + HPF + **AGC** + deharsh (niski CPU, na urządzeniu)
+
+### Bezpieczeństwo
+- Lista sesji / revoke (`prefs:listSessions`, `prefs:revokeSession`)
+- `prefs:touchSession` (device name + platform) przy logowaniu
+- Sign out other devices
+- SAS / fingerprint peerseal w DM
+
+### Mobile + infra
+- Android crate (`crates/talkyss-mobile`) — chat, friends, servers
+- `push:registerToken` + `push:tokensForConversationNotify` (FCM/APNs keys w Convex env)
+- Auto-update check, tray, installer
+
+### Boty
+- Headless `talkyss-bot` SDK (login token, send to channels)
 
 ## Struktura
 
-- `convex/schema.ts` — tabele: `users`, `sessions`, `friendRequests`,
-  `conversations`, `conversationMembers`, `messages`.
-- `convex/auth.ts` — `signUp` / `signIn` (akcje, hashowanie hasła Web Crypto
-  PBKDF2), `signOut`, `me`.
-- `convex/friends.ts` — `sendRequest`, `respondRequest`, `listIncomingRequests`,
-  `listFriends`.
-- `convex/conversations.ts` — `getOrCreateDirect` (tworzy lub znajduje istniejącą
-  rozmowę 1:1 z danym znajomym), `listMyConversations`.
-- `convex/messages.ts` — `list` / `send`, ograniczone do członków danej rozmowy.
-- `convex/session.ts` — pomocnicza funkcja `currentUser()` weryfikująca token
-  sesji przekazywany z klienta jako argument (`sessionToken`).
-- `src/main.rs` — aplikacja iced z ekranem logowania/rejestracji i głównym
-  ekranem czatu (lista znajomych, zaproszenia, rozmowa).
+| Ścieżka | Rola |
+|---------|------|
+| `convex/` | Schema + mutations/queries (auth, servers, channels, messages, voice, push…) |
+| `src/` | Desktop app (Slint UI, WebRTC, peerseal, tray) |
+| `ui/*.slint` | GUI |
+| `crates/reprotocol` | peerseal P2P (nie edytować — tylko integrować) |
+| `crates/talkyss-bot` | Bot SDK |
+| `crates/talkyss-mobile` | Android client |
+| `server/talkyss-relay` | Relay peerseal |
 
 ## Uruchomienie
 
-1. Zainstaluj zależności JS i uruchom dev-tunel Convex (wymaga jednorazowego
-   logowania przez GitHub w przeglądarce):
+```bash
+npm install
+npx convex dev   # terminal 1 — wdraża schema + functions
+cargo run        # terminal 2 — desktop
+```
 
-   ```
-   npm install
-   npx convex dev
-   ```
+Mobile APK: zobacz `crates/talkyss-mobile/README.md`.
 
-   Zostaw to polecenie uruchomione w tle — wdraża `convex/*.ts` do Twojego
-   projektu w chmurze Convex i tworzy `.env.local` z adresem wdrożenia
-   (`CONVEX_URL`).
+## Nowe API (skrót)
 
-2. W drugim terminalu uruchom aplikację desktopową:
+- `channels:*` — categories, overwrites, mute, channel perms
+- `messages:search` — wyszukiwanie plaintext w historii
+- `prefs:listSessions` / `revokeSession` / `touchSession`
+- `push:tokensForConversationNotify` — respektuje mute
 
-   ```
-   cargo run
-   ```
+## Model bezpieczeństwa
 
-3. Zarejestruj konto (zakładka "Zarejestruj się"), a w drugiej uruchomionej
-   kopii aplikacji (`cargo run` ponownie, inny użytkownik) dodaj pierwsze konto
-   po nazwie użytkownika, zaakceptuj zaproszenie po drugiej stronie i zacznij
-   czatować.
-
-## Model bezpieczeństwa (świadomy skrót)
-
-To własny, prosty system logowania dopasowany do natywnej appki bez
-przeglądarki — nie hostowany dostawca OAuth (Clerk/Auth0/WorkOS), bo te
-wymagają przekierowań w przeglądarce, których natywny klient iced nie ma.
-Sesja to losowy 256-bitowy token przekazywany jako argument `sessionToken` do
-każdej chronionej funkcji Convex i weryfikowany po stronie serwera
-(`convex/session.ts`). Wystarczające dla appki hobbystycznej/wewnętrznej;
-do produkcyjnego wdrożenia rozważ rotację/odwoływanie tokenów i limit prób
-logowania.
-
-## Uwaga
-
-Jeśli `npx convex dev` zapisze zmienną pod inną nazwą niż `CONVEX_URL`
-(np. `NEXT_PUBLIC_CONVEX_URL`), zmień nazwę zmiennej w `.env.local` na
-`CONVEX_URL` albo popraw `env::var("CONVEX_URL")` w `src/main.rs`.
+Własny system logowania (token sesji w argumencie). Do produkcji: 2FA,
+twardsza rotacja tokenów, FCM z podpisem. E2EE DM przez peerseal; historia
+Convex jest opcjonalna (`storeChatHistory` / per-chat store).

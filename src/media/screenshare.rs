@@ -10,11 +10,18 @@
 //! channel. It's a deliberately low-bandwidth, low-framerate compromise --
 //! good enough to show a shared screen or window, not a substitute for a
 //! real video track.
+//!
+//! System audio is best-effort: we look for a loopback-style capture device
+//! (Stereo Mix / What U Hear / VB-Cable / WASAPI loopback names) via cpal
+//! and stream mono PCM chunks over the share data channel.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use webrtc::data_channel::RTCDataChannel;
 use xcap::image::codecs::jpeg::JpegEncoder;
 use xcap::image::{imageops::FilterType, DynamicImage, ExtendedColorType};
 
@@ -193,4 +200,155 @@ pub(crate) fn spawn_capture_thread(
             }
         }
     });
+}
+
+const MSG_KIND_SYS_AUDIO: u8 = 4;
+
+fn looks_like_loopback(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n.contains("stereo mix")
+        || n.contains("what u hear")
+        || n.contains("wave out mix")
+        || n.contains("loopback")
+        || n.contains("cable output")
+        || n.contains("vb-audio")
+        || n.contains("voicemeeter")
+}
+
+/// Try to open a system-audio (loopback-style) capture device and stream
+/// mono i16 chunks over the share data channel while `enabled` is true.
+/// Returns `Some(())` if a thread was started (device may still fail open).
+pub(crate) fn spawn_system_audio_thread(
+    dc: Arc<RTCDataChannel>,
+    stop: Arc<AtomicBool>,
+    enabled: Arc<AtomicBool>,
+) -> Option<()> {
+    let host = cpal::default_host();
+    let device = host
+        .input_devices()
+        .ok()?
+        .find(|d| d.name().map(|n| looks_like_loopback(&n)).unwrap_or(false))?;
+    let config = device.default_input_config().ok()?;
+    let sample_rate = config.sample_rate().0;
+    let channels = config.channels() as usize;
+    let sample_format = config.sample_format();
+    let stream_config: cpal::StreamConfig = config.into();
+
+    // Queue of encoded sys-audio messages; a tiny async pump on the runtime
+    // drains it onto the data channel (cpal callbacks are not async).
+    let (msg_tx, mut msg_rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
+    {
+        let dc = Arc::clone(&dc);
+        let stop = Arc::clone(&stop);
+        tokio::spawn(async move {
+            while let Some(bytes) = msg_rx.recv().await {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                let _ = dc.send(&bytes).await;
+            }
+        });
+    }
+
+    std::thread::spawn(move || {
+        let err_fn = |e| eprintln!("[sys-audio] stream error: {e}");
+        let enabled_c = Arc::clone(&enabled);
+        let stop_c = Arc::clone(&stop);
+        let step = (sample_rate as f32 / 24_000.0).max(1.0);
+        let phase = Arc::new(std::sync::Mutex::new(0.0_f32));
+        let pcm_buf = Arc::new(std::sync::Mutex::new(Vec::<i16>::with_capacity(480)));
+        let msg_tx = Arc::new(msg_tx);
+
+        let make_push = || {
+            let enabled_c = Arc::clone(&enabled_c);
+            let stop_c = Arc::clone(&stop_c);
+            let phase = Arc::clone(&phase);
+            let pcm_buf = Arc::clone(&pcm_buf);
+            let msg_tx = Arc::clone(&msg_tx);
+            move |mono: f32| {
+                if stop_c.load(Ordering::Relaxed) || !enabled_c.load(Ordering::Relaxed) {
+                    return;
+                }
+                let mut phase = phase.lock().unwrap_or_else(|e| e.into_inner());
+                *phase += 1.0;
+                if *phase < step {
+                    return;
+                }
+                *phase -= step;
+                let s = (mono.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                let mut buf = pcm_buf.lock().unwrap_or_else(|e| e.into_inner());
+                buf.push(s);
+                if buf.len() >= 480 {
+                    let chunk = std::mem::take(&mut *buf);
+                    let _ = msg_tx.send(encode_sys_audio_chunk(&chunk));
+                }
+            }
+        };
+
+        let stream = match sample_format {
+            cpal::SampleFormat::F32 => {
+                let push = make_push();
+                device.build_input_stream(
+                    &stream_config,
+                    move |data: &[f32], _| {
+                        for frame in data.chunks(channels.max(1)) {
+                            let mono =
+                                frame.iter().copied().sum::<f32>() / frame.len().max(1) as f32;
+                            push(mono);
+                        }
+                    },
+                    err_fn,
+                    None,
+                )
+            }
+            cpal::SampleFormat::I16 => {
+                let push = make_push();
+                device.build_input_stream(
+                    &stream_config,
+                    move |data: &[i16], _| {
+                        for frame in data.chunks(channels.max(1)) {
+                            let mono = frame.iter().map(|&s| s as f32).sum::<f32>()
+                                / frame.len().max(1) as f32
+                                / i16::MAX as f32;
+                            push(mono);
+                        }
+                    },
+                    err_fn,
+                    None,
+                )
+            }
+            _ => {
+                eprintln!("[sys-audio] unsupported sample format on loopback device");
+                return;
+            }
+        };
+
+        let stream = match stream {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[sys-audio] could not open loopback: {e}");
+                return;
+            }
+        };
+        if let Err(e) = stream.play() {
+            eprintln!("[sys-audio] play failed: {e}");
+            return;
+        }
+        while !stop.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        drop(stream);
+    });
+    Some(())
+}
+
+fn encode_sys_audio_chunk(samples: &[i16]) -> Bytes {
+    let n = samples.len().min(u16::MAX as usize) as u16;
+    let mut msg = Vec::with_capacity(1 + 2 + samples.len() * 2);
+    msg.push(MSG_KIND_SYS_AUDIO);
+    msg.extend_from_slice(&n.to_le_bytes());
+    for &s in samples.iter().take(n as usize) {
+        msg.extend_from_slice(&s.to_le_bytes());
+    }
+    Bytes::from(msg)
 }

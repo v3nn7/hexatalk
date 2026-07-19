@@ -346,9 +346,29 @@ export const createSession = internalMutation({
     userId: v.id("users"),
     token: v.string(),
     expiresAt: v.number(),
+    deviceName: v.optional(v.string()),
+    platform: v.optional(
+      v.union(
+        v.literal("desktop"),
+        v.literal("android"),
+        v.literal("ios"),
+        v.literal("web"),
+        v.literal("bot"),
+        v.literal("unknown"),
+      ),
+    ),
   },
   handler: async (ctx, args) => {
-    await ctx.db.insert("sessions", args);
+    const now = Date.now();
+    await ctx.db.insert("sessions", {
+      userId: args.userId,
+      token: args.token,
+      expiresAt: args.expiresAt,
+      deviceName: args.deviceName ?? "Unknown device",
+      platform: args.platform ?? "unknown",
+      createdAt: now,
+      lastActiveAt: now,
+    });
   },
 });
 

@@ -3,6 +3,7 @@ import { mutation, internalMutation, query, MutationCtx, QueryCtx } from "./_gen
 import { currentUser } from "./session";
 import { Doc, Id } from "./_generated/dataModel";
 import { conversationAllowsStorage } from "./prefs";
+import { Perm, channelPermissions } from "./roles";
 
 async function requireMembership(
   ctx: QueryCtx | MutationCtx,
@@ -368,6 +369,18 @@ export const send = mutation({
       throw new Error("Conversation not found");
     }
 
+    // Server channels: respect overwrites + announcement staff-only write.
+    if (conversation.kind === "channel") {
+      const perms = await channelPermissions(ctx, args.conversationId, me._id);
+      if ((perms & Perm.SEND_MESSAGES) !== Perm.SEND_MESSAGES) {
+        throw new Error(
+          conversation.isAnnouncement
+            ? "Only staff can post in announcements"
+            : "You don't have permission to send messages here",
+        );
+      }
+    }
+
     // DMs: live traffic is peerseal; optional encrypted body is legacy TKR3
     // or plaintext durable history. Groups/channels: encrypted bodies use
     // TGK1 conversation keys (see groupKeys.ts / crypto.rs).
@@ -693,5 +706,90 @@ export const purgeAllHistoryConfirm = internalMutation({
   },
   handler: async (ctx) => {
     return await purgeMessageBatch(ctx);
+  },
+});
+
+/**
+ * Lightweight message search across conversations the user belongs to.
+ * Scans recent plaintext (skips encrypted bodies). Best-effort, not a full index.
+ */
+export const search = query({
+  args: {
+    sessionToken: v.string(),
+    query: v.string(),
+    conversationId: v.optional(v.id("conversations")),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const me = await currentUser(ctx, args.sessionToken);
+    const q = args.query.trim().toLowerCase();
+    if (q.length < 2) return [];
+    const limit = Math.min(Math.max(args.limit ?? 30, 1), 50);
+
+    type Hit = {
+      messageId: Id<"messages">;
+      conversationId: Id<"conversations">;
+      authorName: string;
+      body: string;
+      sentAt: number;
+      conversationName: string;
+    };
+    const hits: Hit[] = [];
+
+    const scanConversation = async (conversationId: Id<"conversations">) => {
+      if (hits.length >= limit) return;
+      const membership = await ctx.db
+        .query("conversationMembers")
+        .withIndex("by_conversation_and_user", (q2) =>
+          q2.eq("conversationId", conversationId).eq("userId", me._id),
+        )
+        .unique();
+      if (!membership) return;
+      const conversation = await ctx.db.get("conversations", conversationId);
+      if (!conversation) return;
+      if (conversation.kind === "channel") {
+        const perms = await channelPermissions(ctx, conversationId, me._id);
+        if ((perms & Perm.VIEW_CHANNELS) !== Perm.VIEW_CHANNELS) return;
+      }
+      const conversationName =
+        conversation.name ??
+        (conversation.kind === "direct" ? "Direct" : "Chat");
+
+      const recent = await ctx.db
+        .query("messages")
+        .withIndex("by_conversation", (q2) =>
+          q2.eq("conversationId", conversationId),
+        )
+        .order("desc")
+        .take(200);
+      for (const m of recent) {
+        if (hits.length >= limit) break;
+        if (m.deleted || m.encrypted || m.kind === "call") continue;
+        if (!m.body.toLowerCase().includes(q)) continue;
+        hits.push({
+          messageId: m._id,
+          conversationId,
+          authorName: m.authorName,
+          body: m.body.slice(0, 200),
+          sentAt: m._creationTime,
+          conversationName,
+        });
+      }
+    };
+
+    if (args.conversationId) {
+      await scanConversation(args.conversationId);
+    } else {
+      const memberships = await ctx.db
+        .query("conversationMembers")
+        .withIndex("by_user", (q2) => q2.eq("userId", me._id))
+        .take(80);
+      for (const m of memberships) {
+        if (hits.length >= limit) break;
+        await scanConversation(m.conversationId);
+      }
+    }
+
+    return hits.sort((a, b) => b.sentAt - a.sentAt).slice(0, limit);
   },
 });

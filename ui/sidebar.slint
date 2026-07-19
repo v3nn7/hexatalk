@@ -505,7 +505,8 @@ export component Sidebar inherits Rectangle {
                             if root.text_channels.length > 0: Text { text: "TEXT CHANNELS"; font-size: Theme.text-xs; font-family: Theme.font-medium; letter-spacing: 1px; color: Theme.text-muted; }
                             for ch in root.text_channels: Rectangle {
                                 height: 32px;
-                                background: ch.active ? Theme.accent-soft : (cht.has-hover ? Theme.bg-hover : transparent);
+                                // Announcements stay visually pinned/highlightable for everyone.
+                                background: ch.active ? Theme.accent-soft : (ch.is_announcement ? #d1bc4d14 : (cht.has-hover ? Theme.bg-hover : transparent));
                                 animate background { duration: 120ms; }
                                 cht := TouchArea { clicked => { root.open_channel(ch.conversation_id); } }
                                 if ch.active: Rectangle {
@@ -513,14 +514,16 @@ export component Sidebar inherits Rectangle {
                                     y: 0;
                                     width: 3px;
                                     height: parent.height;
-                                    background: Theme.accent;
+                                    background: ch.is_announcement ? Theme.warning : Theme.accent;
                                 }
                                 Text {
                                     x: 12px;
                                     text: ch.label;
                                     font-size: 13px;
                                     font-family: Theme.font-medium;
-                                    color: ch.active ? Theme.text-primary : (cht.has-hover ? Theme.text-primary : Theme.text-muted);
+                                    color: ch.is_announcement
+                                        ? (ch.active ? Theme.warning : #d1bc4dcc)
+                                        : (ch.active ? Theme.text-primary : (cht.has-hover ? Theme.text-primary : Theme.text-muted));
                                     vertical-alignment: center;
                                     animate color { duration: 120ms; }
                                 }
