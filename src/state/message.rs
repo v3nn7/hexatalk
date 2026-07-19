@@ -200,6 +200,15 @@ pub(crate) enum Message {
     CancelRenameChannel,
     DeleteChannel(String),
     DeleteChannelFinished(Result<(), String>),
+    MoveChannelUp(String),
+    MoveChannelDown(String),
+    MoveChannelFinished(Result<(), String>),
+    EditChannelPerms(String),
+    CloseChannelPerms,
+    ChannelOverwritesLoaded(Result<(String, Vec<(String, u32, u32)>), String>),
+    SelectChannelPermRole(String),
+    CycleChannelOverwritePerm(u32),
+    ChannelOverwriteSaved(Result<(), String>),
 
     MessageInputChanged(String),
     /// @-autocomplete suggestion picked from the composer popup.

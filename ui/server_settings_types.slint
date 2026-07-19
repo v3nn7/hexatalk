@@ -6,6 +6,27 @@ export struct SSChannelRow {
     name: string,
     is_voice: bool,
     is_renaming: bool,
+    is_editing_perms: bool,
+    is_system: bool,
+    is_announcement: bool,
+    can_move_up: bool,
+    can_move_down: bool,
+}
+
+/// Per-role row when editing channel overwrites.
+export struct SSChannelRolePick {
+    role_id: string,
+    name: string,
+    selected: bool,
+    has_overwrite: bool,
+}
+
+/// One permission bit for the selected role on a channel.
+/// mode: 0=inherit, 1=allow, 2=deny
+export struct SSChannelOverwritePermRow {
+    bit: int,
+    label: string,
+    mode: int,
 }
 
 export struct SSAssignableRole {

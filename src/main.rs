@@ -240,6 +240,9 @@ struct ServerSettingsRaw {
     new_channel_is_voice: bool,
     renaming_channel_id: Option<String>,
     rename_channel_input: String,
+    channel_perms_channel_id: Option<String>,
+    channel_perms_role_id: Option<String>,
+    channel_overwrites: std::collections::HashMap<String, (u32, u32)>,
     member_role_picker_open: Option<String>,
     new_role_name_input: String,
     editing_role_id: Option<String>,
@@ -413,6 +416,9 @@ impl UiSnapshot {
                 new_channel_is_voice: app.new_channel_is_voice,
                 renaming_channel_id: app.renaming_channel_id.clone(),
                 rename_channel_input: app.rename_channel_input.clone(),
+                channel_perms_channel_id: app.channel_perms_channel_id.clone(),
+                channel_perms_role_id: app.channel_perms_role_id.clone(),
+                channel_overwrites: app.channel_overwrites.clone(),
                 member_role_picker_open: app.member_role_picker_open.clone(),
                 new_role_name_input: app.new_role_name_input.clone(),
                 editing_role_id: app.editing_role_id.clone(),
@@ -702,14 +708,97 @@ fn apply_server_settings(
     ui.set_ss_new_channel_is_voice(s.new_channel_is_voice);
     ui.set_ss_can_delete_channel(s.channels.len() > 1);
     ui.set_ss_rename_channel_input(s.rename_channel_input.clone().into());
+
+    // Movable peers: non-system channels of the same type, in list order.
+    let text_movable: Vec<&ChannelSummary> = s
+        .channels
+        .iter()
+        .filter(|c| c.channel_type != "voice" && !c.is_system && !c.is_announcement)
+        .collect();
+    let voice_movable: Vec<&ChannelSummary> = s
+        .channels
+        .iter()
+        .filter(|c| c.channel_type == "voice" && !c.is_system && !c.is_announcement)
+        .collect();
     ui.set_ss_channels(
         s.channels
             .iter()
-            .map(|c| slint_ui::SSChannelRow {
-                conversation_id: c.conversation_id.clone().into(),
-                name: c.name.clone().into(),
-                is_voice: c.channel_type == "voice",
-                is_renaming: s.renaming_channel_id.as_deref() == Some(c.conversation_id.as_str()),
+            .map(|c| {
+                let movable = if c.channel_type == "voice" {
+                    &voice_movable
+                } else {
+                    &text_movable
+                };
+                let idx = movable
+                    .iter()
+                    .position(|m| m.conversation_id == c.conversation_id);
+                let can_move = idx.is_some() && !c.is_system && !c.is_announcement;
+                slint_ui::SSChannelRow {
+                    conversation_id: c.conversation_id.clone().into(),
+                    name: c.name.clone().into(),
+                    is_voice: c.channel_type == "voice",
+                    is_renaming: s.renaming_channel_id.as_deref()
+                        == Some(c.conversation_id.as_str()),
+                    is_editing_perms: s.channel_perms_channel_id.as_deref()
+                        == Some(c.conversation_id.as_str()),
+                    is_system: c.is_system,
+                    is_announcement: c.is_announcement,
+                    can_move_up: can_move && idx.map(|i| i > 0).unwrap_or(false),
+                    can_move_down: can_move && idx.map(|i| i + 1 < movable.len()).unwrap_or(false),
+                }
+            })
+            .collect::<Vec<_>>()
+            .as_slice()
+            .into(),
+    );
+
+    let perms_name = s
+        .channel_perms_channel_id
+        .as_ref()
+        .and_then(|id| s.channels.iter().find(|c| &c.conversation_id == id))
+        .map(|c| c.name.clone())
+        .unwrap_or_default();
+    ui.set_ss_channel_perms_channel_id(
+        s.channel_perms_channel_id
+            .clone()
+            .unwrap_or_default()
+            .into(),
+    );
+    ui.set_ss_channel_perms_channel_name(perms_name.into());
+    ui.set_ss_channel_perm_roles(
+        s.server_roles
+            .iter()
+            .map(|r| slint_ui::SSChannelRolePick {
+                role_id: r.role_id.clone().into(),
+                name: r.name.clone().into(),
+                selected: s.channel_perms_role_id.as_deref() == Some(r.role_id.as_str()),
+                has_overwrite: s.channel_overwrites.contains_key(&r.role_id),
+            })
+            .collect::<Vec<_>>()
+            .as_slice()
+            .into(),
+    );
+    let (allow, deny) = s
+        .channel_perms_role_id
+        .as_ref()
+        .and_then(|id| s.channel_overwrites.get(id).copied())
+        .unwrap_or((0, 0));
+    ui.set_ss_channel_overwrite_perms(
+        ROLE_PERM_LABELS
+            .iter()
+            .map(|(bit, label)| {
+                let mode = if allow & bit != 0 {
+                    1
+                } else if deny & bit != 0 {
+                    2
+                } else {
+                    0
+                };
+                slint_ui::SSChannelOverwritePermRow {
+                    bit: *bit as i32,
+                    label: (*label).into(),
+                    mode,
+                }
             })
             .collect::<Vec<_>>()
             .as_slice()
@@ -2331,6 +2420,25 @@ fn wire_server_settings_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender
     on1!(on_ss_delete_channel, |id: slint::SharedString| {
         Message::DeleteChannel(id.to_string())
     });
+    on1!(on_ss_move_channel_up, |id: slint::SharedString| {
+        Message::MoveChannelUp(id.to_string())
+    });
+    on1!(on_ss_move_channel_down, |id: slint::SharedString| {
+        Message::MoveChannelDown(id.to_string())
+    });
+    on1!(on_ss_edit_channel_perms, |id: slint::SharedString| {
+        Message::EditChannelPerms(id.to_string())
+    });
+    on0!(on_ss_close_channel_perms, Message::CloseChannelPerms);
+    on1!(on_ss_select_channel_perm_role, |id: slint::SharedString| {
+        Message::SelectChannelPermRole(id.to_string())
+    });
+    {
+        let t = tx.clone();
+        ui.on_ss_cycle_channel_overwrite_perm(move |bit| {
+            let _ = t.send(Message::CycleChannelOverwritePerm(bit as u32));
+        });
+    }
     on1!(on_ss_toggle_member_picker, |id: slint::SharedString| {
         Message::ToggleMemberRolePicker(id.to_string())
     });

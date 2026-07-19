@@ -2,7 +2,10 @@
 // Invites / Danger Zone) -- port of src/view/server_settings.rs.
 import { Theme } from "theme.slint";
 import { Avatar, SecondaryButton, PrimaryButton, DangerButton, TextInputField, FieldLabel, SectionTitle, Badge } from "widgets.slint";
-import { SSChannelRow, SSMemberRow, SSRoleRow, SSPermRow } from "server_settings_types.slint";
+import {
+    SSChannelRow, SSMemberRow, SSRoleRow, SSPermRow,
+    SSChannelRolePick, SSChannelOverwritePermRow,
+} from "server_settings_types.slint";
 
 export enum ServerSettingsCategory { Overview, Channels, Members, Roles, Invites, Danger }
 
@@ -67,14 +70,19 @@ export component ServerSettingsScreen inherits Rectangle {
 
     // Channels
     in property <bool> can_manage_channels: false;
+    in property <bool> can_manage_roles: false;
     in-out property <string> new_channel_name_input;
     in property <bool> new_channel_is_voice: false;
     in property <[SSChannelRow]> channels: [];
     in property <bool> can_delete_channel: false;
     in-out property <string> rename_channel_input;
+    // Channel permission overwrites editor
+    in property <string> channel_perms_channel_id;
+    in property <string> channel_perms_channel_name;
+    in property <[SSChannelRolePick]> channel_perm_roles: [];
+    in property <[SSChannelOverwritePermRow]> channel_overwrite_perms: [];
 
     // Members
-    in property <bool> can_manage_roles: false;
     in property <bool> can_kick: false;
     in property <[SSMemberRow]> members: [];
 
@@ -113,6 +121,12 @@ export component ServerSettingsScreen inherits Rectangle {
     callback save_rename_channel;
     callback cancel_rename_channel;
     callback delete_channel(string);
+    callback move_channel_up(string);
+    callback move_channel_down(string);
+    callback edit_channel_perms(string);
+    callback close_channel_perms;
+    callback select_channel_perm_role(string);
+    callback cycle_channel_overwrite_perm(int);
 
     callback toggle_member_picker(string);
     callback toggle_member_role(string, string);
@@ -173,7 +187,7 @@ export component ServerSettingsScreen inherits Rectangle {
                     Text { text: "SERVER SETTINGS"; font-size: 11px; color: Theme.text-muted; }
                     Rectangle { height: 6px; }
                     NavItem { label: "Overview"; hint: "Name, icon, vanity URL"; active: root.category == ServerSettingsCategory.Overview; clicked => { root.category_changed(ServerSettingsCategory.Overview); } }
-                    NavItem { label: "Channels"; hint: "Create, rename, delete"; active: root.category == ServerSettingsCategory.Channels; clicked => { root.category_changed(ServerSettingsCategory.Channels); } }
+                    NavItem { label: "Channels"; hint: "Order, perms, rename"; active: root.category == ServerSettingsCategory.Channels; clicked => { root.category_changed(ServerSettingsCategory.Channels); } }
                     NavItem { label: "Members"; hint: "Assign roles, kick"; active: root.category == ServerSettingsCategory.Members; clicked => { root.category_changed(ServerSettingsCategory.Members); } }
                     NavItem { label: "Roles"; hint: "Create roles, edit permissions"; active: root.category == ServerSettingsCategory.Roles; clicked => { root.category_changed(ServerSettingsCategory.Roles); } }
                     NavItem { label: "Invites"; hint: "Share join codes"; active: root.category == ServerSettingsCategory.Invites; clicked => { root.category_changed(ServerSettingsCategory.Invites); } }
@@ -247,7 +261,12 @@ export component ServerSettingsScreen inherits Rectangle {
 
                     if root.category == ServerSettingsCategory.Channels: Card {
                         SectionTitle { text: "Channels"; }
-                        Text { text: "Text for chat, voice for hangouts. At least one channel is required."; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
+                        Text {
+                            text: "Reorder with ↑/↓. Permissions lets you set Allow / Deny / Inherit per role (Discord-style overwrites). Announcements stay pinned at the top.";
+                            font-size: 12px;
+                            color: Theme.text-muted;
+                            wrap: word-wrap;
+                        }
                         if root.can_manage_channels: FieldLabel { text: "Create channel"; }
                         if root.can_manage_channels: HorizontalLayout {
                             spacing: 8px;
@@ -262,29 +281,39 @@ export component ServerSettingsScreen inherits Rectangle {
                         FieldLabel { text: "All channels (\{root.channels.length})"; }
                         if root.channels.length == 0: Text { text: "No channels yet — create one above."; font-size: 13px; color: Theme.text-muted; }
                         for ch in root.channels: Rectangle {
-                            background: Theme.bg-tertiary;
+                            background: ch.is_editing_perms ? Theme.accent-soft : Theme.bg-tertiary;
                             border-width: 1px;
-                            border-color: Theme.border;
-                            // Two sibling `if` blocks below (only one ever
-                            // active) mean this Rectangle doesn't reliably
-                            // get an implicit fill-to-content height -- same
-                            // root cause as the AppWindow screens and
-                            // MessageRow overlap bugs. `row` gives it a
-                            // single structural child to size against.
+                            border-color: ch.is_editing_perms ? Theme.accent : Theme.border;
                             height: row.preferred-height;
                             row := VerticalLayout {
                             if !ch.is_renaming: HorizontalLayout {
                                 padding: 12px;
-                                spacing: 10px;
-                                Text { text: ch.is_voice ? "V" : "#"; font-size: 14px; color: Theme.text-muted; vertical-alignment: center; }
+                                spacing: 8px;
+                                Text { text: ch.is_announcement ? "!" : (ch.is_voice ? "V" : "#"); font-size: 14px; color: ch.is_announcement ? Theme.warning : Theme.text-muted; vertical-alignment: center; }
                                 VerticalLayout {
                                     spacing: 2px;
                                     horizontal-stretch: 1;
                                     Text { text: ch.name; font-size: 14px; color: Theme.text-primary; }
-                                    Text { text: ch.is_voice ? "Voice channel" : "Text channel"; font-size: 11px; color: Theme.text-muted; }
+                                    Text {
+                                        text: ch.is_announcement
+                                            ? "Announcements · staff write, everyone read"
+                                            : (ch.is_voice ? "Voice channel" : "Text channel");
+                                        font-size: 11px;
+                                        color: Theme.text-muted;
+                                    }
                                 }
-                                if root.can_manage_channels: SecondaryButton { text: "Rename"; clicked => { root.start_rename_channel(ch.conversation_id, ch.name); } }
-                                if root.can_manage_channels && root.can_delete_channel: DangerButton { text: "Delete"; clicked => { root.delete_channel(ch.conversation_id); } }
+                                if root.can_manage_channels && ch.can_move_up: SecondaryButton { text: "↑"; width: 36px; clicked => { root.move_channel_up(ch.conversation_id); } }
+                                if root.can_manage_channels && ch.can_move_down: SecondaryButton { text: "↓"; width: 36px; clicked => { root.move_channel_down(ch.conversation_id); } }
+                                if root.can_manage_roles: SecondaryButton {
+                                    text: ch.is_editing_perms ? "Close perms" : "Permissions";
+                                    clicked => {
+                                        ch.is_editing_perms
+                                            ? root.close_channel_perms()
+                                            : root.edit_channel_perms(ch.conversation_id);
+                                    }
+                                }
+                                if root.can_manage_channels && !ch.is_system: SecondaryButton { text: "Rename"; clicked => { root.start_rename_channel(ch.conversation_id, ch.name); } }
+                                if root.can_manage_channels && root.can_delete_channel && !ch.is_system: DangerButton { text: "Delete"; clicked => { root.delete_channel(ch.conversation_id); } }
                             }
                             if ch.is_renaming: HorizontalLayout {
                                 padding: 10px;
@@ -292,6 +321,72 @@ export component ServerSettingsScreen inherits Rectangle {
                                 TextInputField { placeholder: "channel-name"; value <=> root.rename_channel_input; edited(t) => { root.rename_channel_input_changed(t); } submitted => { root.save_rename_channel(); } }
                                 PrimaryButton { text: "Save"; width: 70px; clicked => { root.save_rename_channel(); } }
                                 SecondaryButton { text: "Cancel"; width: 80px; clicked => { root.cancel_rename_channel(); } }
+                            }
+                            if ch.is_editing_perms: VerticalLayout {
+                                padding: 12px;
+                                spacing: 10px;
+                                Text {
+                                    text: "Overwrites for #" + root.channel_perms_channel_name + " — pick a role, then set Inherit / Allow / Deny.";
+                                    font-size: 12px;
+                                    color: Theme.text-muted;
+                                    wrap: word-wrap;
+                                }
+                                FieldLabel { text: "Role"; }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    for r in root.channel_perm_roles: Rectangle {
+                                        height: 28px;
+                                        width: role-lbl.preferred-width + 16px;
+                                        background: r.selected ? Theme.accent : (rt.has-hover ? Theme.bg-hover : Theme.bg-primary);
+                                        border-width: 1px;
+                                        border-color: r.selected ? Theme.accent : Theme.border;
+                                        role-lbl := Text {
+                                            text: r.has_overwrite ? (r.name + " *") : r.name;
+                                            font-size: 11px;
+                                            color: r.selected ? white : Theme.text-primary;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                        rt := TouchArea { clicked => { root.select_channel_perm_role(r.role_id); } }
+                                    }
+                                }
+                                if root.channel_perm_roles.length == 0: Text {
+                                    text: "No roles loaded.";
+                                    font-size: 12px;
+                                    color: Theme.text-muted;
+                                }
+                                FieldLabel { text: "Permissions (click to cycle: Inherit → Allow → Deny)"; }
+                                VerticalLayout {
+                                    spacing: 4px;
+                                    for perm in root.channel_overwrite_perms: HorizontalLayout {
+                                        spacing: 8px;
+                                        Rectangle {
+                                            width: 72px;
+                                            height: 22px;
+                                            background: perm.mode == 1
+                                                ? Theme.success
+                                                : (perm.mode == 2 ? Theme.danger : Theme.bg-primary);
+                                            border-width: 1px;
+                                            border-color: Theme.border-strong;
+                                            Text {
+                                                width: 100%;
+                                                height: 100%;
+                                                text: perm.mode == 1 ? "Allow" : (perm.mode == 2 ? "Deny" : "Inherit");
+                                                font-size: 10px;
+                                                color: white;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                            TouchArea { clicked => { root.cycle_channel_overwrite_perm(perm.bit); } }
+                                        }
+                                        Text {
+                                            text: perm.label;
+                                            font-size: 12px;
+                                            color: Theme.text-primary;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
                             }
                             } // row
                         }

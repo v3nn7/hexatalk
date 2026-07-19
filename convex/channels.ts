@@ -130,6 +130,74 @@ export const setChannelCategory = mutation({
   },
 });
 
+/**
+ * Move a channel up/down within the same channel type (text/voice).
+ * Announcement/system channels stay pinned at the top of the text list and
+ * cannot be reordered relative to regular channels.
+ */
+export const moveChannel = mutation({
+  args: {
+    sessionToken: v.string(),
+    conversationId: v.id("conversations"),
+    direction: v.union(v.literal("up"), v.literal("down")),
+  },
+  handler: async (ctx, args) => {
+    const me = await currentUser(ctx, args.sessionToken);
+    const ch = await ctx.db.get("conversations", args.conversationId);
+    if (!ch || ch.kind !== "channel" || !ch.serverId) {
+      throw new Error("Not a server channel");
+    }
+    if (ch.isSystem || ch.isAnnouncement) {
+      throw new Error("System / announcements channels stay at the top");
+    }
+    await requirePerm(ctx, ch.serverId, me._id, Perm.MANAGE_CHANNELS);
+
+    const channelType = ch.channelType ?? "text";
+    const all = await ctx.db
+      .query("conversations")
+      .withIndex("by_server", (q) => q.eq("serverId", ch.serverId!))
+      .take(200);
+
+    // Normalize missing positions so swaps work on older servers.
+    const peers = all
+      .filter(
+        (c) =>
+          (c.channelType ?? "text") === channelType &&
+          !c.isAnnouncement &&
+          !c.isSystem,
+      )
+      .sort((a, b) => {
+        const pa = a.position ?? 0;
+        const pb = b.position ?? 0;
+        if (pa !== pb) return pa - pb;
+        return (a.name ?? "").localeCompare(b.name ?? "");
+      });
+
+    // Assign dense positions if any missing/duplicate.
+    for (let i = 0; i < peers.length; i++) {
+      if (peers[i].position !== i) {
+        await ctx.db.patch("conversations", peers[i]._id, { position: i });
+        peers[i] = { ...peers[i], position: i };
+      }
+    }
+
+    const idx = peers.findIndex((c) => c._id === args.conversationId);
+    if (idx < 0) throw new Error("Channel not found in list");
+    const swapWith = args.direction === "up" ? idx - 1 : idx + 1;
+    if (swapWith < 0 || swapWith >= peers.length) {
+      return null; // already at edge
+    }
+
+    const a = peers[idx];
+    const b = peers[swapWith];
+    const posA = a.position ?? idx;
+    const posB = b.position ?? swapWith;
+    await ctx.db.patch("conversations", a._id, { position: posB });
+    await ctx.db.patch("conversations", b._id, { position: posA });
+    return null;
+  },
+});
+
 export const listOverwrites = query({
   args: {
     sessionToken: v.string(),

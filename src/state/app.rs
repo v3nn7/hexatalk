@@ -190,6 +190,12 @@ pub(crate) struct App {
     /// Shown once after create/regenerate — user should copy.
     pub(crate) bot_token_reveal: Option<String>,
     pub(crate) renaming_channel_id: Option<String>,
+    /// Channel id open in the per-channel role overwrite editor.
+    pub(crate) channel_perms_channel_id: Option<String>,
+    /// Selected role for overwrite editing.
+    pub(crate) channel_perms_role_id: Option<String>,
+    /// role_id -> (allow, deny) for the channel currently being edited.
+    pub(crate) channel_overwrites: std::collections::HashMap<String, (u32, u32)>,
     pub(crate) rename_channel_input: String,
 
     pub(crate) active_conversation: Option<String>,
@@ -412,6 +418,9 @@ impl App {
                 bot_status: None,
                 bot_token_reveal: None,
                 renaming_channel_id: None,
+                channel_perms_channel_id: None,
+                channel_perms_role_id: None,
+                channel_overwrites: std::collections::HashMap::new(),
                 rename_channel_input: String::new(),
                 active_conversation: None,
                 active_conversation_kind: None,

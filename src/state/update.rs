@@ -70,6 +70,33 @@ fn extract_invite_code(input: &str) -> String {
 }
 
 impl App {
+    fn move_channel_task(&self, conversation_id: String, direction: &'static str) -> Task<Message> {
+        let Some(client) = self.client.clone() else {
+            return Task::none();
+        };
+        let Some(session) = self.session.clone() else {
+            return Task::none();
+        };
+        let mut client = client;
+        Task::perform(
+            async move {
+                client
+                    .mutation(
+                        "channels:moveChannel",
+                        btreemap! {
+                            "sessionToken".to_string() => Value::String(session.token),
+                            "conversationId".to_string() => Value::String(conversation_id),
+                            "direction".to_string() => Value::String(direction.into()),
+                        },
+                    )
+                    .await
+                    .map_err(|e| humanize_error(&e.to_string()))
+                    .and_then(expect_null)
+            },
+            Message::MoveChannelFinished,
+        )
+    }
+
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Connected(client) => {
@@ -2699,6 +2726,161 @@ impl App {
                 Task::none()
             }
             Message::DeleteChannelFinished(Err(err)) => {
+                self.server_status = Some(err);
+                Task::none()
+            }
+            Message::MoveChannelUp(conversation_id) => {
+                self.move_channel_task(conversation_id, "up")
+            }
+            Message::MoveChannelDown(conversation_id) => {
+                self.move_channel_task(conversation_id, "down")
+            }
+            Message::MoveChannelFinished(Ok(())) => {
+                self.server_status = None;
+                Task::none()
+            }
+            Message::MoveChannelFinished(Err(err)) => {
+                self.server_status = Some(err);
+                Task::none()
+            }
+            Message::EditChannelPerms(conversation_id) => {
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                self.channel_perms_channel_id = Some(conversation_id.clone());
+                self.channel_perms_role_id = self
+                    .server_roles
+                    .iter()
+                    .find(|r| r.position == 0)
+                    .map(|r| r.role_id.clone())
+                    .or_else(|| self.server_roles.first().map(|r| r.role_id.clone()));
+                self.channel_overwrites.clear();
+                let mut client = client;
+                let conv_for_result = conversation_id.clone();
+                Task::perform(
+                    async move {
+                        let result = client
+                            .query(
+                                "channels:listOverwrites",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(session.token),
+                                    "conversationId".to_string() => Value::String(conversation_id),
+                                },
+                            )
+                            .await
+                            .map_err(|e| humanize_error(&e.to_string()))?;
+                        let rows = parse_object_array(result);
+                        let mut role_ows = Vec::new();
+                        for obj in rows {
+                            let target_type = obj_str(&obj, "targetType");
+                            if target_type != "role" {
+                                continue;
+                            }
+                            let role_id = obj_str(&obj, "targetId");
+                            let allow = obj_f64(&obj, "allow") as u32;
+                            let deny = obj_f64(&obj, "deny") as u32;
+                            role_ows.push((role_id, allow, deny));
+                        }
+                        Ok((conv_for_result, role_ows))
+                    },
+                    Message::ChannelOverwritesLoaded,
+                )
+            }
+            Message::CloseChannelPerms => {
+                self.channel_perms_channel_id = None;
+                self.channel_perms_role_id = None;
+                self.channel_overwrites.clear();
+                Task::none()
+            }
+            Message::ChannelOverwritesLoaded(Ok((conv_id, rows))) => {
+                if self.channel_perms_channel_id.as_deref() != Some(conv_id.as_str()) {
+                    return Task::none();
+                }
+                self.channel_overwrites.clear();
+                for (role_id, allow, deny) in rows {
+                    if allow != 0 || deny != 0 {
+                        self.channel_overwrites.insert(role_id, (allow, deny));
+                    }
+                }
+                Task::none()
+            }
+            Message::ChannelOverwritesLoaded(Err(err)) => {
+                self.server_status = Some(err);
+                Task::none()
+            }
+            Message::SelectChannelPermRole(role_id) => {
+                self.channel_perms_role_id = Some(role_id);
+                Task::none()
+            }
+            Message::CycleChannelOverwritePerm(bit) => {
+                let Some(channel_id) = self.channel_perms_channel_id.clone() else {
+                    return Task::none();
+                };
+                let Some(role_id) = self.channel_perms_role_id.clone() else {
+                    return Task::none();
+                };
+                let (mut allow, mut deny) = self
+                    .channel_overwrites
+                    .get(&role_id)
+                    .copied()
+                    .unwrap_or((0, 0));
+                // Inherit (0) → Allow (1) → Deny (2) → Inherit
+                let mode = if allow & bit != 0 {
+                    1
+                } else if deny & bit != 0 {
+                    2
+                } else {
+                    0
+                };
+                allow &= !bit;
+                deny &= !bit;
+                match mode {
+                    0 => allow |= bit,
+                    1 => deny |= bit,
+                    _ => {}
+                }
+                if allow == 0 && deny == 0 {
+                    self.channel_overwrites.remove(&role_id);
+                } else {
+                    self.channel_overwrites
+                        .insert(role_id.clone(), (allow, deny));
+                }
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                let mut client = client;
+                Task::perform(
+                    async move {
+                        client
+                            .mutation(
+                                "channels:setOverwrite",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(session.token),
+                                    "conversationId".to_string() => Value::String(channel_id),
+                                    "targetType".to_string() => Value::String("role".into()),
+                                    "targetId".to_string() => Value::String(role_id),
+                                    "allow".to_string() => Value::Float64(allow as f64),
+                                    "deny".to_string() => Value::Float64(deny as f64),
+                                },
+                            )
+                            .await
+                            .map_err(|e| humanize_error(&e.to_string()))
+                            .and_then(expect_null)
+                    },
+                    Message::ChannelOverwriteSaved,
+                )
+            }
+            Message::ChannelOverwriteSaved(Ok(())) => {
+                self.server_status = None;
+                Task::none()
+            }
+            Message::ChannelOverwriteSaved(Err(err)) => {
                 self.server_status = Some(err);
                 Task::none()
             }
