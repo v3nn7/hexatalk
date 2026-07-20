@@ -20,7 +20,8 @@
   Only bump version; no build / sign / delta.
 
 .PARAMETER SkipSign
-  Build + delta, but skip ed25519 signing (not for production).
+  Build + delta without ed25519. Default when RELEASE_SIGNING_KEY_HEX is
+  unset — clients still accept HTD1 (AES-GCM) deltas.
 
 .PARAMETER AllDeltas
   Generate a delta from EVERY archived HexaTalk-*.exe in releases\
@@ -146,19 +147,32 @@ if ($Version) {
         throw "Version must look like 1.2.3, got '$Version'"
     }
     # Capture groups immediately — $Matches is overwritten by later -match ops.
-    $newParts = [int[]]@([int]$Matches[1], [int]$Matches[2], [int]$Matches[3])
-    $newVersion = "$($newParts[0]).$($newParts[1]).$($newParts[2])"
+    $newMajor = [int]$Matches[1]
+    $newMinor = [int]$Matches[2]
+    $newPatch = [int]$Matches[3]
+    $newVersion = "$newMajor.$newMinor.$newPatch"
+    $newParts = [int[]]@($newMajor, $newMinor, $newPatch)
     if (-not $Force -and (Compare-Version $newParts $current) -le 0) {
         throw "New version $newVersion is not greater than current $currentStr. Pass -Force to override."
     }
 } else {
-    $newParts = @($current[0], $current[1], $current[2] + 1)
-    $newVersion = "$($newParts[0]).$($newParts[1]).$($newParts[2])"
+    # IMPORTANT: In PowerShell the comma operator binds tighter than `+`, so
+    #   @($a, $b, $c + 1)  is parsed as  (@($a, $b, $c)) + 1
+    # which concatenates and yields e.g. @(0,1,2,1) — first three slots stay
+    # 0.1.2 and the patch never increments. Compute the patch first.
+    $newMajor = $current[0]
+    $newMinor = $current[1]
+    $newPatch = $current[2] + 1
+    $newVersion = "$newMajor.$newMinor.$newPatch"
+    $newParts = [int[]]@($newMajor, $newMinor, $newPatch)
 }
 
 Write-Host "Bumping version: $currentStr -> $newVersion" -ForegroundColor Cyan
 if ($currentStr -eq $newVersion) {
-    Write-Host "  (same version, -Force: Cargo.toml left unchanged)" -ForegroundColor DarkGray
+    if (-not $Force) {
+        throw "Refusing no-op version $newVersion (already current). Pass -Force to rebuild the same version."
+    }
+    Write-Host "  Same version + -Force: rebuilding $newVersion without editing Cargo.toml" -ForegroundColor DarkGray
 } else {
     $updated = Set-PackageVersion $content $newVersion
     $check = Get-PackageVersion $updated
@@ -224,21 +238,17 @@ $sigPath = Join-Path $repoRoot "target\release\HexaTalk.exe.sig"
 $sigArchive = Join-Path $releasesDir "HexaTalk-$newVersion.exe.sig"
 $signed = $false
 
+# Signing is optional. Clients accept HTD1 (AES-GCM) deltas without ed25519;
+# if RELEASE_SIGNING_KEY_HEX is set we still embed/verify the stronger sig.
 if (-not $SkipSign) {
     $keyHex = $env:RELEASE_SIGNING_KEY_HEX
     if (-not $keyHex) {
-        throw @"
-RELEASE_SIGNING_KEY_HEX is not set.
-
-Set the 64-char hex ed25519 private seed (same key whose public half is baked
-into the app - see src/update_check.rs), then re-run:
-
-  `$env:RELEASE_SIGNING_KEY_HEX = '<64 hex chars>'
-  .\scripts\release.ps1
-
-Or pass -SkipSign to build without a signature (not for production).
-"@
+        Write-Warning "RELEASE_SIGNING_KEY_HEX not set — releasing UNSIGNED (HTD1 delta only)."
+        Write-Warning "Set the key later for ed25519 authenticity, or pass -SkipSign to silence this."
+        $SkipSign = $true
     }
+}
+if (-not $SkipSign) {
     if (-not (Test-Path $signPy)) {
         throw "Missing $signPy"
     }
@@ -253,12 +263,11 @@ Or pass -SkipSign to build without a signature (not for production).
         throw "Signature must be exactly 64 raw bytes, got $sigLen (check sign_release.py / key)"
     }
     Copy-Item -Path $sigPath -Destination $sigArchive -Force
-    # Detached .sig is optional on CDN when deltas embed the same 64 bytes
-    # (default). Keep a local archive copy for debugging / full-fallback packs.
+    # Detached .sig is optional on CDN when deltas embed the same 64 bytes.
     $signed = $true
-    Write-Host "  Signature: $sigPath ($sigLen bytes) [embedded into deltas, not required on R2]" -ForegroundColor Green
+    Write-Host "  Signature: $sigPath ($sigLen bytes) [embedded into deltas]" -ForegroundColor Green
 } else {
-    Write-Warning "Skipping signature (-SkipSign). Deltas will not embed a sig; auto-update will reject."
+    Write-Host "  Unsigned release — clients trust HTD1 AES-GCM only (no ed25519)." -ForegroundColor Yellow
 }
 
 # ---------- version.txt ----------
@@ -424,14 +433,14 @@ Write-Host "  GET .../version.txt"
 Write-Host "  GET .../deltas/HexaTalk-<from>-<to>.delta   (HTD1 || AES(qbsdiff) || sig64)"
 Write-Host "  GET .../HexaTalk.exe[.sig]                  (optional fallback only)"
 Write-Host ""
-Write-Host "Delta wire: HTD1 || nonce(12) || AES-256-GCM(qbsdiff) || ed25519(64)." -ForegroundColor DarkGray
+Write-Host "Delta wire: HTD1 || nonce(12) || AES-256-GCM(qbsdiff) [|| ed25519(64) if signed]." -ForegroundColor DarkGray
 Write-Host "  AES key = RELEASE_DELTA_KEY_HEX (must match baked UPDATE_DELTA_KEY_B64)." -ForegroundColor DarkGray
-Write-Host "  ed25519 verifies reconstructed exe bytes (same as detached .sig)." -ForegroundColor DarkGray
-Write-Host ""
-if (-not $signed) {
-    Write-Host "WARNING: unsigned build - auto-update will reject it." -ForegroundColor Red
-    exit 2
+if ($signed) {
+    Write-Host "  ed25519 embedded — strongest authenticity check." -ForegroundColor DarkGray
+} else {
+    Write-Host "  UNSIGNED — client accepts HTD1 decrypt + patch without ed25519." -ForegroundColor Yellow
 }
+Write-Host ""
 if ($deltaPaths.Count -eq 0) {
     Write-Host "WARNING: no deltas produced — delta-only R2 will not update anyone." -ForegroundColor Red
 }

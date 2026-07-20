@@ -685,6 +685,8 @@ impl App {
                         ));
                     }
                     UpdateOutcome::Failed(err) => {
+                        // Settings → About only — don't toast: background
+                        // checks every 30m would spam on a missing CDN file.
                         self.update_check_status = Some(format!("Update check failed: {err}"));
                     }
                 }

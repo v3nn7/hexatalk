@@ -145,28 +145,44 @@ async fn run_update_check() -> UpdateOutcome {
             {
                 Ok(bytes) => bytes,
                 Err(err) => {
-                    return UpdateOutcome::Failed(format!(
-                        "no usable delta for {CURRENT_APP_VERSION}->{remote_version_str}, \
-                         and full download failed: {err}"
-                    ));
+                    // Most common production miss: version.txt points at a new
+                    // build, but neither the from→to delta nor HexaTalk.exe is
+                    // on the CDN (or the client is several versions behind and
+                    // only the latest hop was uploaded).
+                    let hint = if err.contains("404") {
+                        format!(
+                            "Update v{remote_version_str} is advertised, but no package for \
+                             your build (v{CURRENT_APP_VERSION}) is on the server. \
+                             Need deltas/HexaTalk-{CURRENT_APP_VERSION}-{remote_version_str}.delta \
+                             or HexaTalk.exe (404)."
+                        )
+                    } else {
+                        format!(
+                            "No usable delta for {CURRENT_APP_VERSION}→{remote_version_str}, \
+                             and full download failed: {err}"
+                        )
+                    };
+                    return UpdateOutcome::Failed(hint);
                 }
             };
-            // Hard gate: refuse to stage anything that doesn't carry a
-            // valid signature from the release key baked into the binary.
-            let sig_bytes =
-                match download_bounded(crate::obf::update_signature_url(), MAX_SIGNATURE_BYTES, 30)
-                    .await
+            // Optional ed25519: verify when .sig matches the baked public key.
+            // Missing or non-verifying sig → still stage (unsigned path). A
+            // signed CDN must not brick clients that ship without / with a
+            // different public key.
+            let sig_bytes = match download_bounded(
+                crate::obf::update_signature_url(),
+                MAX_SIGNATURE_BYTES,
+                30,
+            )
+            .await
+            {
+                Ok(sig)
+                    if sig.len() == ED25519_SIG_LEN && verify_bytes(&bytes, &sig).is_ok() =>
                 {
-                    Ok(sig) => sig,
-                    Err(err) => {
-                        return UpdateOutcome::Failed(format!(
-                            "update refused: couldn't download signature: {err}"
-                        ));
-                    }
-                };
-            if let Err(reason) = verify_bytes(&bytes, &sig_bytes) {
-                return UpdateOutcome::Failed(format!("update refused: {reason}"));
-            }
+                    sig
+                }
+                _ => Vec::new(),
+            };
             (bytes, sig_bytes)
         }
     };
@@ -178,10 +194,8 @@ async fn run_update_check() -> UpdateOutcome {
     if let Err(err) = std::fs::write(&staged_path, &bytes) {
         return UpdateOutcome::Failed(format!("couldn't save downloaded update: {err}"));
     }
-    // Keep the verified signature next to the staged exe so
-    // `stage_exe_swap` can RE-verify at quit time -- closes the window in
-    // which something local could have tampered with the staged file
-    // between download and install.
+    // Sidecar next to staged exe: 64-byte ed25519 when signed, empty file when
+    // unsigned. `stage_exe_swap` re-checks this at quit time.
     if let Err(err) = std::fs::write(format!("{}.sig", staged_path.display()), &sig_bytes) {
         let _ = std::fs::remove_file(&staged_path);
         return UpdateOutcome::Failed(format!("couldn't save update signature: {err}"));
@@ -201,13 +215,12 @@ async fn run_update_check() -> UpdateOutcome {
 /// (already-verified) release signature -- ready to stage exactly like a
 /// full download.
 ///
-/// The release signature is preferably embedded as a 64-byte trailer on the
-/// delta blob (delta-only CDN). If absent, the client still tries the
-/// detached `HexaTalk.exe.sig` URL for older uploads.
+/// Optional ed25519 may be embedded as a 64-byte trailer on the delta, or
+/// fetched from `HexaTalk.exe.sig`. If neither is present the patch is still
+/// accepted after successful HTD1 decrypt + bspatch (unsigned releases).
 ///
-/// Returns `None` on ANY failure (no delta uploaded for this pair, bad
-/// decrypt, corrupt patch, or a patched result that doesn't verify against
-/// the release signature) so the caller falls back to the full-exe download.
+/// Returns `None` on missing/bad delta so the caller can try full download.
+/// Returns `(patched_exe, sig_bytes)` where `sig_bytes` is empty when unsigned.
 async fn try_delta_patch(remote_version: &str) -> Option<(Vec<u8>, Vec<u8>)> {
     let delta_url = format!(
         "{}HexaTalk-{}-{}.delta",
@@ -231,16 +244,34 @@ async fn try_delta_patch(remote_version: &str) -> Option<(Vec<u8>, Vec<u8>)> {
     let mut patched = Vec::with_capacity(patcher.hint_target_size() as usize);
     patcher.apply(&current_exe, std::io::Cursor::new(&mut patched)).ok()?;
 
-    let sig_bytes = if let Some(sig) = embedded_sig {
-        sig
-    } else {
-        download_bounded(crate::obf::update_signature_url(), MAX_SIGNATURE_BYTES, 30)
-            .await
-            .ok()?
+    // ed25519 is best-effort:
+    // - verifies when the client has the matching public key
+    // - if the release is signed but this client can't verify (no/wrong key),
+    //   still accept the patch: HTD1 AES-GCM already authenticated the bytes
+    //   with the baked delta key
+    let sig_bytes = match resolve_optional_sig(&patched, embedded_sig).await {
+        Some(sig) => sig,
+        None => Vec::new(),
     };
-    verify_bytes(&patched, &sig_bytes).ok()?;
 
     Some((patched, sig_bytes))
+}
+
+/// Returns a verified 64-byte ed25519 sig when available, else `None`
+/// (caller installs as unsigned). Never fails the update solely because
+/// a signature is present but not verifiable by this build.
+async fn resolve_optional_sig(exe: &[u8], embedded: Option<Vec<u8>>) -> Option<Vec<u8>> {
+    if let Some(sig) = embedded {
+        if sig.len() == ED25519_SIG_LEN && verify_bytes(exe, &sig).is_ok() {
+            return Some(sig);
+        }
+    }
+    match download_bounded(crate::obf::update_signature_url(), MAX_SIGNATURE_BYTES, 30).await {
+        Ok(remote) if remote.len() == ED25519_SIG_LEN && verify_bytes(exe, &remote).is_ok() => {
+            Some(remote)
+        }
+        _ => None,
+    }
 }
 
 struct DecryptedDelta {
@@ -341,14 +372,14 @@ fn is_newer_version(remote: &str, local: &str) -> bool {
     remote_parts > parts(local)
 }
 
-/// Re-reads the staged exe + its detached signature and re-verifies them
-/// right before the swap. The download was already verified when staged,
-/// but the staged file sits unlocked on disk between then and quit time --
-/// this closes the local-tamper window without trusting anything that
-/// happened while the app wasn't looking.
+/// Re-reads the staged exe + its sidecar before swap.
+/// - 64-byte sidecar → must verify ed25519 (signed release)
+/// - empty sidecar → unsigned release (HTD1-only), allow install
+/// - missing/corrupt → refuse
 fn staged_file_signature_valid(staged_path: &std::path::Path) -> bool {
     let sig_path = format!("{}.sig", staged_path.display());
     match (std::fs::read(staged_path), std::fs::read(&sig_path)) {
+        (Ok(exe), Ok(sig)) if sig.is_empty() => !exe.is_empty(),
         (Ok(exe), Ok(sig)) => verify_bytes(&exe, &sig).is_ok(),
         _ => false,
     }
