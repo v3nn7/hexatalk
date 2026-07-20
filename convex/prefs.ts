@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import { mutation, query, MutationCtx, QueryCtx } from "./_generated/server";
 import { currentUser } from "./session";
-import { hashSessionToken } from "./auth";
+import { hashSessionToken, SESSION_TTL_MS } from "./auth";
 import { Id } from "./_generated/dataModel";
 
 /** Hash-first token comparison with a plaintext fallback for legacy
@@ -30,22 +30,24 @@ export async function conversationAllowsStorage(
     .withIndex("by_conversation", (q) => q.eq("conversationId", conversationId))
     .take(200);
 
-  for (const m of members) {
-    const user = await ctx.db.get("users", m.userId);
-    if (user && user.storeChatHistory === false) {
-      return false;
-    }
-    const pref = await ctx.db
-      .query("chatStorePrefs")
-      .withIndex("by_user_and_conversation", (q) =>
-        q.eq("userId", m.userId).eq("conversationId", conversationId),
-      )
-      .unique();
-    if (pref && pref.store === false) {
-      return false;
-    }
-  }
-  return true;
+  // Fan out member lookups in parallel instead of 2N sequential round-trips.
+  const checks = await Promise.all(
+    members.map(async (m) => {
+      const [user, pref] = await Promise.all([
+        ctx.db.get("users", m.userId),
+        ctx.db
+          .query("chatStorePrefs")
+          .withIndex("by_user_and_conversation", (q) =>
+            q.eq("userId", m.userId).eq("conversationId", conversationId),
+          )
+          .unique(),
+      ]);
+      if (user && user.storeChatHistory === false) return false;
+      if (pref && pref.store === false) return false;
+      return true;
+    }),
+  );
+  return checks.every(Boolean);
 }
 
 export const setStoreChatHistory = mutation({
@@ -201,8 +203,10 @@ export const touchSession = mutation({
     if (!session || session.expiresAt < Date.now()) {
       throw new Error("Session expired, please log in again");
     }
+    const now = Date.now();
     const patch: {
       lastActiveAt: number;
+      expiresAt?: number;
       deviceName?: string;
       platform?:
         | "desktop"
@@ -211,7 +215,12 @@ export const touchSession = mutation({
         | "web"
         | "bot"
         | "unknown";
-    } = { lastActiveAt: Date.now() };
+    } = { lastActiveAt: now };
+    // Sliding renewal: active sessions never die mid-use, idle ones still
+    // expire on the original 30-day clock.
+    if (session.expiresAt - now < SESSION_TTL_MS / 2) {
+      patch.expiresAt = now + SESSION_TTL_MS;
+    }
     if (args.deviceName !== undefined) {
       patch.deviceName = args.deviceName.trim().slice(0, 80) || "Unknown device";
     }

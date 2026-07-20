@@ -1,8 +1,11 @@
 // Header + message history + composer -- the right-hand chat pane. Port of
 // the `Some(_)` / `None` branches of `chat_panel` in src/view/chat.rs.
+// "Violet Night" pass: 48px channel bar (# name, topic, pinned/member
+// vector icons), grouped message history, and a rounded composer pill with
+// attach / emoji / send buttons inside.
 import { ListView, Slider } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { Avatar, SecondaryButton, PrimaryButton, DangerButton } from "widgets.slint";
+import { Avatar, SecondaryButton, PinIcon, MembersIcon, SmileyIcon, SpeakerIcon } from "widgets.slint";
 import { ChatMessageRow, VoiceUserVolumeRow } from "chat_types.slint";
 import { MessageRow } from "message_row.slint";
 
@@ -11,14 +14,15 @@ component HeaderChip inherits Rectangle {
     in property <bool> warn: false;
     height: 22px;
     width: label.preferred-width + 20px;
-    background: root.warn ? #d1bc4d1a : Theme.accent-soft;
+    border-radius: 11px;
+    background: root.warn ? Theme.warning-soft : Theme.accent-soft;
     border-width: 1px;
-    border-color: root.warn ? #d1bc4d59 : Theme.border-strong;
+    border-color: root.warn ? Theme.warning-border : Theme.border-strong;
     label := Text {
         text: root.text;
         font-size: 11px;
         font-family: Theme.font-medium;
-        color: root.warn ? Theme.warning : Theme.online;
+        color: root.warn ? Theme.warning : Theme.accent-hover;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -30,6 +34,7 @@ component HeaderButton inherits Rectangle {
     callback clicked;
     height: 30px;
     width: label.preferred-width + 20px;
+    border-radius: Theme.radius-sm;
     background: root.accent
         ? (touch.pressed ? Theme.accent-pressed : (touch.has-hover ? Theme.accent : Theme.accent-dim))
         : (touch.pressed ? Theme.bg-tertiary : (touch.has-hover ? Theme.bg-hover : Theme.bg-secondary));
@@ -37,7 +42,10 @@ component HeaderButton inherits Rectangle {
     border-color: root.accent ? Theme.accent : (touch.has-hover ? Theme.border-strong : Theme.border);
     animate background { duration: 120ms; }
     animate border-color { duration: 120ms; }
-    touch := TouchArea { clicked => { root.clicked(); } }
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
     label := Text {
         text: root.text;
         font-size: Theme.text-sm;
@@ -47,8 +55,35 @@ component HeaderButton inherits Rectangle {
     }
 }
 
+// Small square icon button for the channel bar (pinned messages, member
+// list): quiet muted vector glyph that lights up on hover. The glyph is
+// passed as a child (PinIcon / MembersIcon) and recolors itself from `hot`.
+component HeaderIcon inherits Rectangle {
+    out property <bool> hot: touch.has-hover;
+    callback clicked;
+    width: 30px;
+    height: 30px;
+    border-radius: Theme.radius-sm;
+    background: touch.has-hover ? Theme.bg-hover : transparent;
+    animate background { duration: 120ms; }
+    HorizontalLayout {
+        alignment: center;
+        VerticalLayout {
+            alignment: center;
+            @children
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
 export component ChatArea inherits Rectangle {
     in property <bool> has_conversation: false;
+    // True between opening a conversation and the first history payload --
+    // the message list shows "Loading…" instead of a misleading empty pane.
+    in property <bool> loading: false;
 
     in property <string> peer_title;
     in property <string> peer_initial;
@@ -56,6 +91,8 @@ export component ChatArea inherits Rectangle {
     in property <image> peer_photo;
     in property <bool> peer_online: false;
     in property <bool> is_channel_icon: false;
+    // Voice channel header gets a speaker glyph instead of "#".
+    in property <bool> is_voice_icon: false;
 
     in property <bool> is_direct: false;
     in property <bool> peer_connected: false;
@@ -74,8 +111,21 @@ export component ChatArea inherits Rectangle {
     in property <string> voice_users_label;
     in property <[VoiceUserVolumeRow]> voice_users: [];
 
+    // Optional Discord-style channel-bar extras. Empty = hidden, so existing
+    // callers that never set them keep the old look.
+    in property <string> channel_topic;
+    in property <string> member_count_label;
+
     in property <[ChatMessageRow]> messages: [];
     in property <[string]> quick_emojis: [];
+
+    // Scroll-to-bottom pulse, driven from Rust (CHAT_SCROLL_PULSE in
+    // src/main.rs): every increment jumps the message list to the end. Rust
+    // only pulses when it makes sense (own send, open conversation, new
+    // incoming message), so no near-bottom detection happens here.
+    // The Timer that applies the scroll lives next to `list` inside the
+    // conversation branch (Slint cannot reach ids across `if` scopes).
+    in property <int> scroll_pulse: 0;
 
     in property <bool> is_editing: false;
     in property <string> input_placeholder;
@@ -86,6 +136,11 @@ export component ChatArea inherits Rectangle {
     // user is currently typing (filled from Rust; includes "everyone" where
     // the conversation supports it). Empty = popup hidden.
     in property <[string]> mention_suggestions: [];
+    // Keyboard-selected row of the mention popup (ArrowUp/ArrowDown in the
+    // composer move it, Enter picks it). Resets whenever the suggestion
+    // list changes.
+    property <int> mention_active: 0;
+    changed mention_suggestions => { root.mention_active = 0; }
     in property <bool> has_pending_attachment: false;
     in property <image> pending_attachment_preview;
     in property <bool> has_pending_reply: false;
@@ -101,6 +156,10 @@ export component ChatArea inherits Rectangle {
     callback confirm_clear;
     callback join_voice;
     callback leave_voice;
+    // New channel-bar icon actions (wired up on the Rust side later; safe to
+    // leave unconnected -- the icons simply do nothing).
+    callback toggle_pins;
+    callback toggle_member_list;
 
     callback message_input_edited(string);
     callback mention_pick(string);
@@ -123,6 +182,28 @@ export component ChatArea inherits Rectangle {
     callback voice_volume_changed(string, float);
 
     background: Theme.bg-primary;
+
+    // Debounce for the per-peer voice volume sliders: dragging fires
+    // `changed` per tick, and every tick used to persist settings to disk
+    // (Message::VoiceVolumeChanged -> persist_settings). The slider still
+    // moves live; Rust hears about it 400ms after the drag stops.
+    // Nested Slider callbacks cannot call Timer.restart() safely (codegen
+    // binds the timer id to the wrong self), so bump this kick counter and
+    // re-arm the timer from the component root.
+    property <string> pending_vol_user;
+    property <float> pending_vol_value;
+    property <int> voice_vol_kick: 0;
+    changed voice_vol_kick => {
+        voice_vol_timer.running = false;
+        voice_vol_timer.running = true;
+    }
+    voice_vol_timer := Timer {
+        interval: 400ms;
+        triggered => {
+            self.running = false;
+            root.voice_volume_changed(root.pending_vol_user, root.pending_vol_value);
+        }
+    }
 
     // Welcome/empty state. Deliberately NOT a fill-parent VerticalLayout
     // with `alignment: center`: a layout that fills its parent propagates
@@ -156,7 +237,7 @@ export component ChatArea inherits Rectangle {
                     Text {
                         text: ">_";
                         font-size: 26px;
-                        color: #050d05;
+                        color: Theme.text-on-accent;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
@@ -199,15 +280,21 @@ export component ChatArea inherits Rectangle {
         opacity: 0;
         init => { self.opacity = 1; }
         animate opacity { duration: 140ms; }
-        // ---- Header ----
+        // ---- Header (channel bar) ----
         Rectangle {
-            height: 62px;
+            height: 48px;
             background: Theme.bg-secondary;
             border-width: 1px;
             border-color: Theme.border;
             HorizontalLayout {
-                padding: 16px;
-                spacing: 12px;
+                padding-left: 16px;
+                padding-right: 12px;
+                // Vertical padding sized so the 30px HeaderButtons fill the
+                // cross axis exactly (48 - 9 - 9 = 30) under the default
+                // stretch alignment.
+                padding-top: 9px;
+                padding-bottom: 9px;
+                spacing: 10px;
                 // No `alignment: start` -- same story as the composer row
                 // and the rail (see their comments): it disabled the
                 // trailing spacer's `horizontal-stretch: 1` below, so the
@@ -217,7 +304,7 @@ export component ChatArea inherits Rectangle {
                 // changes text (and therefore width) throughout a peerseal
                 // handshake, the buttons visibly shifted under the mouse
                 // every time it updated, flickering hover state.
-                if !root.is_channel_icon: Avatar {
+                if !root.is_channel_icon && !root.is_voice_icon: Avatar {
                     initial: root.peer_initial;
                     avatar-color: root.peer_avatar_color;
                     photo-source: root.peer_photo;
@@ -231,12 +318,31 @@ export component ChatArea inherits Rectangle {
                     color: Theme.text-muted;
                     vertical-alignment: center;
                 }
+                if root.is_voice_icon: SpeakerIcon {
+                    fg: Theme.text-muted;
+                    vertical-stretch: 0;
+                }
                 Text {
                     text: root.peer_title;
                     font-size: Theme.text-lg;
                     font-family: Theme.font-medium;
                     color: Theme.text-primary;
                     vertical-alignment: center;
+                }
+                // Channel topic, Discord-style: "│ topic" right of the name.
+                if root.channel_topic != "": Text {
+                    text: "│";
+                    font-size: Theme.text-md;
+                    color: Theme.border-strong;
+                    vertical-alignment: center;
+                }
+                if root.channel_topic != "": Text {
+                    text: root.channel_topic;
+                    font-size: Theme.text-sm;
+                    color: Theme.text-muted;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    width: min(self.preferred-width, 240px);
                 }
                 if root.is_direct: HeaderChip { text: root.connection_label; warn: !root.peer_connected; }
                 if root.is_direct && root.sas_label != "": Text {
@@ -301,6 +407,25 @@ export component ChatArea inherits Rectangle {
                     color: Theme.text-muted;
                     vertical-alignment: center;
                 }
+                // Channel-bar icons, far right (pinned messages, member list).
+                pins_btn := HeaderIcon {
+                    clicked => { root.toggle_pins(); }
+                    PinIcon {
+                        fg: pins_btn.hot ? Theme.text-primary : Theme.text-muted;
+                    }
+                }
+                members_btn := HeaderIcon {
+                    clicked => { root.toggle_member_list(); }
+                    MembersIcon {
+                        fg: members_btn.hot ? Theme.text-primary : Theme.text-muted;
+                    }
+                }
+                if root.member_count_label != "": Text {
+                    text: root.member_count_label;
+                    font-size: Theme.text-xs;
+                    color: Theme.text-muted;
+                    vertical-alignment: center;
+                }
             }
         }
 
@@ -333,7 +458,11 @@ export component ChatArea inherits Rectangle {
                         minimum: 0;
                         maximum: 5;
                         value: u.volume;
-                        changed(v) => { root.voice_volume_changed(u.user_id, v); }
+                        changed(v) => {
+                            root.pending_vol_user = u.user_id;
+                            root.pending_vol_value = v;
+                            root.voice_vol_kick += 1;
+                        }
                     }
                     Text {
                         text: Math.round(u.volume * 100) + "%";
@@ -350,6 +479,24 @@ export component ChatArea inherits Rectangle {
         Rectangle {
             vertical-stretch: 1;
             background: Theme.bg-primary;
+            // Mirror root.scroll_pulse so `changed` can fire next to `list`
+            // (Slint cannot reach ids declared inside this `if` from outside).
+            property <int> pulse: root.scroll_pulse;
+            changed pulse => {
+                if (self.pulse > 0) {
+                    scroll_timer.running = true;
+                }
+            }
+            // Deferred one tick past the model/layout update: right after
+            // `messages` changes, `viewport-height` still reflects the old
+            // rows, so scrolling immediately would land short of the real end.
+            scroll_timer := Timer {
+                interval: 80ms;
+                triggered => {
+                    self.running = false;
+                    list.viewport-y = min(0px, list.visible-height - list.viewport-height);
+                }
+            }
             list := ListView {
                 for m in root.messages: MessageRow {
                     msg: m;
@@ -365,6 +512,24 @@ export component ChatArea inherits Rectangle {
                     report_reason(id, body, reason) => { root.report_reason(id, body, reason); }
                     report_cancel(id) => { root.report_cancel(id); }
                 }
+            }
+            // History fetch in flight (set on conversation open, cleared on
+            // the first MessagesUpdated) -- show a quiet indicator instead
+            // of a blank pane.
+            if root.loading && root.messages.length == 0: Text {
+                text: "Loading…";
+                font-size: Theme.text-md;
+                color: Theme.text-muted;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            // Loaded, genuinely empty conversation.
+            if !root.loading && root.messages.length == 0: Text {
+                text: "No messages yet. Say hi!";
+                font-size: Theme.text-md;
+                color: Theme.text-muted;
+                horizontal-alignment: center;
+                vertical-alignment: center;
             }
         }
 
@@ -395,6 +560,7 @@ export component ChatArea inherits Rectangle {
                     background: Theme.bg-tertiary;
                     border-width: 1px;
                     border-color: Theme.border;
+                    border-radius: Theme.radius-md;
                     height: 36px;
                     Rectangle {
                         x: 0;
@@ -421,6 +587,7 @@ export component ChatArea inherits Rectangle {
                     background: Theme.bg-tertiary;
                     border-width: 1px;
                     border-color: Theme.border;
+                    border-radius: Theme.radius-md;
                     height: 60px;
                     HorizontalLayout {
                         padding: 8px;
@@ -430,6 +597,7 @@ export component ChatArea inherits Rectangle {
                             background: Theme.bg-secondary;
                             border-width: 1px;
                             border-color: Theme.border;
+                            border-radius: Theme.radius-sm;
                             Image { source: root.pending_attachment_preview; width: 44px; height: 44px; image-fit: ImageFit.cover; }
                         }
                         Text {
@@ -447,6 +615,7 @@ export component ChatArea inherits Rectangle {
                     background: Theme.danger-soft;
                     border-width: 1px;
                     border-color: Theme.danger;
+                    border-radius: 6px;
                     height: 34px;
                     Text {
                         x: 10px;
@@ -457,9 +626,10 @@ export component ChatArea inherits Rectangle {
                     }
                 }
                 if root.chat_error == "" && root.warning_line != "": Rectangle {
-                    background: #d1bc4d1a;
+                    background: Theme.warning-soft;
                     border-width: 1px;
-                    border-color: #d1bc4d59;
+                    border-color: Theme.warning-border;
+                    border-radius: 6px;
                     height: 34px;
                     Text {
                         x: 10px;
@@ -477,12 +647,15 @@ export component ChatArea inherits Rectangle {
                     background: Theme.bg-tertiary;
                     border-width: 1px;
                     border-color: Theme.border-strong;
+                    border-radius: 6px;
                     VerticalLayout {
                         padding: 4px;
                         spacing: 2px;
-                        for name in root.mention_suggestions: Rectangle {
+                        for name[i] in root.mention_suggestions: Rectangle {
                             height: 26px;
-                            background: mention_touch.has-hover ? Theme.bg-hover : transparent;
+                            border-radius: 4px;
+                            background: i == root.mention_active ? Theme.bg-hover
+                                : (mention_touch.has-hover ? Theme.bg-hover : transparent);
                             HorizontalLayout {
                                 padding-left: 8px;
                                 spacing: 6px;
@@ -500,41 +673,62 @@ export component ChatArea inherits Rectangle {
                 }
 
                 HorizontalLayout {
-                    spacing: 10px;
-                    // No `alignment` here (default `stretch`). The input
-                    // box below is the only flexible item (horizontal
-                    // stretch: 1) and its own TextInput child is bound to
-                    // `parent.width - 24px` -- i.e. the input box's width
-                    // must come from the layout handing it real leftover
-                    // space. `alignment: center` (like the same anti-pattern
-                    // fixed in message_row.slint) disables stretch-based
-                    // sizing entirely, so the box fell back to its own
-                    // preferred width, which is itself derived from its
-                    // child's `parent.width`-relative binding -- a genuine
-                    // circular size dependency that overflowed the stack on
-                    // *every* chat screen (this composer renders regardless
-                    // of message count, unlike the message list).
-                    if !root.is_editing && root.crypto_ready: HeaderButton { text: "+"; clicked => { root.pick_attachment(); } }
-                    Text {
-                        text: ">";
-                        font-size: 16px;
-                        font-family: Theme.font-medium;
-                        color: composer_input.has-focus ? Theme.accent : Theme.accent-dim;
-                        animate color { duration: 120ms; }
-                        vertical-alignment: center;
-                        horizontal-stretch: 0;
-                    }
-                    Rectangle {
+                    spacing: 8px;
+                    // No `alignment` here (default `stretch`). The composer
+                    // pill below is the only flexible item (horizontal
+                    // stretch: 1) and its own TextInput child derives its
+                    // width from the pill's final width -- i.e. the pill's
+                    // width must come from the layout handing it real
+                    // leftover space. `alignment: center` (like the same
+                    // anti-pattern fixed in message_row.slint) disables
+                    // stretch-based sizing entirely, so the pill fell back
+                    // to its own preferred width, which is itself derived
+                    // from its children's `parent.width`-relative bindings
+                    // -- a genuine circular size dependency that overflowed
+                    // the stack on *every* chat screen (this composer
+                    // renders regardless of message count, unlike the
+                    // message list).
+
+                    // Rounded composer pill:
+                    // [+] attach · text input · smiley · [send]
+                    composer_box := Rectangle {
                         horizontal-stretch: 1;
-                        height: 40px;
+                        height: 44px;
+                        border-radius: 8px;
                         background: composer_input.has-focus ? Theme.bg-elevated : Theme.bg-tertiary;
                         border-width: 1px;
-                        border-color: composer_input.has-focus ? Theme.accent : Theme.border;
+                        border-color: composer_input.has-focus ? Theme.border-strong : Theme.border;
                         animate background { duration: 120ms; }
                         animate border-color { duration: 120ms; }
+
+                        // Circular attach button on the left edge.
+                        if !root.is_editing && root.crypto_ready: Rectangle {
+                            x: 8px;
+                            y: (parent.height - 30px) / 2;
+                            width: 30px;
+                            height: 30px;
+                            border-radius: 15px;
+                            background: att_touch.has-hover ? Theme.bg-hover : Theme.bg-secondary;
+                            border-width: 1px;
+                            border-color: att_touch.has-hover ? Theme.border-strong : Theme.border;
+                            animate background { duration: 120ms; }
+                            animate border-color { duration: 120ms; }
+                            Text {
+                                text: "+";
+                                font-size: 16px;
+                                color: att_touch.has-hover ? Theme.text-primary : Theme.text-muted;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            att_touch := TouchArea { clicked => { root.pick_attachment(); } }
+                        }
+
                         composer_input := TextInput {
-                            x: 12px;
-                            width: parent.width - 24px;
+                            x: (!root.is_editing && root.crypto_ready) ? 46px : 14px;
+                            // Right edge stops short of the emoji + send
+                            // buttons; the chain input -> emoji -> send is
+                            // one-directional, so there is no size cycle.
+                            width: emoji_btn.x - self.x - 8px;
                             height: parent.height;
                             vertical-alignment: center;
                             text <=> root.message_input;
@@ -542,32 +736,96 @@ export component ChatArea inherits Rectangle {
                             font-size: Theme.text-md;
                             edited => { root.message_input_edited(self.text); }
                             // While the mention popup is open, Enter completes
-                            // the first suggestion instead of sending.
+                            // the active suggestion instead of sending.
                             accepted => {
                                 if (root.mention_suggestions.length > 0) {
-                                    root.mention_pick(root.mention_suggestions[0]);
+                                    root.mention_pick(root.mention_suggestions[min(root.mention_active, root.mention_suggestions.length - 1)]);
                                 } else if (root.crypto_ready) {
                                     root.send();
                                 }
                             }
+                            // Arrow keys navigate the mention popup while
+                            // it's open; everything else falls through to
+                            // normal text editing.
+                            key-pressed(event) => {
+                                if (root.mention_suggestions.length > 0) {
+                                    if (event.text == Key.DownArrow) {
+                                        root.mention_active = min(root.mention_active + 1, root.mention_suggestions.length - 1);
+                                        return accept;
+                                    }
+                                    if (event.text == Key.UpArrow) {
+                                        root.mention_active = max(root.mention_active - 1, 0);
+                                        return accept;
+                                    }
+                                }
+                                reject
+                            }
                         }
                         if root.message_input == "": Text {
-                            x: 12px;
+                            x: composer_input.x;
                             text: root.input_placeholder;
                             color: Theme.text-muted;
                             font-size: Theme.text-md;
                             vertical-alignment: center;
                             height: parent.height;
                         }
-                    }
-                    PrimaryButton {
-                        text: root.send_label;
+
+                        // Emoji button: appends the first quick emoji to the
+                        // draft. The glyph is a vector smiley, not an emoji,
+                        // so it follows the theme like every other icon.
+                        emoji_btn := Rectangle {
+                            x: send_btn.x - 36px;
+                            y: (parent.height - 30px) / 2;
+                            width: 30px;
+                            height: 30px;
+                            border-radius: 15px;
+                            background: emoji_touch.has-hover ? Theme.bg-hover : transparent;
+                            animate background { duration: 120ms; }
+                            SmileyIcon {
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                fg: emoji_touch.has-hover ? Theme.text-primary : Theme.text-muted;
+                            }
+                            emoji_touch := TouchArea {
+                                clicked => {
+                                    root.message_input = root.message_input
+                                        + (root.quick_emojis.length > 0 ? root.quick_emojis[0] : "😊");
+                                }
+                            }
+                        }
+
+                        // Send button, tucked into the pill's right edge.
                         // Empty sends are a no-op in Rust (body trimmed,
                         // attachment-only allowed) -- reflect that in the UI.
-                        enabled: root.crypto_ready && (root.message_input != "" || root.has_pending_attachment);
-                        width: 90px;
-                        clicked => { root.send(); }
+                        send_btn := Rectangle {
+                            property <bool> can_send: root.crypto_ready && (root.message_input != "" || root.has_pending_attachment);
+                            x: parent.width - self.width - 7px;
+                            y: (parent.height - 30px) / 2;
+                            width: send_text.preferred-width + 18px;
+                            height: 30px;
+                            border-radius: 6px;
+                            background: !self.can_send ? Theme.bg-secondary
+                                : (send_touch.pressed ? Theme.accent-pressed
+                                : (send_touch.has-hover ? Theme.accent : Theme.accent-dim));
+                            border-width: 1px;
+                            border-color: self.can_send ? Theme.accent : Theme.border;
+                            animate background { duration: 120ms; }
+                            animate border-color { duration: 120ms; }
+                            send_text := Text {
+                                text: root.send_label;
+                                font-size: Theme.text-sm;
+                                font-family: Theme.font-medium;
+                                color: send_btn.can_send ? Theme.text-on-accent : Theme.text-muted;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            send_touch := TouchArea {
+                                enabled: send_btn.can_send;
+                                clicked => { root.send(); }
+                            }
+                        }
                     }
+
                     if root.is_editing: SecondaryButton { text: "Cancel"; width: 80px; clicked => { root.cancel_edit(); } }
                 }
             }

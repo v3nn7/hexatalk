@@ -1,32 +1,60 @@
 // Top-of-window call bar: ringing / active states, share picker, remote
 // screenshare frame. Port of `call_banner_view` in src/view/chat.rs.
+// Elevated panel, status dot + small-caps state chip, rounded control-bar
+// buttons with distinct toggled/pressed states (green accept / red decline
+// & hang-up accents), hover-accented share target list.
 import { Theme } from "theme.slint";
 import { Slider, ScrollView } from "std-widgets.slint";
 import { ShareTargetRow } from "chat_types.slint";
 
+// Rounded control-bar button: uppercase micro-label, optional leading status
+// square, three variants -- outline (default), filled (success/danger), and
+// `active` (danger-tinted "click to revert" state for toggled flags such as
+// muted / sharing / stream-muted).
 component BannerButton inherits Rectangle {
     in property <string> text;
     in property <color> accent_color: Theme.accent-dim;
     in property <bool> filled: false;
+    in property <bool> active: false;
+    in property <bool> show_dot: false;
+    in property <color> dot_color: Theme.accent;
     callback clicked;
-    height: 32px;
-    width: label.preferred-width + 24px;
-    background: root.filled ? root.accent_color : (touch.pressed ? Theme.bg-tertiary : (touch.has-hover ? Theme.bg-hover : Theme.bg-secondary));
+    height: 30px;
+    width: row.preferred-width;
+    border-radius: 6px;
+    background: root.filled ? root.accent_color
+        : root.active ? Theme.danger-soft
+        : (touch.pressed ? Theme.bg-tertiary : (touch.has-hover ? Theme.bg-hover : transparent));
     border-width: 1px;
-    border-color: root.filled ? root.accent_color : (touch.has-hover ? Theme.border-strong : Theme.border);
+    border-color: root.filled ? root.accent_color
+        : root.active ? Theme.danger
+        : (touch.has-hover ? Theme.border-strong : Theme.border);
     animate background { duration: 120ms; }
     animate border-color { duration: 120ms; }
     touch := TouchArea { clicked => { root.clicked(); } }
-    label := Text {
-        text: root.text;
-        font-size: 13px;
-        color: root.filled ? white : Theme.text-primary;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+    row := HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 6px;
+        alignment: center;
+        if root.show_dot: Rectangle {
+            width: 6px;
+            height: 6px;
+            background: root.dot_color;
+        }
+        label := Text {
+            text: root.text;
+            font-size: 11px;
+            font-family: Theme.font-medium;
+            color: root.filled ? white : (root.active ? Theme.danger : Theme.text-primary);
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
     }
-    // Square tint overlay: lightens on hover, darkens on press. Works on
-    // filled and outline variants alike without rounding anything.
+    // Tint overlay: lightens on hover, darkens on press. Same corner radius
+    // as the button itself so the fill doesn't square off the corners.
     Rectangle {
+        border-radius: 6px;
         background: touch.pressed ? #00000030 : (touch.has-hover ? #ffffff12 : transparent);
         animate background { duration: 120ms; }
     }
@@ -68,27 +96,84 @@ export component CallBanner inherits Rectangle {
     height: root.visible_ ? content.preferred-height : 0px;
     clip: true;
     background: Theme.bg-elevated;
+
+    // Debounce for the peer-volume slider: `changed` fires per drag tick and
+    // every tick used to persist settings.json
+    // (Message::VoiceVolumeChanged("*") -> persist_settings). Nested Slider
+    // callbacks cannot call Timer.restart() safely (codegen binds the timer
+    // id to the wrong self), so bump this kick counter and re-arm the timer
+    // from the component root.
+    property <float> pending_volume: root.peer_volume;
+    property <int> volume_kick: 0;
+    changed volume_kick => {
+        volume_timer.running = false;
+        volume_timer.running = true;
+    }
+    volume_timer := Timer {
+        interval: 400ms;
+        triggered => {
+            self.running = false;
+            root.volume_changed(root.pending_volume);
+        }
+    }
     animate height { duration: 140ms; }
 
     content := VerticalLayout {
         Rectangle {
             height: 56px;
-            background: root.is_ringing ? #d1bc4d1a : Theme.bg-elevated;
-            border-width: 1px;
-            border-color: root.is_ringing ? #d1bc4d59 : Theme.border;
+            background: root.is_ringing ? Theme.warning-soft : Theme.bg-elevated;
             animate background { duration: 120ms; }
-            animate border-color { duration: 120ms; }
-            // Status spine: warning-yellow while ringing, emerald in call.
+            // Status spine: warning-yellow while ringing, violet in call.
             Rectangle {
                 x: 0;
                 y: 0;
                 width: 3px;
                 height: parent.height;
                 background: root.is_ringing ? Theme.warning : Theme.accent;
+                animate background { duration: 120ms; }
+            }
+            // Bottom hairline separates the banner from the chat below.
+            Rectangle {
+                y: parent.height - 1px;
+                width: parent.width;
+                height: 1px;
+                background: root.is_ringing ? Theme.warning-border : Theme.border;
+                animate background { duration: 120ms; }
             }
             HorizontalLayout {
-                padding: 14px;
-                spacing: 12px;
+                padding-left: 16px;
+                padding-right: 12px;
+                spacing: 10px;
+                // Live status dot, same warning/accent split as the spine.
+                // Pulses gently while the call is ringing.
+                Text {
+                    text: "●";
+                    font-size: 9px;
+                    color: root.is_ringing ? Theme.warning : Theme.accent;
+                    vertical-alignment: center;
+                    opacity: root.is_ringing ? 0.55 + 0.45 * Math.sin((animation-tick() / 260ms) * 1deg) : 1;
+                    animate color { duration: 120ms; }
+                }
+                // Small-caps state chip for at-a-glance call state.
+                Rectangle {
+                    height: 18px;
+                    width: chip-label.preferred-width + 14px;
+                    border-radius: 9px;
+                    border-width: 1px;
+                    border-color: root.is_ringing ? Theme.warning : Theme.border-strong;
+                    background: root.is_ringing ? Theme.warning-softer : Theme.accent-soft;
+                    animate border-color { duration: 120ms; }
+                    animate background { duration: 120ms; }
+                    chip-label := Text {
+                        text: root.is_ringing ? (root.is_incoming ? "INCOMING CALL" : "OUTGOING CALL") : "IN CALL";
+                        font-size: 9px;
+                        font-family: Theme.font-medium;
+                        color: root.is_ringing ? Theme.warning : Theme.accent;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        animate color { duration: 120ms; }
+                    }
+                }
                 Text {
                     text: root.label;
                     font-size: 13px;
@@ -96,39 +181,61 @@ export component CallBanner inherits Rectangle {
                     color: Theme.text-primary;
                     vertical-alignment: center;
                     horizontal-stretch: 1;
+                    overflow: elide;
                 }
-                if root.is_ringing && root.is_incoming: BannerButton { text: "Accept"; filled: true; accent_color: Theme.success; clicked => { root.accept(); } }
-                if root.is_ringing && root.is_incoming: BannerButton { text: "Decline"; filled: true; accent_color: Theme.danger; clicked => { root.decline(); } }
-                if root.is_ringing && !root.is_incoming: BannerButton { text: "Cancel"; clicked => { root.hang_up(); } }
-                if root.is_active: BannerButton { text: root.muted ? "Unmute" : "Mute"; clicked => { root.toggle_mute(); } }
-                if root.is_active: BannerButton { text: root.all_muted ? "Unmute all" : "Mute all"; clicked => { root.toggle_mute_all(); } }
+                if root.is_ringing && root.is_incoming: BannerButton { text: "ACCEPT"; filled: true; accent_color: Theme.success; clicked => { root.accept(); } }
+                if root.is_ringing && root.is_incoming: BannerButton { text: "DECLINE"; filled: true; accent_color: Theme.danger; clicked => { root.decline(); } }
+                if root.is_ringing && !root.is_incoming: BannerButton { text: "CANCEL"; clicked => { root.hang_up(); } }
                 if root.is_active: BannerButton {
-                    text: root.is_sharing ? "Stop sharing" : "Share screen";
+                    text: root.muted ? "UNMUTE" : "MUTE";
+                    active: root.muted;
+                    show_dot: true;
+                    dot_color: root.muted ? Theme.danger : Theme.accent;
+                    clicked => { root.toggle_mute(); }
+                }
+                if root.is_active: BannerButton {
+                    text: root.all_muted ? "UNMUTE ALL" : "MUTE ALL";
+                    active: root.all_muted;
+                    clicked => { root.toggle_mute_all(); }
+                }
+                if root.is_active: BannerButton {
+                    text: root.is_sharing ? "STOP SHARING" : "SHARE SCREEN";
+                    active: root.is_sharing;
                     clicked => { root.is_sharing ? root.stop_share() : root.toggle_share_picker(); }
                 }
                 if root.is_active && root.has_remote_frame: BannerButton {
-                    text: root.remote_stream_muted ? "Unmute stream" : "Mute stream";
+                    text: root.remote_stream_muted ? "UNMUTE STREAM" : "MUTE STREAM";
+                    active: root.remote_stream_muted;
                     clicked => { root.toggle_stream_mute(); }
                 }
-                if root.is_active: BannerButton { text: "Hang up"; filled: true; accent_color: Theme.danger; clicked => { root.hang_up(); } }
+                if root.is_active: BannerButton { text: "HANG UP"; filled: true; accent_color: Theme.danger; clicked => { root.hang_up(); } }
             }
         }
 
+        // Recessed voice-settings strip: peer volume + share stats.
         if root.is_active: Rectangle {
             height: 40px;
-            background: Theme.bg-primary;
-            border-width: 1px;
-            border-color: Theme.border-hairline;
+            background: Theme.bg-secondary;
+            Rectangle {
+                y: 0;
+                width: parent.width;
+                height: 1px;
+                background: Theme.border-hairline;
+            }
             HorizontalLayout {
-                padding: 8px;
+                padding-left: 16px;
+                padding-right: 16px;
                 spacing: 10px;
-                Text { text: "Peer volume"; font-size: 12px; color: Theme.text-muted; vertical-alignment: center; }
+                Text { text: "PEER VOLUME"; font-size: 10px; font-family: Theme.font-medium; color: Theme.text-muted; vertical-alignment: center; }
                 Slider {
                     width: 160px;
                     minimum: 0;
                     maximum: 5;
                     value: root.peer_volume;
-                    changed(v) => { root.volume_changed(v); }
+                    changed(v) => {
+                        root.pending_volume = v;
+                        root.volume_kick += 1;
+                    }
                 }
                 Text { text: Math.round(root.peer_volume * 100) + "%"; font-size: 11px; color: Theme.text-muted; vertical-alignment: center; }
                 if root.share_stats_line != "": Text {
@@ -144,35 +251,56 @@ export component CallBanner inherits Rectangle {
 
         if root.is_active && root.share_picker_open: Rectangle {
             background: Theme.bg-primary;
-            border-width: 1px;
-            border-color: Theme.border-hairline;
+            Rectangle {
+                y: 0;
+                width: parent.width;
+                height: 1px;
+                background: Theme.border-hairline;
+            }
             // A real list, not a single strip: with more than a handful of
             // open windows the old one-row overflowed off the side of the
             // window and most targets (app windows in particular) were
             // unreachable.
             height: 260px;
             VerticalLayout {
-                padding: 10px;
-                spacing: 6px;
-                Text { text: "Share your whole screen or a single app window:"; font-size: 12px; color: Theme.text-muted; }
-                BannerButton {
-                    text: root.share_system_audio ? "System audio: ON" : "System audio: OFF";
-                    clicked => { root.toggle_share_system_audio(); }
+                padding: 12px;
+                spacing: 8px;
+                Text { text: "SHARE YOUR SCREEN"; font-size: 10px; font-family: Theme.font-medium; color: Theme.text-muted; }
+                Text { text: "Pick your whole screen or a single app window."; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    BannerButton {
+                        text: root.share_system_audio ? "SYSTEM AUDIO: ON" : "SYSTEM AUDIO: OFF";
+                        show_dot: true;
+                        dot_color: root.share_system_audio ? Theme.accent : Theme.offline;
+                        clicked => { root.toggle_share_system_audio(); }
+                    }
+                    Text { text: "Needs a loopback device (Stereo Mix / VB-Cable)."; font-size: 11px; color: Theme.text-muted; vertical-alignment: center; wrap: word-wrap; horizontal-stretch: 1; }
                 }
-                Text { text: "System audio needs a loopback device (Stereo Mix / VB-Cable)."; font-size: 11px; color: Theme.text-muted; wrap: word-wrap; }
-                if root.share_targets.length == 0: Text { text: "Loading sources..."; font-size: 12px; color: Theme.text-muted; }
+                if root.share_targets.length == 0: Text { text: "Loading sources…"; font-size: 12px; color: Theme.text-muted; }
                 ScrollView {
                     vertical-stretch: 1;
                     VerticalLayout {
                         spacing: 2px;
                         alignment: start;
                         for t in root.share_targets: Rectangle {
-                            height: 28px;
+                            height: 30px;
+                            border-radius: 4px;
                             background: t-touch.pressed ? Theme.bg-tertiary : (t-touch.has-hover ? Theme.bg-hover : transparent);
                             animate background { duration: 120ms; }
+                            // Sharp accent block marks the hovered target,
+                            // channel-sidebar style.
+                            Rectangle {
+                                x: 0;
+                                width: 2px;
+                                height: parent.height;
+                                background: Theme.accent;
+                                opacity: t-touch.has-hover ? 1 : 0;
+                                animate opacity { duration: 120ms; }
+                            }
                             HorizontalLayout {
-                                padding-left: 8px;
-                                padding-right: 8px;
+                                padding-left: 12px;
+                                padding-right: 10px;
                                 t-label := Text {
                                     text: t.label;
                                     font-size: 12px;
@@ -181,6 +309,14 @@ export component CallBanner inherits Rectangle {
                                     horizontal-stretch: 1;
                                     overflow: elide;
                                     animate color { duration: 120ms; }
+                                }
+                                Text {
+                                    text: "›";
+                                    font-size: 12px;
+                                    color: Theme.accent;
+                                    vertical-alignment: center;
+                                    opacity: t-touch.has-hover ? 1 : 0;
+                                    animate opacity { duration: 120ms; }
                                 }
                             }
                             t-touch := TouchArea { clicked => { root.start_share(t.id); } }
@@ -192,16 +328,23 @@ export component CallBanner inherits Rectangle {
 
         if root.has_remote_frame: Rectangle {
             background: Theme.bg-primary;
-            border-width: 1px;
-            border-color: Theme.border-hairline;
+            Rectangle {
+                y: 0;
+                width: parent.width;
+                height: 1px;
+                background: Theme.border-hairline;
+            }
             height: root.share_expanded ? 700px : 300px;
             animate height { duration: 140ms; }
             VerticalLayout {
-                padding: 8px;
-                spacing: 6px;
+                padding: 10px;
+                spacing: 8px;
                 HorizontalLayout {
-                    Text { text: root.remote_frame_title; font-size: 12px; font-family: Theme.font-medium; color: Theme.text-muted; vertical-alignment: center; horizontal-stretch: 1; }
-                    BannerButton { text: root.share_expanded ? "Shrink" : "Enlarge"; clicked => { root.toggle_share_size(); } }
+                    spacing: 8px;
+                    Text { text: "●"; font-size: 9px; color: Theme.accent; vertical-alignment: center; }
+                    Text { text: "LIVE"; font-size: 10px; font-family: Theme.font-medium; color: Theme.accent; vertical-alignment: center; }
+                    Text { text: root.remote_frame_title; font-size: 12px; font-family: Theme.font-medium; color: Theme.text-muted; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                    BannerButton { text: root.share_expanded ? "SHRINK" : "ENLARGE"; clicked => { root.toggle_share_size(); } }
                 }
                 Rectangle {
                     horizontal-stretch: 1;
@@ -209,6 +352,7 @@ export component CallBanner inherits Rectangle {
                     background: Theme.bg-tertiary;
                     border-width: 1px;
                     border-color: Theme.border;
+                    border-radius: 8px;
                     clip: true;
                     Image {
                         x: 1px;

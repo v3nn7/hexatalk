@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import {
   action,
   internalMutation,
@@ -15,12 +15,25 @@ import {
   platformRole as resolvePlatformRole,
 } from "./session";
 
+/**
+ * User-facing failures for clients that call Convex over the public HTTP
+ * API (mobile). Plain `throw new Error(...)` is redacted to a bare
+ * "Server Error" on that path; `ConvexError` keeps the message.
+ */
+function authError(message: string): never {
+  throw new ConvexError(message);
+}
+
 const PBKDF2_ITERATIONS = 100_000;
-const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 /** Extra usernames that always get "admin" (not owner). */
 const ADMIN_USERNAMES: string[] = [];
 const MAX_FAILED_LOGIN_ATTEMPTS = 5;
 const LOGIN_LOCKOUT_MS = 5 * 60 * 1000;
+/** Discord-like username charset (checked after trim+lowercase). */
+const USERNAME_PATTERN = /^[a-z0-9_.]+$/;
+/** Fixed salt for the dummy hash used to equalize sign-in timing. */
+export const DUMMY_SALT_HEX = "00000000000000000000000000000000";
 
 type AuthResult = {
   token: string;
@@ -106,22 +119,30 @@ export const signUp = action({
     const email = args.email.trim().toLowerCase();
 
     if (username.length < 3) {
-      throw new Error("Username must be at least 3 characters");
+      authError("Username must be at least 3 characters");
     }
     if (username.length > 32) {
-      throw new Error("Username must be 32 characters or fewer");
+      authError("Username must be 32 characters or fewer");
+    }
+    if (!USERNAME_PATTERN.test(username)) {
+      authError(
+        "Username can only contain lowercase letters, numbers, underscores and dots",
+      );
+    }
+    if (username.startsWith(".") || username.endsWith(".")) {
+      authError("Username can't start or end with a dot");
     }
     if (displayName.length > 50) {
-      throw new Error("Display name is too long");
+      authError("Display name is too long");
     }
     if (args.password.length < 6) {
-      throw new Error("Password must be at least 6 characters");
+      authError("Password must be at least 6 characters");
     }
     if (args.password.length > 128) {
-      throw new Error("Password is too long");
+      authError("Password is too long");
     }
     if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      throw new Error("Enter a valid email address");
+      authError("Enter a valid email address");
     }
 
     const existing: Doc<"users"> | null = await ctx.runQuery(
@@ -129,11 +150,11 @@ export const signUp = action({
       { username },
     );
     if (existing) {
-      throw new Error("This username is taken");
+      authError("This username is taken");
     }
     const existingEmail = await ctx.runQuery(internal.email.getUserByEmail, { email });
     if (existingEmail) {
-      throw new Error("This email is already in use");
+      authError("This email is already in use");
     }
 
     const salt = randomHex(16);
@@ -171,35 +192,44 @@ export const signIn = action({
   handler: async (ctx, args): Promise<AuthResult> => {
     const username = args.username.trim().toLowerCase();
 
+    const user: Doc<"users"> | null = await ctx.runQuery(
+      internal.auth.getUserByUsername,
+      { username },
+    );
+    if (!user || !user.passwordHash || !user.salt) {
+      // Timing equalization: run the same PBKDF2 work as a real password
+      // check so "user doesn't exist" isn't distinguishable by latency.
+      // No failed attempt is recorded and no lockout is checked for
+      // nonexistent accounts — otherwise anyone could pre-lock a victim's
+      // future username, and the lockout error would oracle which
+      // usernames exist.
+      await hashPassword(args.password, DUMMY_SALT_HEX);
+      authError("Invalid username or password");
+    }
+
     const lockout: { lockedUntil: number | null } = await ctx.runQuery(
       internal.auth.getLoginLockout,
       { username },
     );
     if (lockout.lockedUntil && lockout.lockedUntil > Date.now()) {
       const secondsLeft = Math.ceil((lockout.lockedUntil - Date.now()) / 1000);
-      throw new Error(
-        `Too many failed attempts. Try again in ${secondsLeft}s.`,
-      );
+      authError(`Too many failed attempts. Try again in ${secondsLeft}s.`);
     }
-
-    const user: Doc<"users"> | null = await ctx.runQuery(
-      internal.auth.getUserByUsername,
-      { username },
-    );
-    if (!user || !user.passwordHash || !user.salt) {
-      await ctx.runMutation(internal.auth.recordFailedLogin, { username });
-      throw new Error("Invalid username or password");
+    if (lockout.lockedUntil) {
+      // Lockout expired — reset the counter so the user gets a fresh set
+      // of attempts instead of an instant re-lock on the next typo.
+      await ctx.runMutation(internal.auth.clearLoginAttempts, { username });
     }
 
     const attemptHash = await hashPassword(args.password, user.salt);
     if (!timingSafeEqual(attemptHash, user.passwordHash)) {
       await ctx.runMutation(internal.auth.recordFailedLogin, { username });
-      throw new Error("Invalid username or password");
+      authError("Invalid username or password");
     }
     await ctx.runMutation(internal.auth.clearLoginAttempts, { username });
 
     if (user.banned) {
-      throw new Error("This account has been banned by an administrator");
+      authError("This account has been banned by an administrator");
     }
 
     let role: PlatformRole =
@@ -376,17 +406,17 @@ export const changePassword = action({
     });
 
     if (!user.passwordHash || !user.salt) {
-      throw new Error("This account signs in via Clerk and has no local password");
+      authError("This account signs in via Clerk and has no local password");
     }
     const attemptHash = await hashPassword(args.currentPassword, user.salt);
     if (!timingSafeEqual(attemptHash, user.passwordHash)) {
-      throw new Error("Current password is incorrect");
+      authError("Current password is incorrect");
     }
     if (args.newPassword.length < 6) {
-      throw new Error("Password must be at least 6 characters");
+      authError("Password must be at least 6 characters");
     }
     if (args.newPassword.length > 128) {
-      throw new Error("Password is too long");
+      authError("Password is too long");
     }
 
     const salt = randomHex(16);
@@ -401,6 +431,155 @@ export const changePassword = action({
       sessionToken: args.sessionToken,
     });
     return null;
+  },
+});
+
+/**
+ * Logged-out password reset — step 1: email a 6-digit code.
+ *
+ * Always returns the same shape so we don't leak whether an email is
+ * registered. Real sends only happen for verified local-password accounts.
+ */
+export const requestPasswordReset = action({
+  args: { email: v.string() },
+  handler: async (ctx, args): Promise<{ ok: true }> => {
+    const email = args.email.trim().toLowerCase();
+    if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      authError("Enter a valid email address");
+    }
+
+    // Timing equalization when no matching user (same dummy PBKDF2 cost
+    // isn't needed here — we always do the same "look up + maybe send"
+    // path and never say "not found").
+    const user = await ctx.runQuery(internal.email.getUserByEmail, { email });
+    if (
+      user &&
+      !user.isBot &&
+      user.emailVerified === true &&
+      user.passwordHash &&
+      user.salt &&
+      !user.banned
+    ) {
+      const codeState = await ctx.runQuery(internal.email.getPasswordResetCodeState, {
+        userId: user._id,
+      });
+      const sinceLast = Date.now() - codeState.lastSentAt;
+      // Reuse the same 60s resend floor as email verification.
+      if (codeState.lastSentAt > 0 && sinceLast < 60_000) {
+        const waitSeconds = Math.ceil((60_000 - sinceLast) / 1000);
+        authError(`Please wait ${waitSeconds}s before requesting another code`);
+      }
+      try {
+        await ctx.runAction(internal.email.issuePasswordResetCode, {
+          userId: user._id,
+          email,
+        });
+      } catch (err) {
+        // Surface provider misconfig; otherwise swallow so we don't leak.
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes("RESEND_API_KEY") || msg.includes("not configured")) {
+          authError("Email sending is not configured on the server");
+        }
+        authError("Could not send reset email — try again later");
+      }
+    }
+
+    return { ok: true };
+  },
+});
+
+/**
+ * Logged-out password reset — step 2: code + new password.
+ * On success all sessions for the user are revoked; client must sign in again.
+ */
+export const resetPasswordWithCode = action({
+  args: {
+    email: v.string(),
+    code: v.string(),
+    newPassword: v.string(),
+  },
+  handler: async (ctx, args): Promise<{ ok: true }> => {
+    const email = args.email.trim().toLowerCase();
+    const code = args.code.trim();
+    if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      authError("Enter a valid email address");
+    }
+    if (!/^\d{6}$/.test(code)) {
+      authError("Enter the 6-digit code from your email");
+    }
+    if (args.newPassword.length < 6) {
+      authError("Password must be at least 6 characters");
+    }
+    if (args.newPassword.length > 128) {
+      authError("Password is too long");
+    }
+
+    const user = await ctx.runQuery(internal.email.getUserByEmail, { email });
+    if (!user || user.isBot || !user.passwordHash) {
+      // Same message as a bad code so existence isn't leaked by this step.
+      authError("Invalid or expired code");
+    }
+
+    const row = await ctx.runQuery(internal.email.getPasswordResetCodeByEmail, {
+      email,
+    });
+    if (!row || row.userId !== user._id) {
+      authError("Invalid or expired code");
+    }
+    if (row.expiresAt < Date.now()) {
+      await ctx.runMutation(internal.email.deletePasswordResetCode, {
+        codeId: row._id,
+      });
+      authError("Code expired — request a new one");
+    }
+    if (row.attempts >= 5) {
+      await ctx.runMutation(internal.email.deletePasswordResetCode, {
+        codeId: row._id,
+      });
+      authError("Too many attempts — request a new code");
+    }
+
+    const attemptHash = await hashSessionToken(code);
+    if (!timingSafeEqual(attemptHash, row.codeHash)) {
+      await ctx.runMutation(internal.email.bumpPasswordResetAttempts, {
+        codeId: row._id,
+        attempts: row.attempts + 1,
+      });
+      authError("Incorrect code");
+    }
+
+    const salt = randomHex(16);
+    const passwordHash = await hashPassword(args.newPassword, salt);
+    await ctx.runMutation(internal.auth.setPasswordHash, {
+      userId: user._id,
+      salt,
+      passwordHash,
+    });
+    await ctx.runMutation(internal.email.deletePasswordResetCode, {
+      codeId: row._id,
+    });
+    await ctx.runMutation(internal.auth.clearLoginAttempts, {
+      username: user.username,
+    });
+    // Force re-login everywhere after a reset.
+    await ctx.runMutation(internal.auth.revokeAllSessionsForUser, {
+      userId: user._id,
+    });
+
+    return { ok: true };
+  },
+});
+
+export const revokeAllSessionsForUser = internalMutation({
+  args: { userId: v.id("users") },
+  handler: async (ctx, args) => {
+    const sessions = await ctx.db
+      .query("sessions")
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .take(200);
+    for (const s of sessions) {
+      await ctx.db.delete("sessions", s._id);
+    }
   },
 });
 
@@ -433,6 +612,13 @@ export const me = query({
     const avatarImageUrl = user.avatarStorageId
       ? await ctx.storage.getUrl(user.avatarStorageId)
       : null;
+    const plusExpiresAt = user.plusExpiresAt ?? 0;
+    const plusActive =
+      typeof user.plusExpiresAt === "number" && user.plusExpiresAt > Date.now();
+    const profileBannerUrl =
+      plusActive && user.profileBannerStorageId
+        ? ((await ctx.storage.getUrl(user.profileBannerStorageId)) ?? "")
+        : "";
     return {
       userId: user._id,
       username: user.username,
@@ -442,6 +628,7 @@ export const me = query({
       statusMessage: user.statusMessage ?? "",
       bio: user.bio ?? "",
       avatarImageUrl: avatarImageUrl ?? "",
+      profileBannerUrl,
       storeChatHistory: user.storeChatHistory !== false,
       hideOnlineStatus: user.hideOnlineStatus === true,
       friendsOnlyDms: user.friendsOnlyDms === true,
@@ -450,6 +637,8 @@ export const me = query({
       presenceStatus: user.presenceStatus ?? "online",
       email: user.email ?? "",
       emailVerified: user.emailVerified === true,
+      plusActive,
+      plusExpiresAt: plusActive ? plusExpiresAt : 0,
     };
   },
 });
@@ -468,5 +657,37 @@ export const getUserByUsername = internalQuery({
       .query("users")
       .withIndex("by_username", (q) => q.eq("username", args.username))
       .unique();
+  },
+});
+
+/**
+ * Maintenance: delete expired sessions and expired e-mail verification
+ * codes. Wire into crons.ts (daily) — see note for the integrator.
+ * Bounded per run; safe to schedule repeatedly.
+ */
+export const cleanupExpiredAuthArtifacts = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const now = Date.now();
+
+    const sessions = await ctx.db.query("sessions").take(1000);
+    let sessionsDeleted = 0;
+    for (const s of sessions) {
+      if (s.expiresAt < now) {
+        await ctx.db.delete("sessions", s._id);
+        sessionsDeleted += 1;
+      }
+    }
+
+    const codes = await ctx.db.query("emailVerificationCodes").take(500);
+    let codesDeleted = 0;
+    for (const c of codes) {
+      if (c.expiresAt < now) {
+        await ctx.db.delete("emailVerificationCodes", c._id);
+        codesDeleted += 1;
+      }
+    }
+
+    return { sessionsDeleted, codesDeleted };
   },
 });

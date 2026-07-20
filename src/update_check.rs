@@ -7,15 +7,31 @@
 
 use crate::net::rt::Task;
 use crate::state::message::Message;
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce};
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use qbsdiff::Bspatch;
+
+/// Encrypted delta frame written by `scripts/encrypt_delta.py` /
+/// `scripts/release.ps1`. Layout:
+///   magic || nonce(12) || AES-256-GCM(ct||tag over raw qbsdiff)
+///   [optional trailing 64-byte ed25519 sig of the *target* exe]
+/// The trailing sig lets the CDN host only `version.txt` + deltas (no full
+/// `HexaTalk.exe` / detached `.sig`). The AES key is baked into the binary
+/// (see `UPDATE_DELTA_KEY_B64` in build.rs / `obf::update_delta_key_b64`).
+const DELTA_MAGIC: &[u8; 4] = b"HTD1";
+const DELTA_NONCE_LEN: usize = 12;
+const DELTA_TAG_LEN: usize = 16;
+const ED25519_SIG_LEN: usize = 64;
 
 // astrakit.pro is set up as a public custom domain in front of the R2
 // bucket, so plain anonymous GETs work here (unlike the raw
 // *.r2.cloudflarestorage.com S3-API endpoint, which needs signed
-// requests). On every release upload `version.txt` (just the version
-// string, e.g. "1.1.0"), the latest `HexaTalk.exe` and its detached
-// signature `HexaTalk.exe.sig` (see below) to the bucket root.
+// requests). Minimal release upload: `version.txt` +
+// `deltas/HexaTalk-<from>-<to>.delta` (HTD1 with trailing sig). Full
+// `HexaTalk.exe` + `HexaTalk.exe.sig` are optional fallbacks for clients
+// that cannot delta (skipped versions, corrupt patch, etc.).
 pub(crate) const CURRENT_APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Hard caps so a malicious or broken update host can't exhaust memory or
@@ -25,6 +41,9 @@ pub(crate) const CURRENT_APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_VERSION_TXT_BYTES: u64 = 1024;
 const MAX_SIGNATURE_BYTES: u64 = 4096;
 const MAX_EXE_BYTES: u64 = 256 * 1024 * 1024;
+/// Deltas should normally be tens of KB to a few MB; this cap just stops a
+/// broken/hostile host from streaming something exe-sized in as a "delta".
+const MAX_DELTA_BYTES: u64 = 64 * 1024 * 1024;
 
 /// The ed25519 public key that release binaries are signed with is baked
 /// into the exe (obfuscated, see src/obf.rs — the key itself is public, the
@@ -41,8 +60,9 @@ const MAX_EXE_BYTES: u64 = 256 * 1024 * 1024;
 ///        python -c "from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey; open('HexaTalk.exe.sig','wb').write(Ed25519PrivateKey.from_private_bytes(bytes.fromhex('<PRIVATE_SEED_HEX>')).sign(open('HexaTalk.exe','rb').read()))"
 ///      (any ed25519 tool works as long as the .sig holds the raw
 ///      64-byte signature over the exact exe bytes).
-///   3. Upload `version.txt`, `HexaTalk.exe` and `HexaTalk.exe.sig`
-///      together -- never bump version.txt before the .sig is in place.
+///   3. Upload at least `version.txt` + signed deltas. Optionally also
+///      `HexaTalk.exe` + `HexaTalk.exe.sig` for full-download fallback.
+///      Never bump version.txt before the matching delta (or full exe) is live.
 
 #[derive(Debug, Clone)]
 pub(crate) enum UpdateOutcome {
@@ -112,23 +132,44 @@ async fn run_update_check() -> UpdateOutcome {
         return UpdateOutcome::UpToDate;
     }
 
-    let bytes = match download_bounded(crate::obf::update_download_url(), MAX_EXE_BYTES, 300).await
-    {
-        Ok(bytes) => bytes,
-        Err(err) => return UpdateOutcome::Failed(err),
-    };
+    let remote_version_str = remote_version.clone().unwrap_or_default();
 
-    // Hard gate: refuse to stage anything that doesn't carry a valid
-    // signature from the release key baked into the binary.
-    let sig_bytes = match download_bounded(crate::obf::update_signature_url(), MAX_SIGNATURE_BYTES, 30)
-        .await
-    {
-        Ok(sig) => sig,
-        Err(err) => return UpdateOutcome::Failed(format!("update refused: couldn't download signature: {err}")),
+    // Prefer the small incremental patch (see try_delta_patch). A missing /
+    // bad delta falls through to a full-exe download when the host still
+    // serves one; delta-only CDN deploys simply fail closed here.
+    let (bytes, sig_bytes) = match try_delta_patch(&remote_version_str).await {
+        Some(patched) => patched,
+        None => {
+            let bytes = match download_bounded(crate::obf::update_download_url(), MAX_EXE_BYTES, 300)
+                .await
+            {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    return UpdateOutcome::Failed(format!(
+                        "no usable delta for {CURRENT_APP_VERSION}->{remote_version_str}, \
+                         and full download failed: {err}"
+                    ));
+                }
+            };
+            // Hard gate: refuse to stage anything that doesn't carry a
+            // valid signature from the release key baked into the binary.
+            let sig_bytes =
+                match download_bounded(crate::obf::update_signature_url(), MAX_SIGNATURE_BYTES, 30)
+                    .await
+                {
+                    Ok(sig) => sig,
+                    Err(err) => {
+                        return UpdateOutcome::Failed(format!(
+                            "update refused: couldn't download signature: {err}"
+                        ));
+                    }
+                };
+            if let Err(reason) = verify_bytes(&bytes, &sig_bytes) {
+                return UpdateOutcome::Failed(format!("update refused: {reason}"));
+            }
+            (bytes, sig_bytes)
+        }
     };
-    if let Err(reason) = verify_bytes(&bytes, &sig_bytes) {
-        return UpdateOutcome::Failed(format!("update refused: {reason}"));
-    }
 
     let Ok(exe_path) = std::env::current_exe() else {
         return UpdateOutcome::Failed("couldn't locate the running executable".to_string());
@@ -150,6 +191,118 @@ async fn run_update_check() -> UpdateOutcome {
         path: staged_path,
         version: remote_version.unwrap_or_else(|| "?".to_string()),
     }
+}
+
+/// Attempts an incremental update: downloads the small
+/// `HexaTalk-<current>-<remote>.delta` patch (if the release host has
+/// uploaded one for this exact version pair), decrypts it when framed as
+/// HTD1 (AES-256-GCM), applies the inner qbsdiff patch to the exe currently
+/// on disk, and returns the reconstructed exe bytes together with the
+/// (already-verified) release signature -- ready to stage exactly like a
+/// full download.
+///
+/// The release signature is preferably embedded as a 64-byte trailer on the
+/// delta blob (delta-only CDN). If absent, the client still tries the
+/// detached `HexaTalk.exe.sig` URL for older uploads.
+///
+/// Returns `None` on ANY failure (no delta uploaded for this pair, bad
+/// decrypt, corrupt patch, or a patched result that doesn't verify against
+/// the release signature) so the caller falls back to the full-exe download.
+async fn try_delta_patch(remote_version: &str) -> Option<(Vec<u8>, Vec<u8>)> {
+    let delta_url = format!(
+        "{}HexaTalk-{}-{}.delta",
+        crate::obf::update_delta_base_url(),
+        CURRENT_APP_VERSION,
+        remote_version
+    );
+    let delta_blob = download_bounded(&delta_url, MAX_DELTA_BYTES, 60).await.ok()?;
+    // Prefer HTD1-encrypted frames (what release.ps1 ships). Legacy plain
+    // qbsdiff blobs are still accepted so older staged deltas keep working
+    // until the next release rotates them out.
+    let DecryptedDelta {
+        patch: delta,
+        embedded_sig,
+    } = decrypt_delta_blob(&delta_blob)?;
+
+    let exe_path = std::env::current_exe().ok()?;
+    let current_exe = std::fs::read(&exe_path).ok()?;
+
+    let patcher = Bspatch::new(&delta).ok()?;
+    let mut patched = Vec::with_capacity(patcher.hint_target_size() as usize);
+    patcher.apply(&current_exe, std::io::Cursor::new(&mut patched)).ok()?;
+
+    let sig_bytes = if let Some(sig) = embedded_sig {
+        sig
+    } else {
+        download_bounded(crate::obf::update_signature_url(), MAX_SIGNATURE_BYTES, 30)
+            .await
+            .ok()?
+    };
+    verify_bytes(&patched, &sig_bytes).ok()?;
+
+    Some((patched, sig_bytes))
+}
+
+struct DecryptedDelta {
+    patch: Vec<u8>,
+    /// ed25519 sig of the target exe when the release embedded it as a
+    /// trailing 64 bytes after the HTD1 frame.
+    embedded_sig: Option<Vec<u8>>,
+}
+
+/// Decrypt an HTD1-framed delta blob into raw qbsdiff bytes (+ optional
+/// embedded target-exe signature). If the blob does not start with the HTD1
+/// magic it is treated as a legacy plaintext qbsdiff patch (returned as-is).
+/// Any AEAD / framing error yields `None` so the caller falls back.
+fn decrypt_delta_blob(blob: &[u8]) -> Option<DecryptedDelta> {
+    if !blob.starts_with(DELTA_MAGIC) {
+        // Legacy plain qbsdiff patch (no embedded sig).
+        return Some(DecryptedDelta {
+            patch: blob.to_vec(),
+            embedded_sig: None,
+        });
+    }
+
+    let min_frame = DELTA_MAGIC.len() + DELTA_NONCE_LEN + DELTA_TAG_LEN;
+    if blob.len() < min_frame {
+        return None;
+    }
+
+    let key_raw = BASE64_STANDARD
+        .decode(crate::obf::update_delta_key_b64())
+        .ok()?;
+    let key: [u8; 32] = key_raw.try_into().ok()?;
+    let cipher = Aes256Gcm::new_from_slice(&key).ok()?;
+
+    let try_frame = |frame: &[u8]| -> Option<Vec<u8>> {
+        if frame.len() < min_frame || !frame.starts_with(DELTA_MAGIC) {
+            return None;
+        }
+        let nonce_start = DELTA_MAGIC.len();
+        let body_start = nonce_start + DELTA_NONCE_LEN;
+        let nonce = Nonce::from_slice(&frame[nonce_start..body_start]);
+        let ciphertext = &frame[body_start..];
+        cipher.decrypt(nonce, ciphertext).ok()
+    };
+
+    // New format: HTD1 frame || ed25519(64). AEAD fails if the trailer is
+    // included in the ciphertext, so try stripping it first when present.
+    if blob.len() >= min_frame + ED25519_SIG_LEN {
+        let (frame, sig) = blob.split_at(blob.len() - ED25519_SIG_LEN);
+        if let Some(patch) = try_frame(frame) {
+            return Some(DecryptedDelta {
+                patch,
+                embedded_sig: Some(sig.to_vec()),
+            });
+        }
+    }
+
+    // Legacy HTD1 without trailing signature.
+    let patch = try_frame(blob)?;
+    Some(DecryptedDelta {
+        patch,
+        embedded_sig: None,
+    })
 }
 
 /// Verifies `sig_bytes` (64 raw ed25519 signature bytes) over `bytes` with
@@ -245,3 +398,69 @@ pub(crate) fn stage_exe_swap(staged_path: &std::path::Path, relaunch: bool) {
 
 #[cfg(not(windows))]
 pub(crate) fn stage_exe_swap(_staged_path: &std::path::Path, _relaunch: bool) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aes_gcm::aead::Aead;
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+
+    #[test]
+    fn decrypt_delta_accepts_legacy_plain() {
+        let plain = b"not-a-real-qbsdiff-but-legacy-shape";
+        let out = decrypt_delta_blob(plain).expect("plain should pass through");
+        assert_eq!(out.patch, plain);
+        assert!(out.embedded_sig.is_none());
+    }
+
+    #[test]
+    fn decrypt_delta_roundtrip_htd1() {
+        let plain = b"fake-qbsdiff-payload-for-unit-test";
+        let key_raw = BASE64_STANDARD
+            .decode(crate::obf::update_delta_key_b64())
+            .expect("baked key b64");
+        let key: [u8; 32] = key_raw.try_into().expect("32 bytes");
+        let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
+        let nonce_bytes = [7u8; DELTA_NONCE_LEN];
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let ct = cipher.encrypt(nonce, plain.as_ref()).unwrap();
+        let mut blob = Vec::new();
+        blob.extend_from_slice(DELTA_MAGIC);
+        blob.extend_from_slice(&nonce_bytes);
+        blob.extend_from_slice(&ct);
+
+        let out = decrypt_delta_blob(&blob).expect("HTD1 decrypt");
+        assert_eq!(out.patch, plain);
+        assert!(out.embedded_sig.is_none());
+    }
+
+    #[test]
+    fn decrypt_delta_roundtrip_htd1_with_trailing_sig() {
+        let plain = b"fake-qbsdiff-payload-for-unit-test";
+        let sig = [0xABu8; ED25519_SIG_LEN];
+        let key_raw = BASE64_STANDARD
+            .decode(crate::obf::update_delta_key_b64())
+            .expect("baked key b64");
+        let key: [u8; 32] = key_raw.try_into().expect("32 bytes");
+        let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
+        let nonce_bytes = [9u8; DELTA_NONCE_LEN];
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let ct = cipher.encrypt(nonce, plain.as_ref()).unwrap();
+        let mut blob = Vec::new();
+        blob.extend_from_slice(DELTA_MAGIC);
+        blob.extend_from_slice(&nonce_bytes);
+        blob.extend_from_slice(&ct);
+        blob.extend_from_slice(&sig);
+
+        let out = decrypt_delta_blob(&blob).expect("HTD1+sig decrypt");
+        assert_eq!(out.patch, plain);
+        assert_eq!(out.embedded_sig.as_deref(), Some(sig.as_slice()));
+    }
+
+    #[test]
+    fn decrypt_delta_rejects_bad_tag() {
+        let mut blob = Vec::from(DELTA_MAGIC.as_slice());
+        blob.extend_from_slice(&[0u8; DELTA_NONCE_LEN + DELTA_TAG_LEN + 8]);
+        assert!(decrypt_delta_blob(&blob).is_none());
+    }
+}

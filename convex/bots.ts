@@ -7,12 +7,15 @@ import {
   query,
 } from "./_generated/server";
 import { internal } from "./_generated/api";
-import { currentUser } from "./session";
+import { currentUser, platformRank } from "./session";
 import { Id, Doc } from "./_generated/dataModel";
-import { hashPassword, hashSessionToken, randomHex, timingSafeEqual } from "./auth";
+import { DUMMY_SALT_HEX, hashPassword, hashSessionToken, randomHex, timingSafeEqual } from "./auth";
+import { Perm, requireChannelPerm } from "./roles";
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const BOT_TOKEN_PREFIX = "tbot_";
+/** Max bots a single human account may own (anti-spam guard). */
+const MAX_BOTS_PER_OWNER = 10;
 
 function slugifyBotName(raw: string): string {
   return raw
@@ -38,6 +41,16 @@ export const create = mutation({
     const displayName = args.name.trim().slice(0, 50);
     if (displayName.length < 2) {
       throw new Error("Bot must have a name (min 2 characters)");
+    }
+
+    // Cap bots per owner so one account can't mint unlimited identities.
+    const owned = await ctx.db
+      .query("users")
+      .withIndex("by_botOwner", (q) => q.eq("botOwnerId", me._id))
+      .take(50);
+    const activeBots = owned.filter((b) => b.isBot && !b.banned).length;
+    if (activeBots >= MAX_BOTS_PER_OWNER) {
+      throw new Error(`You can own at most ${MAX_BOTS_PER_OWNER} bots`);
     }
 
     let base = slugifyBotName(displayName);
@@ -200,7 +213,7 @@ export const inviteToServer = mutation({
     const me = await currentUser(ctx, args.sessionToken);
     const server = await ctx.db.get("servers", args.serverId);
     if (!server) throw new Error("Server not found");
-    if (server.ownerId !== me._id && me.role !== "admin") {
+    if (server.ownerId !== me._id && platformRank(me) < 100) {
       throw new Error("Only the server owner can invite bots");
     }
 
@@ -235,15 +248,23 @@ export const inviteToServer = mutation({
       joinedAt: Date.now(),
     });
 
-    const channels = await ctx.db
-      .query("conversations")
-      .withIndex("by_server", (q) => q.eq("serverId", args.serverId))
-      .take(200);
-    for (const channel of channels) {
-      await ctx.db.insert("conversationMembers", {
-        conversationId: channel._id,
-        userId: bot._id,
-      });
+    // Paginate the channel scan so the bot is added to *every* channel,
+    // not just the first 200.
+    let cursor: string | null = null;
+    let isDone = false;
+    while (!isDone) {
+      const page = await ctx.db
+        .query("conversations")
+        .withIndex("by_server", (q) => q.eq("serverId", args.serverId))
+        .paginate({ numItems: 200, cursor });
+      for (const channel of page.page) {
+        await ctx.db.insert("conversationMembers", {
+          conversationId: channel._id,
+          userId: bot._id,
+        });
+      }
+      cursor = page.continueCursor;
+      isDone = page.isDone;
     }
 
     return bot._id;
@@ -259,7 +280,7 @@ export const kickFromServer = mutation({
   handler: async (ctx, args) => {
     const me = await currentUser(ctx, args.sessionToken);
     const server = await ctx.db.get("servers", args.serverId);
-    if (!server || (server.ownerId !== me._id && me.role !== "admin")) {
+    if (!server || (server.ownerId !== me._id && platformRank(me) < 100)) {
       throw new Error("Only the server owner can kick bots");
     }
     const bot = await ctx.db.get("users", args.botId);
@@ -274,18 +295,26 @@ export const kickFromServer = mutation({
     if (membership) {
       await ctx.db.delete("serverMembers", membership._id);
     }
-    const channels = await ctx.db
-      .query("conversations")
-      .withIndex("by_server", (q) => q.eq("serverId", args.serverId))
-      .take(200);
-    for (const channel of channels) {
-      const row = await ctx.db
-        .query("conversationMembers")
-        .withIndex("by_conversation_and_user", (q) =>
-          q.eq("conversationId", channel._id).eq("userId", args.botId),
-        )
-        .unique();
-      if (row) await ctx.db.delete("conversationMembers", row._id);
+    // Paginate the channel scan so the bot is removed from *every* channel,
+    // not just the first 200.
+    let cursor: string | null = null;
+    let isDone = false;
+    while (!isDone) {
+      const page = await ctx.db
+        .query("conversations")
+        .withIndex("by_server", (q) => q.eq("serverId", args.serverId))
+        .paginate({ numItems: 200, cursor });
+      for (const channel of page.page) {
+        const row = await ctx.db
+          .query("conversationMembers")
+          .withIndex("by_conversation_and_user", (q) =>
+            q.eq("conversationId", channel._id).eq("userId", args.botId),
+          )
+          .unique();
+        if (row) await ctx.db.delete("conversationMembers", row._id);
+      }
+      cursor = page.continueCursor;
+      isDone = page.isDone;
     }
     return null;
   },
@@ -338,7 +367,12 @@ export const loginWithUsername = action({
       internal.bots.getBotByUsername,
       { username },
     );
-    if (!bot || !bot.isBot) {
+    if (!bot || !bot.isBot || !bot.salt || !bot.passwordHash) {
+      // Timing equalization (same idea as auth.signIn's dummy hash): run
+      // the same PBKDF2 work so "bot doesn't exist" isn't distinguishable
+      // by latency. Failed attempts are only recorded for bots that DO
+      // exist — see the lockout below.
+      await hashPassword(token, DUMMY_SALT_HEX);
       throw new Error("Bot not found");
     }
     if (bot.banned) {
@@ -347,14 +381,31 @@ export const loginWithUsername = action({
     if (!bot.displayName || bot.displayName.trim().length < 2) {
       throw new Error("Bot rejected: missing name");
     }
-    if (!bot.salt || !bot.passwordHash) {
-      throw new Error("Bot not found");
+
+    // Lockout, mirroring auth.signIn: only enforced/counted for bots that
+    // actually exist, so a nonexistent username can't be oracle'd or
+    // pre-locked.
+    const lockout: { lockedUntil: number | null } = await ctx.runQuery(
+      internal.auth.getLoginLockout,
+      { username },
+    );
+    if (lockout.lockedUntil && lockout.lockedUntil > Date.now()) {
+      const secondsLeft = Math.ceil((lockout.lockedUntil - Date.now()) / 1000);
+      throw new Error(
+        `Too many failed attempts. Try again in ${secondsLeft}s.`,
+      );
+    }
+    if (lockout.lockedUntil) {
+      // Lockout expired — reset the counter for a fresh set of attempts.
+      await ctx.runMutation(internal.auth.clearLoginAttempts, { username });
     }
 
     const attemptHash = await hashPassword(token, bot.salt);
     if (!timingSafeEqual(attemptHash, bot.passwordHash)) {
+      await ctx.runMutation(internal.auth.recordFailedLogin, { username });
       throw new Error("Invalid bot token");
     }
+    await ctx.runMutation(internal.auth.clearLoginAttempts, { username });
 
     const sessionToken = randomHex(32);
     await ctx.runMutation(internal.bots.createBotSession, {
@@ -405,6 +456,10 @@ export const sendMessage = mutation({
     if (!conversation || conversation.kind !== "channel") {
       throw new Error("Bots can only post in server channels");
     }
+
+    // Respect channel permissions like any other member — e.g. a bot
+    // without ANNOUNCE can't post in announcement channels.
+    await requireChannelPerm(ctx, args.conversationId, me._id, Perm.SEND_MESSAGES);
 
     await ctx.db.insert("messages", {
       conversationId: args.conversationId,
@@ -464,6 +519,9 @@ export const listRecentMessages = query({
       )
       .unique();
     if (!membership) throw new Error("Bot is not a member of this channel");
+
+    // Respect channel overwrites (deny VIEW_CHANNELS on private channels).
+    await requireChannelPerm(ctx, args.conversationId, me._id, Perm.VIEW_CHANNELS);
 
     const limit = Math.min(Math.max(args.limit ?? 50, 1), 100);
     const messages = await ctx.db

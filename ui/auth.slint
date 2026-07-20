@@ -1,8 +1,14 @@
-// Login / register screen -- port of src/view/auth.rs.
+// Login / register / forgot-password screen -- port of src/view/auth.rs.
+// Centered auth modal on a dark backdrop: a rounded, elevated card topped
+// by the pixel-art HexaTalk banner (raven + wordmark, center-cropped), a
+// centered mode title, labeled fields with accent focus states, a
+// full-width primary action, and muted connect-status / version lines at
+// the bottom. Corner radius is local to this card; colors come from Theme
+// tokens.
 import { Theme } from "theme.slint";
-import { TextInputField, FieldLabel, PrimaryButton, LinkButton } from "widgets.slint";
+import { TextInputField, FieldLabel, PrimaryButton, SecondaryButton, LinkButton, Divider } from "widgets.slint";
 
-export enum AuthMode { Login, Register }
+export enum AuthMode { Login, Register, ForgotPassword }
 
 export component AuthScreen inherits Rectangle {
     in property <AuthMode> auth-mode: AuthMode.Login;
@@ -10,188 +16,338 @@ export component AuthScreen inherits Rectangle {
     in-out property <string> password-input;
     in-out property <string> display-name-input;
     in-out property <string> email-input;
+    in-out property <string> password-confirm-input;
+    in-out property <string> password-reset-code-input;
+    in property <bool> password-reset-code-sent: false;
     in property <string> auth-error;
+    // Per-field validation errors (set by Rust on SubmitAuth); the shared
+    // `auth-error` box above stays for server/connection failures.
+    in property <string> username-error;
+    in property <string> password-error;
+    in property <string> email-error;
     in property <bool> auth-busy;
     in property <string> connect-status;
     in property <string> app-version-line;
 
+    // Submit stays disabled until the required fields are non-empty.
+    property <bool> can-submit:
+        root.auth-mode == AuthMode.ForgotPassword
+            ? (root.email-input != ""
+                && (!root.password-reset-code-sent
+                    || (root.password-reset-code-input != ""
+                        && root.password-input != ""
+                        && root.password-confirm-input != "")))
+            : (root.username-input != "" && root.password-input != ""
+                && (root.auth-mode == AuthMode.Login || root.email-input != ""));
+
     callback switch-mode(AuthMode);
     callback submit;
+    // Shown on the connection-error banner -> Message::RetryConnect.
+    callback retry;
     callback username-edited(string);
     callback password-edited(string);
     callback display-name-edited(string);
     callback email-edited(string);
+    callback password-confirm-edited(string);
+    callback password-reset-code-edited(string);
 
     background: Theme.bg-primary;
 
     HorizontalLayout {
         alignment: center;
         VerticalLayout {
-        alignment: center;
+            alignment: center;
 
-        card := Rectangle {
-            width: 360px;
-            background: Theme.bg-secondary;
-            border-width: 1px;
-            border-color: Theme.border;
-            drop-shadow-offset-x: Theme.shadow-offset;
-            drop-shadow-offset-y: Theme.shadow-offset;
-            drop-shadow-color: Theme.shadow-color;
-
-            // Square accent spine along the card's top edge.
-            Rectangle {
-                x: 0;
-                y: 0;
-                width: parent.width;
-                height: 2px;
-                background: Theme.accent;
-            }
-
-            VerticalLayout {
-                padding: 32px;
-                spacing: 12px;
-                alignment: start;
+            card := Rectangle {
+                width: 420px;
+                background: Theme.bg-secondary;
+                border-width: 1px;
+                border-color: Theme.border;
+                border-radius: 8px;
+                drop-shadow-offset-x: Theme.shadow-offset;
+                drop-shadow-offset-y: Theme.shadow-offset;
+                drop-shadow-color: Theme.shadow-color;
+                clip: true;
 
                 VerticalLayout {
-                    spacing: 12px;
-                    alignment: center;
+                    alignment: start;
+                    spacing: 0;
+
+                    // Square accent spine along the card's top edge.
                     Rectangle {
-                        width: 48px;
-                        height: 48px;
-                        horizontal-stretch: 0;
+                        height: 2px;
                         background: Theme.accent;
-                        border-width: 1px;
-                        border-color: Theme.accent;
-                        drop-shadow-offset-x: Theme.shadow-offset;
-                        drop-shadow-offset-y: Theme.shadow-offset;
-                        drop-shadow-color: Theme.shadow-color;
-                        Text {
-                            text: "T";
-                            font-size: 22px;
-                            font-family: Theme.font-medium;
-                            color: #050d05;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+                    }
+
+                    // Pixel-art brand banner (raven + wordmark), center-cropped
+                    // to a fixed-height hero strip; `pixelated` keeps the art crisp.
+                    Rectangle {
+                        height: 118px;
+                        clip: true;
+                        Image {
+                            source: @image-url("../assets/textures/hexatalkbaner.png");
+                            width: 100%;
+                            height: 100%;
+                            image-fit: ImageFit.cover;
+                            image-rendering: pixelated;
                         }
                     }
-                    Text {
-                        text: "HexaTalk";
-                        font-size: 28px;
-                        font-family: Theme.font-medium;
-                        color: Theme.text-primary;
-                        horizontal-alignment: center;
-                    }
-                }
+                    Divider {}
 
-                Text {
-                    text: root.auth-mode == AuthMode.Login ? "Welcome back" : "Create an account";
-                    font-size: 20px;
-                    color: Theme.text-primary;
-                }
-                Text {
-                    text: root.auth-mode == AuthMode.Login
-                        ? "Sign in to continue your conversations."
-                        : "Join HexaTalk — private chats, servers, and calls.";
-                    font-size: 13px;
-                    color: Theme.text-muted;
-                    wrap: word-wrap;
-                }
+                    VerticalLayout {
+                        padding-left: Theme.space-6;
+                        padding-right: Theme.space-6;
+                        padding-top: Theme.space-5;
+                        padding-bottom: Theme.space-5;
+                        spacing: 14px;
+                        alignment: start;
 
-                FieldLabel { text: "Username"; }
-                TextInputField {
-                    placeholder: "Username";
-                    value <=> root.username-input;
-                    enabled: !root.auth-busy;
-                    edited(text) => { root.username-edited(text); }
-                    submitted => { root.submit(); }
-                }
+                        VerticalLayout {
+                            spacing: 6px;
+                            Text {
+                                text: root.auth-mode == AuthMode.Login
+                                    ? "Welcome back"
+                                    : (root.auth-mode == AuthMode.Register
+                                        ? "Create an account"
+                                        : "Reset password");
+                                font-size: Theme.text-xl;
+                                font-family: Theme.font-medium;
+                                color: Theme.text-primary;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: root.auth-mode == AuthMode.Login
+                                    ? "Sign in to continue your conversations."
+                                    : (root.auth-mode == AuthMode.Register
+                                        ? "Join HexaTalk — private chats, servers, and calls."
+                                        : (root.password-reset-code-sent
+                                            ? "Enter the code we emailed you and pick a new password."
+                                            : "We'll email a 6-digit code to your verified address."));
+                                font-size: Theme.text-sm;
+                                color: Theme.text-muted;
+                                wrap: word-wrap;
+                                horizontal-alignment: center;
+                            }
+                        }
 
-                if root.auth-mode == AuthMode.Register: FieldLabel { text: "Display name"; }
-                if root.auth-mode == AuthMode.Register: TextInputField {
-                    placeholder: "Display name (optional)";
-                    value <=> root.display-name-input;
-                    enabled: !root.auth-busy;
-                    edited(text) => { root.display-name-edited(text); }
-                }
+                        Rectangle { height: 2px; }
 
-                if root.auth-mode == AuthMode.Register: FieldLabel { text: "Email"; }
-                if root.auth-mode == AuthMode.Register: TextInputField {
-                    placeholder: "you@example.com";
-                    value <=> root.email-input;
-                    enabled: !root.auth-busy;
-                    edited(text) => { root.email-edited(text); }
-                }
+                        // ---- Login / Register: username ----
+                        if root.auth-mode != AuthMode.ForgotPassword: VerticalLayout {
+                            spacing: 6px;
+                            FieldLabel { text: "USERNAME"; }
+                            username_field := TextInputField {
+                                placeholder: "Username";
+                                value <=> root.username-input;
+                                enabled: !root.auth-busy;
+                                error: root.username-error != "";
+                                edited(text) => { root.username-edited(text); }
+                                submitted => { root.submit(); }
+                            }
+                            if root.username-error != "": Text {
+                                text: root.username-error;
+                                font-size: Theme.text-xs;
+                                color: Theme.danger;
+                                wrap: word-wrap;
+                            }
+                        }
 
-                FieldLabel { text: "Password"; }
-                TextInputField {
-                    placeholder: "Password";
-                    is-password: true;
-                    value <=> root.password-input;
-                    enabled: !root.auth-busy;
-                    edited(text) => { root.password-edited(text); }
-                    submitted => { root.submit(); }
-                }
+                        if root.auth-mode == AuthMode.Register: VerticalLayout {
+                            spacing: 6px;
+                            FieldLabel { text: "DISPLAY NAME (optional)"; }
+                            TextInputField {
+                                placeholder: "How others see you";
+                                value <=> root.display-name-input;
+                                enabled: !root.auth-busy;
+                                edited(text) => { root.display-name-edited(text); }
+                            }
+                        }
 
-                if root.auth-error != "": Rectangle {
-                    background: Theme.danger-soft;
-                    border-width: 1px;
-                    border-color: Theme.danger;
-                    height: error-text.preferred-height + 24px;
-                    error-text := Text {
-                        x: 12px;
-                        width: parent.width - 24px;
-                        y: 12px;
-                        text: root.auth-error;
-                        font-size: 13px;
-                        color: Theme.danger;
-                        wrap: word-wrap;
-                    }
-                }
+                        // Email: register + forgot password
+                        if root.auth-mode == AuthMode.Register || root.auth-mode == AuthMode.ForgotPassword: VerticalLayout {
+                            spacing: 6px;
+                            FieldLabel { text: "EMAIL"; }
+                            TextInputField {
+                                placeholder: "you@example.com";
+                                value <=> root.email-input;
+                                enabled: !root.auth-busy;
+                                error: root.email-error != "";
+                                edited(text) => { root.email-edited(text); }
+                                submitted => { root.submit(); }
+                            }
+                            if root.email-error != "": Text {
+                                text: root.email-error;
+                                font-size: Theme.text-xs;
+                                color: Theme.danger;
+                                wrap: word-wrap;
+                            }
+                        }
 
-                Rectangle { height: 6px; }
-                PrimaryButton {
-                    text: root.auth-busy
-                        ? "Please wait..."
-                        : (root.auth-mode == AuthMode.Login ? "Log in" : "Create account");
-                    enabled: !root.auth-busy;
-                    busy: root.auth-busy;
-                    clicked => { root.submit(); }
-                }
+                        // Forgot password step 2: code
+                        if root.auth-mode == AuthMode.ForgotPassword && root.password-reset-code-sent: VerticalLayout {
+                            spacing: 6px;
+                            FieldLabel { text: "VERIFICATION CODE"; }
+                            TextInputField {
+                                placeholder: "6-digit code";
+                                value <=> root.password-reset-code-input;
+                                enabled: !root.auth-busy;
+                                is-number: true;
+                                edited(text) => { root.password-reset-code-edited(text); }
+                                submitted => { root.submit(); }
+                            }
+                        }
 
-                Rectangle { height: 4px; }
-                HorizontalLayout {
-                    alignment: center;
-                    spacing: 6px;
-                    Text {
-                        text: root.auth-mode == AuthMode.Login ? "Need an account?" : "Already have an account?";
-                        font-size: 12px;
-                        color: Theme.text-muted;
-                        vertical-alignment: center;
-                    }
-                    LinkButton {
-                        text: root.auth-mode == AuthMode.Login ? "Sign up" : "Log in";
-                        clicked => {
-                            root.switch-mode(root.auth-mode == AuthMode.Login ? AuthMode.Register : AuthMode.Login);
+                        // Password: login/register always; forgot only after code sent
+                        if root.auth-mode != AuthMode.ForgotPassword
+                            || root.password-reset-code-sent: VerticalLayout {
+                            spacing: 6px;
+                            FieldLabel {
+                                text: root.auth-mode == AuthMode.ForgotPassword
+                                    ? "NEW PASSWORD"
+                                    : "PASSWORD";
+                            }
+                            TextInputField {
+                                placeholder: root.auth-mode == AuthMode.ForgotPassword
+                                    ? "At least 6 characters"
+                                    : "Password";
+                                is-password: true;
+                                value <=> root.password-input;
+                                enabled: !root.auth-busy;
+                                error: root.password-error != "";
+                                edited(text) => { root.password-edited(text); }
+                                submitted => { root.submit(); }
+                            }
+                            if root.password-error != "": Text {
+                                text: root.password-error;
+                                font-size: Theme.text-xs;
+                                color: Theme.danger;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        if root.auth-mode == AuthMode.ForgotPassword && root.password-reset-code-sent: VerticalLayout {
+                            spacing: 6px;
+                            FieldLabel { text: "CONFIRM NEW PASSWORD"; }
+                            TextInputField {
+                                placeholder: "Repeat password";
+                                is-password: true;
+                                value <=> root.password-confirm-input;
+                                enabled: !root.auth-busy;
+                                edited(text) => { root.password-confirm-edited(text); }
+                                submitted => { root.submit(); }
+                            }
+                        }
+
+                        if root.auth-error != "": Rectangle {
+                            background: Theme.danger-soft;
+                            border-width: 1px;
+                            border-color: Theme.danger;
+                            border-radius: 4px;
+                            height: error-text.preferred-height + 24px;
+                            Rectangle {
+                                x: 0;
+                                y: 0;
+                                width: 3px;
+                                height: parent.height;
+                                border-radius: 2px;
+                                background: Theme.danger;
+                            }
+                            error-text := Text {
+                                x: 14px;
+                                width: parent.width - 26px;
+                                y: 12px;
+                                text: root.auth-error;
+                                font-size: 13px;
+                                color: Theme.danger;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        if root.auth-error != "" && !root.auth-busy: HorizontalLayout {
+                            alignment: center;
+                            SecondaryButton {
+                                text: "Retry";
+                                width: 120px;
+                                clicked => { root.retry(); }
+                            }
+                        }
+
+                        PrimaryButton {
+                            text: root.auth-busy
+                                ? "Please wait..."
+                                : (root.auth-mode == AuthMode.Login
+                                    ? "Log in"
+                                    : (root.auth-mode == AuthMode.Register
+                                        ? "Create account"
+                                        : (root.password-reset-code-sent
+                                            ? "Set new password"
+                                            : "Send reset code")));
+                            enabled: !root.auth-busy && root.can-submit;
+                            busy: root.auth-busy;
+                            clicked => { root.submit(); }
+                        }
+
+                        // Forgot password link (login only)
+                        if root.auth-mode == AuthMode.Login: HorizontalLayout {
+                            alignment: center;
+                            LinkButton {
+                                text: "Forgot password?";
+                                clicked => { root.switch-mode(AuthMode.ForgotPassword); }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 6px;
+                            Text {
+                                text: root.auth-mode == AuthMode.ForgotPassword
+                                    ? "Remembered it?"
+                                    : (root.auth-mode == AuthMode.Login
+                                        ? "Need an account?"
+                                        : "Already have an account?");
+                                font-size: 12px;
+                                color: Theme.text-muted;
+                                vertical-alignment: center;
+                            }
+                            LinkButton {
+                                text: root.auth-mode == AuthMode.ForgotPassword
+                                    ? "Back to log in"
+                                    : (root.auth-mode == AuthMode.Login ? "Sign up" : "Log in");
+                                clicked => {
+                                    if (root.auth-mode == AuthMode.ForgotPassword) {
+                                        root.switch-mode(AuthMode.Login);
+                                    } else {
+                                        root.switch-mode(root.auth-mode == AuthMode.Login
+                                            ? AuthMode.Register
+                                            : AuthMode.Login);
+                                    }
+                                }
+                            }
+                        }
+
+                        VerticalLayout {
+                            spacing: 6px;
+                            Divider {}
+                            Text {
+                                text: root.connect-status;
+                                font-size: Theme.text-xs;
+                                font-family: Theme.font-medium;
+                                letter-spacing: 0.4px;
+                                color: Theme.text-muted;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: root.app-version-line;
+                                font-size: Theme.text-xs;
+                                font-family: Theme.font-medium;
+                                letter-spacing: 0.4px;
+                                color: Theme.text-muted;
+                                horizontal-alignment: center;
+                            }
                         }
                     }
-                }
-
-                Text {
-                    text: root.connect-status;
-                    font-size: 10px;
-                    font-family: Theme.font-medium;
-                    color: Theme.text-muted;
-                    horizontal-alignment: center;
-                }
-                Text {
-                    text: root.app-version-line;
-                    font-size: 10px;
-                    font-family: Theme.font-medium;
-                    color: Theme.text-muted;
-                    horizontal-alignment: center;
                 }
             }
-        }
         }
     }
 }

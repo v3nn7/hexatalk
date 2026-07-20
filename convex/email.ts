@@ -27,7 +27,12 @@ function generateCode(): string {
   return num.toString().padStart(6, "0");
 }
 
-async function sendVerificationEmail(email: string, code: string): Promise<void> {
+async function sendResendEmail(
+  email: string,
+  subject: string,
+  text: string,
+  html: string,
+): Promise<void> {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
     throw new Error("Email sending is not configured (missing RESEND_API_KEY)");
@@ -43,18 +48,37 @@ async function sendVerificationEmail(email: string, code: string): Promise<void>
     body: JSON.stringify({
       from,
       to: [email],
-      subject: "Your HexaTalk verification code",
-      text: `Your HexaTalk verification code is ${code}. It expires in 15 minutes.`,
-      html:
-        `<p>Your HexaTalk verification code is ` +
-        `<strong style="font-size:20px">${code}</strong>.</p>` +
-        `<p>It expires in 15 minutes. If you didn't request this, ignore this email.</p>`,
+      subject,
+      text,
+      html,
     }),
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`Could not send verification email (${res.status}): ${body}`);
+    throw new Error(`Could not send email (${res.status}): ${body}`);
   }
+}
+
+async function sendVerificationEmail(email: string, code: string): Promise<void> {
+  await sendResendEmail(
+    email,
+    "Your HexaTalk verification code",
+    `Your HexaTalk verification code is ${code}. It expires in 15 minutes.`,
+    `<p>Your HexaTalk verification code is ` +
+      `<strong style="font-size:20px">${code}</strong>.</p>` +
+      `<p>It expires in 15 minutes. If you didn't request this, ignore this email.</p>`,
+  );
+}
+
+async function sendPasswordResetEmail(email: string, code: string): Promise<void> {
+  await sendResendEmail(
+    email,
+    "Reset your HexaTalk password",
+    `Your HexaTalk password-reset code is ${code}. It expires in 15 minutes. If you didn't request a reset, ignore this email.`,
+    `<p>Your HexaTalk password-reset code is ` +
+      `<strong style="font-size:20px">${code}</strong>.</p>` +
+      `<p>It expires in 15 minutes. If you didn't request a reset, you can safely ignore this email.</p>`,
+  );
 }
 
 /**
@@ -68,14 +92,15 @@ async function sendVerificationEmail(email: string, code: string): Promise<void>
 export const issueCodeForUser = internalAction({
   args: { userId: v.id("users"), email: v.string() },
   handler: async (ctx, args) => {
+    const email = args.email.trim().toLowerCase();
     const code = generateCode();
     await ctx.runMutation(internal.email.storeVerificationCode, {
       userId: args.userId,
-      email: args.email,
+      email,
       codeHash: await hashSessionToken(code),
       expiresAt: Date.now() + CODE_TTL_MS,
     });
-    await sendVerificationEmail(args.email, code);
+    await sendVerificationEmail(email, code);
   },
 });
 
@@ -204,5 +229,84 @@ export const storeVerificationCode = internalMutation({
     } else {
       await ctx.db.insert("emailVerificationCodes", { ...args, attempts: 0 });
     }
+  },
+});
+
+// ---------- Password reset (logged-out) ----------
+
+export const issuePasswordResetCode = internalAction({
+  args: { userId: v.id("users"), email: v.string() },
+  handler: async (ctx, args) => {
+    const email = args.email.trim().toLowerCase();
+    const code = generateCode();
+    await ctx.runMutation(internal.email.storePasswordResetCode, {
+      userId: args.userId,
+      email,
+      codeHash: await hashSessionToken(code),
+      expiresAt: Date.now() + CODE_TTL_MS,
+    });
+    await sendPasswordResetEmail(email, code);
+  },
+});
+
+export const storePasswordResetCode = internalMutation({
+  args: {
+    userId: v.id("users"),
+    email: v.string(),
+    codeHash: v.string(),
+    expiresAt: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("passwordResetCodes")
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .unique();
+    if (existing) {
+      await ctx.db.patch("passwordResetCodes", existing._id, {
+        email: args.email,
+        codeHash: args.codeHash,
+        expiresAt: args.expiresAt,
+        attempts: 0,
+      });
+    } else {
+      await ctx.db.insert("passwordResetCodes", { ...args, attempts: 0 });
+    }
+  },
+});
+
+export const getPasswordResetCodeState = internalQuery({
+  args: { userId: v.id("users") },
+  handler: async (ctx, args) => {
+    const row = await ctx.db
+      .query("passwordResetCodes")
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .unique();
+    return { lastSentAt: row ? row.expiresAt - CODE_TTL_MS : 0 };
+  },
+});
+
+export const getPasswordResetCodeByEmail = internalQuery({
+  args: { email: v.string() },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("passwordResetCodes")
+      .withIndex("by_email", (q) => q.eq("email", args.email))
+      .unique();
+  },
+});
+
+export const bumpPasswordResetAttempts = internalMutation({
+  args: { codeId: v.id("passwordResetCodes"), attempts: v.number() },
+  handler: async (ctx, args) => {
+    await ctx.db.patch("passwordResetCodes", args.codeId, {
+      attempts: args.attempts,
+    });
+  },
+});
+
+export const deletePasswordResetCode = internalMutation({
+  args: { codeId: v.id("passwordResetCodes") },
+  handler: async (ctx, args) => {
+    await ctx.db.delete("passwordResetCodes", args.codeId);
   },
 });

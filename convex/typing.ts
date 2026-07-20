@@ -1,25 +1,17 @@
 import { v } from "convex/values";
-import { mutation, query, MutationCtx, QueryCtx } from "./_generated/server";
+import {
+  internalMutation,
+  mutation,
+  query,
+} from "./_generated/server";
 import { currentUser } from "./session";
-import { Id } from "./_generated/dataModel";
+import { Perm, requireChannelAccess } from "./roles";
 
 const TYPING_TTL_MS = 6000;
-
-async function requireMembership(
-  ctx: QueryCtx | MutationCtx,
-  conversationId: Id<"conversations">,
-  userId: Id<"users">,
-) {
-  const membership = await ctx.db
-    .query("conversationMembers")
-    .withIndex("by_conversation_and_user", (q) =>
-      q.eq("conversationId", conversationId).eq("userId", userId),
-    )
-    .unique();
-  if (!membership) {
-    throw new Error("You're not a member of this chat");
-  }
-}
+// setTyping(true) re-fires every couple of seconds while the user types;
+// rewriting the row every time just churns watchers. Only extend the row
+// when less than this much of its TTL remains.
+const TYPING_REFRESH_THRESHOLD_MS = 2000;
 
 export const setTyping = mutation({
   args: {
@@ -56,6 +48,12 @@ export const setTyping = mutation({
 
     const expiresAt = Date.now() + TYPING_TTL_MS;
     if (existing) {
+      // Skip the write when the row still has plenty of TTL left (the
+      // client re-sends typing every few seconds; without this each ping
+      // re-fires every whoIsTyping subscriber with no visible change).
+      if (existing.expiresAt - Date.now() > TYPING_REFRESH_THRESHOLD_MS) {
+        return null;
+      }
       await ctx.db.patch("typing", existing._id, {
         expiresAt,
         displayName: me.displayName,
@@ -72,6 +70,25 @@ export const setTyping = mutation({
   },
 });
 
+/**
+ * Cron job: delete expired typing rows so the table doesn't accumulate
+ * tombstones from clients that went offline without sending typing=false.
+ * whoIsTyping already filters them out, this is pure housekeeping.
+ */
+export const cleanupExpired = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const stale = await ctx.db
+      .query("typing")
+      .withIndex("by_expiresAt", (q) => q.lt("expiresAt", Date.now()))
+      .take(500);
+    for (const row of stale) {
+      await ctx.db.delete("typing", row._id);
+    }
+    return { deleted: stale.length };
+  },
+});
+
 export const whoIsTyping = query({
   args: {
     sessionToken: v.string(),
@@ -79,7 +96,12 @@ export const whoIsTyping = query({
   },
   handler: async (ctx, args) => {
     const me = await currentUser(ctx, args.sessionToken);
-    await requireMembership(ctx, args.conversationId, me._id);
+    await requireChannelAccess(
+      ctx,
+      args.conversationId,
+      me._id,
+      Perm.VIEW_CHANNELS,
+    );
     const now = Date.now();
 
     const rows = await ctx.db

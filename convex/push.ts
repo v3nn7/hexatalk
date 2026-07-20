@@ -41,6 +41,16 @@ export const registerToken = mutation({
       return existing._id;
     }
 
+    // Cap devices per user — drop the oldest token when over the limit.
+    const mine = await ctx.db
+      .query("pushTokens")
+      .withIndex("by_user", (q) => q.eq("userId", me._id))
+      .take(25);
+    if (mine.length >= 20) {
+      const oldest = mine.reduce((a, b) => (a.updatedAt <= b.updatedAt ? a : b));
+      await ctx.db.delete("pushTokens", oldest._id);
+    }
+
     return await ctx.db.insert("pushTokens", {
       userId: me._id,
       token,

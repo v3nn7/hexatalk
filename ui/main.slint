@@ -8,11 +8,11 @@
 import "../assets/fonts/Roboto-Regular.ttf";
 import "../assets/fonts/Roboto-Medium.ttf";
 import { Theme } from "theme.slint";
-import { StatsChip, TextInputField } from "widgets.slint";
+import { TextInputField, Tooltip, PrimaryButton, SecondaryButton } from "widgets.slint";
 import { AuthScreen, AuthMode } from "auth.slint";
 import { EmailVerifyScreen } from "email_verify.slint";
 import { ServerRail } from "rail.slint";
-import { Sidebar, SidebarTab } from "sidebar.slint";
+import { Sidebar, SidebarTab, SmallButton } from "sidebar.slint";
 import { ChatArea } from "chat_area.slint";
 import { MembersDrawer } from "members.slint";
 import { CallBanner } from "call_banner.slint";
@@ -27,6 +27,7 @@ import {
     ServerRow, ConversationRow, FriendRow, IncomingRequestRow, OutgoingRequestRow,
     PeopleHitRow, SuggestionRow, BlockedRow, ChannelRow, AdminUserRow, GroupCandidateRow,
     ChatMessageRow, MemberRow, ShareTargetRow, RoleTagRow, VoiceUserVolumeRow, ReportRow,
+    PinnedMessageRow,
 } from "chat_types.slint";
 
 export { AuthMode, SidebarTab }
@@ -50,7 +51,13 @@ export component AppWindow inherits Window {
     in-out property <string> password-input;
     in-out property <string> display-name-input;
     in-out property <string> email-input;
+    in-out property <string> password-confirm-input;
+    in-out property <string> password-reset-code-input;
+    in property <bool> password-reset-code-sent: false;
     in property <string> auth-error;
+    in property <string> auth-username-error;
+    in property <string> auth-password-error;
+    in property <string> auth-email-error;
     in property <bool> auth-busy;
     in property <string> connect-status;
     in property <string> app-version-line;
@@ -60,7 +67,11 @@ export component AppWindow inherits Window {
     callback auth-password-changed(string);
     callback auth-display-name-changed(string);
     callback auth-email-changed(string);
+    callback auth-password-confirm-changed(string);
+    callback auth-password-reset-code-changed(string);
     callback auth-submit;
+    // "Retry" on the connection-error screen -> Message::RetryConnect.
+    callback auth-retry;
 
     // Passive, always-present sizing reference: a plain child of Window
     // with a `100%` binding, which is the ordinary unambiguous parent-fill
@@ -85,16 +96,25 @@ export component AppWindow inherits Window {
         password-input <=> root.password-input;
         display-name-input <=> root.display-name-input;
         email-input <=> root.email-input;
+        password-confirm-input <=> root.password-confirm-input;
+        password-reset-code-input <=> root.password-reset-code-input;
+        password-reset-code-sent: root.password-reset-code-sent;
         auth-error: root.auth-error;
+        username-error: root.auth-username-error;
+        password-error: root.auth-password-error;
+        email-error: root.auth-email-error;
         auth-busy: root.auth-busy;
         connect-status: root.connect-status;
         app-version-line: root.app-version-line;
         switch-mode(mode) => { root.auth-switch-mode(mode); }
         submit => { root.auth-submit(); }
+        retry => { root.auth-retry(); }
         username-edited(text) => { root.auth-username-changed(text); }
         password-edited(text) => { root.auth-password-changed(text); }
         display-name-edited(text) => { root.auth-display-name-changed(text); }
         email-edited(text) => { root.auth-email-changed(text); }
+        password-confirm-edited(text) => { root.auth-password-confirm-changed(text); }
+        password-reset-code-edited(text) => { root.auth-password-reset-code-changed(text); }
     }
 
     // ==================== Email verification gate ====================
@@ -140,6 +160,9 @@ export component AppWindow inherits Window {
     in property <string> profile_status_message;
     in property <string> profile_bio;
     in property <bool> profile_is_staff: false;
+    in property <bool> profile_is_plus: false;
+    in property <image> profile_banner_photo;
+    in property <bool> profile_has_banner: false;
     in property <bool> profile_show_support_dm: false;
     in property <bool> profile_is_friend: false;
     in property <bool> profile_favorite: false;
@@ -181,6 +204,9 @@ export component AppWindow inherits Window {
         status_message: root.profile_status_message;
         bio: root.profile_bio;
         is_staff: root.profile_is_staff;
+        is_plus: root.profile_is_plus;
+        banner_photo: root.profile_banner_photo;
+        has_banner: root.profile_has_banner;
         show_support_dm: root.profile_show_support_dm;
         is_friend: root.profile_is_friend;
         favorite: root.profile_favorite;
@@ -219,10 +245,12 @@ export component AppWindow inherits Window {
     in-out property <string> settings_bio_input;
     in property <int> settings_selected_avatar_index: -1;
     in property <string> settings_profile_status;
+    in property <bool> settings_profile_status_is_error: false;
     in-out property <string> settings_current_password_input;
     in-out property <string> settings_new_password_input;
     in-out property <string> settings_confirm_password_input;
     in property <string> settings_password_status;
+    in property <bool> settings_password_status_is_error: false;
     in property <string> settings_my_badge_text;
     in property <color> settings_my_badge_bg;
     in property <color> settings_my_badge_fg;
@@ -238,6 +266,7 @@ export component AppWindow inherits Window {
     in property <[BotRow]> settings_my_bots: [];
     in-out property <string> settings_bot_invite_username_input;
     in property <string> settings_bot_status;
+    in property <bool> settings_bot_status_is_error: false;
     in property <[DeviceRow]> settings_input_devices: [];
     in property <[DeviceRow]> settings_output_devices: [];
     in property <float> settings_noise_gate: 0;
@@ -247,9 +276,16 @@ export component AppWindow inherits Window {
     in property <string> settings_update_check_status;
     in property <bool> settings_update_ready: false;
     in property <string> settings_ping_status;
+    in property <bool> settings_plus_active: false;
+    in property <string> settings_plus_status_line;
+    in property <string> settings_plus_busy_status;
+    in property <bool> settings_plus_checkout_busy: false;
 
     callback settings_close;
     callback settings_category_changed(SettingsCategory);
+    callback settings_plus_subscribe;
+    callback settings_plus_manage_billing;
+    callback settings_plus_refresh;
     callback settings_pick_avatar;
     callback settings_remove_avatar;
     callback settings_display_name_changed(string);
@@ -299,10 +335,12 @@ export component AppWindow inherits Window {
         bio_input <=> root.settings_bio_input;
         selected_avatar_index: root.settings_selected_avatar_index;
         profile_status: root.settings_profile_status;
+        profile_status_is_error: root.settings_profile_status_is_error;
         current_password_input <=> root.settings_current_password_input;
         new_password_input <=> root.settings_new_password_input;
         confirm_password_input <=> root.settings_confirm_password_input;
         password_status: root.settings_password_status;
+        password_status_is_error: root.settings_password_status_is_error;
         my_badge_text: root.settings_my_badge_text;
         my_badge_bg: root.settings_my_badge_bg;
         my_badge_fg: root.settings_my_badge_fg;
@@ -318,6 +356,7 @@ export component AppWindow inherits Window {
         my_bots: root.settings_my_bots;
         bot_invite_username_input <=> root.settings_bot_invite_username_input;
         bot_status: root.settings_bot_status;
+        bot_status_is_error: root.settings_bot_status_is_error;
         input_devices: root.settings_input_devices;
         output_devices: root.settings_output_devices;
         noise_gate: root.settings_noise_gate;
@@ -327,9 +366,16 @@ export component AppWindow inherits Window {
         update_check_status: root.settings_update_check_status;
         update_ready: root.settings_update_ready;
         ping_status: root.settings_ping_status;
+        plus_active: root.settings_plus_active;
+        plus_status_line: root.settings_plus_status_line;
+        plus_busy_status: root.settings_plus_busy_status;
+        plus_checkout_busy: root.settings_plus_checkout_busy;
 
         close => { root.settings_close(); }
         category_changed(cat) => { root.settings_category_changed(cat); }
+        plus_subscribe => { root.settings_plus_subscribe(); }
+        plus_manage_billing => { root.settings_plus_manage_billing(); }
+        plus_refresh => { root.settings_plus_refresh(); }
         pick_avatar => { root.settings_pick_avatar(); }
         remove_avatar => { root.settings_remove_avatar(); }
         display_name_changed(t) => { root.settings_display_name_changed(t); }
@@ -615,6 +661,8 @@ export component AppWindow inherits Window {
     in property <string> chat_my_badge_text;
     in property <color> chat_my_badge_bg;
     in property <color> chat_my_badge_fg;
+    in property <string> chat_my_presence_status: "online";
+    in property <string> chat_my_presence_label: "Online";
 
     callback chat_new_server_name_changed(string);
     callback chat_create_server;
@@ -660,12 +708,14 @@ export component AppWindow inherits Window {
 
     // ---- Chat area ----
     in property <bool> chat_has_conversation: false;
+    in property <bool> chat_history_loading: false;
     in property <string> chat_peer_title;
     in property <string> chat_peer_initial;
     in property <color> chat_peer_avatar_color: Theme.accent;
     in property <image> chat_peer_photo;
     in property <bool> chat_peer_online: false;
     in property <bool> chat_is_channel_icon: false;
+    in property <bool> chat_is_voice_icon: false;
     in property <bool> chat_is_direct: false;
     in property <bool> chat_peer_connected: false;
     in property <string> chat_connection_label;
@@ -697,6 +747,14 @@ export component AppWindow inherits Window {
     in property <string> chat_typing_line;
     in property <string> chat_error_line;
     in property <string> chat_warning_line;
+    // Scroll-to-bottom pulse for the message ListView (see ChatArea).
+    in property <int> chat_scroll_pulse: 0;
+    // Header pinned-messages panel.
+    in property <bool> chat_pins_open: false;
+    in property <[PinnedMessageRow]> chat_pinned_messages: [];
+    // Sidebar user-panel voice state (real audio mute flags from Rust).
+    in property <bool> chat_mic_muted: false;
+    in property <bool> chat_deafened: false;
 
     callback chat_start_call;
     callback chat_toggle_store;
@@ -705,6 +763,9 @@ export component AppWindow inherits Window {
     callback chat_confirm_clear;
     callback chat_join_voice;
     callback chat_leave_voice;
+    callback chat_toggle_pins;
+    callback chat_toggle_mute;
+    callback chat_toggle_deafen;
     callback chat_message_input_edited(string);
     callback chat_mention_pick(string);
     callback chat_send;
@@ -781,7 +842,7 @@ export component AppWindow inherits Window {
         width: size_ref.width;
         height: size_ref.height;
         ChatLayout := VerticalLayout {
-            CallBanner {
+            call_banner := CallBanner {
             visible_: root.chat_call_visible;
             is_ringing: root.chat_call_ringing;
             is_incoming: root.chat_call_incoming;
@@ -817,7 +878,7 @@ export component AppWindow inherits Window {
         HorizontalLayout {
             vertical-stretch: 1;
 
-            ServerRail {
+            rail := ServerRail {
                 home_active: root.chat_home_active;
                 unread_count: root.chat_unread_count;
                 servers: root.chat_servers;
@@ -841,9 +902,6 @@ export component AppWindow inherits Window {
                 tab_title: root.chat_tab_title;
                 selected_server: root.chat_selected_server;
                 panel_width: root.chat_sidebar_width;
-                add_menu_open: root.chat_add_menu_open;
-                new_server_name <=> root.chat_new_server_name;
-                join_server_code <=> root.chat_join_server_code;
                 server_status: root.chat_server_status;
                 new_group_open: root.chat_new_group_open;
                 new_group_name <=> root.chat_new_group_name;
@@ -894,12 +952,13 @@ export component AppWindow inherits Window {
                 my_badge_text: root.chat_my_badge_text;
                 my_badge_bg: root.chat_my_badge_bg;
                 my_badge_fg: root.chat_my_badge_fg;
+                my_presence_status: root.chat_my_presence_status;
+                my_presence_label: root.chat_my_presence_label;
+                mic_muted: root.chat_mic_muted;
+                deafened: root.chat_deafened;
+                toggle_mute => { root.chat_toggle_mute(); }
+                toggle_deafen => { root.chat_toggle_deafen(); }
 
-                toggle_add_menu => { root.chat_toggle_add_menu(); }
-                new_server_name_changed(t) => { root.chat_new_server_name_changed(t); }
-                create_server => { root.chat_create_server(); }
-                join_server_code_changed(t) => { root.chat_join_server_code_changed(t); }
-                join_server => { root.chat_join_server(); }
                 toggle_group_panel => { root.chat_toggle_group_panel(); }
                 group_name_changed(t) => { root.chat_group_name_changed(t); }
                 toggle_group_member(id) => { root.chat_toggle_group_member(id); }
@@ -943,12 +1002,14 @@ export component AppWindow inherits Window {
                 horizontal-stretch: 1;
                 vertical-stretch: 1;
                 has_conversation: root.chat_has_conversation;
+                loading: root.chat_history_loading;
                 peer_title: root.chat_peer_title;
                 peer_initial: root.chat_peer_initial;
                 peer_avatar_color: root.chat_peer_avatar_color;
                 peer_photo: root.chat_peer_photo;
                 peer_online: root.chat_peer_online;
                 is_channel_icon: root.chat_is_channel_icon;
+                is_voice_icon: root.chat_is_voice_icon;
                 is_direct: root.chat_is_direct;
                 peer_connected: root.chat_peer_connected;
                 connection_label: root.chat_connection_label;
@@ -967,6 +1028,7 @@ export component AppWindow inherits Window {
                 voice_users: root.chat_voice_users;
                 messages: root.chat_messages;
                 quick_emojis: root.chat_quick_emojis;
+                scroll_pulse: root.chat_scroll_pulse;
                 is_editing: root.chat_is_editing;
                 input_placeholder: root.chat_input_placeholder;
                 send_label: root.chat_send_label;
@@ -988,6 +1050,8 @@ export component AppWindow inherits Window {
                 confirm_clear => { root.chat_confirm_clear(); }
                 join_voice => { root.chat_join_voice(); }
                 leave_voice => { root.chat_leave_voice(); }
+                toggle_pins => { root.chat_toggle_pins(); }
+                toggle_member_list => { root.chat_toggle_members(); }
                 message_input_edited(t) => { root.chat_message_input_edited(t); }
                 mention_pick(name) => { root.chat_mention_pick(name); }
                 send => { root.chat_send(); }
@@ -1023,8 +1087,21 @@ export component AppWindow inherits Window {
                 resize_ended => { root.chat_members_resize_ended(); }
             }
         }
+        }
+
+        // Rail button tooltips. Painted here -- after the whole chat layout
+        // -- because a tooltip drawn inside the 72px rail would end up under
+        // the sidebar, and a layout child can't take an explicit x/y, so
+        // this sits as a plain (non-layout) sibling of ChatLayout instead.
+        // The rail only reports which button is hovered (`hovered_tooltip`)
+        // and its y position within the rail (`tooltip_y`); the call
+        // banner's height is the rail's window-y.
+        if rail.hovered_tooltip != "": Tooltip {
+            text: rail.hovered_tooltip;
+            x: 80px;
+            y: call_banner.height + rail.tooltip_y + 11px;
+        }
     }
-}
 
     // Global Escape key (closes the attachment lightbox, cancels confirms,
     // etc. -- see Message::EscapePressed in update.rs). A transparent
@@ -1039,6 +1116,30 @@ export component AppWindow inherits Window {
     callback command_palette_query_changed(string);
     callback command_palette_pick(int);
     callback command_palette_close;
+
+    // ---- Global toast + attachment lightbox ----
+    // Toast text comes from App::toast (Rust auto-clears it after 3s on the
+    // Tick); clicking the pill dismisses it immediately (ClearToast).
+    in property <string> toast_text;
+    callback toast_dismissed;
+    // Full-screen image preview (Message::OpenAttachmentPreview /
+    // CloseAttachmentPreview); Escape is handled on the Rust side.
+    in property <bool> attachment_preview_open: false;
+    in property <image> attachment_preview;
+    callback attachment_preview_close;
+
+    // ---- vyrapp:// deep-link join confirmation ----
+    // Populated from `servers:resolveCustomSlug` once a `vyrapp://join/<slug>`
+    // link resolves (Message::DeepLinkReceived / DeepLinkResolved); always a
+    // confirm step, never an auto-join, whether the app was already running
+    // or just launched by the link.
+    in property <bool> join_dialog_open: false;
+    in property <string> join_dialog_server_name;
+    in property <string> join_dialog_server_initial;
+    in property <image> join_dialog_server_icon;
+    in property <bool> join_dialog_invites_paused: false;
+    callback join_dialog_confirm;
+    callback join_dialog_dismiss;
 
     escape_scope := FocusScope {
         init => { self.focus(); }
@@ -1084,10 +1185,20 @@ export component AppWindow inherits Window {
                     color: Theme.text-muted;
                     wrap: word-wrap;
                 }
-                TextInputField {
+                palette_input := TextInputField {
                     placeholder: "Search…";
                     value <=> root.command_palette_query;
                     edited(t) => { root.command_palette_query_changed(t); }
+                    // Enter picks the top result, like every command
+                    // palette; Escape/overlay-click still closes.
+                    submitted => {
+                        if (root.command_palette_results.length > 0) {
+                            root.command_palette_pick(0);
+                        }
+                    }
+                    // Auto-focus the search field when the palette opens
+                    // (this subtree is created with the overlay).
+                    init => { self.focus-input(); }
                 }
                 Flickable {
                     vertical-stretch: 1;
@@ -1119,6 +1230,248 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+        }
+    }
+
+    // Add/join-server popup: a window-level overlay centered on screen
+    // (same pattern as the command-palette popup above), rather than an
+    // inline sidebar panel -- keeps it visible and correctly placed no
+    // matter how narrow the window gets resized.
+    if root.chat_add_menu_open: Rectangle {
+        width: size_ref.width;
+        height: size_ref.height;
+        background: #00000088;
+        TouchArea { clicked => { root.chat_toggle_add_menu(); } }
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(340px, parent.width - 48px);
+            height: add_menu_col.preferred-height + 32px;
+            background: Theme.bg-elevated;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            border-radius: Theme.radius-md;
+            add_menu_col := VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+                Text { text: "ADD SERVER"; font-size: Theme.text-xs; font-family: Theme.font-medium; letter-spacing: 1px; color: Theme.text-link; }
+                TextInputField { placeholder: "Name"; value <=> root.chat_new_server_name; edited(t) => { root.chat_new_server_name_changed(t); } submitted => { root.chat_create_server(); } }
+                PrimaryButton { text: "Create"; clicked => { root.chat_create_server(); } }
+                Rectangle { height: 1px; background: Theme.border; }
+                TextInputField { placeholder: "Invite code or link"; value <=> root.chat_join_server_code; edited(t) => { root.chat_join_server_code_changed(t); } submitted => { root.chat_join_server(); } }
+                SecondaryButton { text: "Join"; clicked => { root.chat_join_server(); } }
+                if root.chat_server_status != "": Text { text: root.chat_server_status; font-size: 11px; color: Theme.text-muted; wrap: word-wrap; }
+                SmallButton { text: "Close"; clicked => { root.chat_toggle_add_menu(); } }
+            }
+        }
+    }
+
+    // vyrapp:// deep-link join confirmation -- same window-level dim-overlay
+    // pattern as the add/join-server popup above, but click-away is not a
+    // "Cancel" shortcut (an accidental miss-click shouldn't silently drop a
+    // link the user just followed), so only the buttons and Escape dismiss it.
+    if root.join_dialog_open: Rectangle {
+        width: size_ref.width;
+        height: size_ref.height;
+        background: #00000088;
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(340px, parent.width - 48px);
+            height: join_dialog_col.preferred-height + 32px;
+            background: Theme.bg-elevated;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            border-radius: Theme.radius-md;
+            join_dialog_col := VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
+                Text { text: "JOIN SERVER"; font-size: Theme.text-xs; font-family: Theme.font-medium; letter-spacing: 1px; color: Theme.text-link; }
+                HorizontalLayout {
+                    spacing: 12px;
+                    Rectangle {
+                        width: 48px;
+                        height: 48px;
+                        horizontal-stretch: 0;
+                        background: root.join_dialog_server_icon.width > 0 ? transparent : Theme.accent-soft;
+                        border-radius: Theme.radius-md;
+                        clip: true;
+                        if root.join_dialog_server_icon.width > 0: Image { source: root.join_dialog_server_icon; width: 48px; height: 48px; image-fit: ImageFit.cover; }
+                        if root.join_dialog_server_icon.width <= 0: Text {
+                            text: root.join_dialog_server_initial;
+                            font-size: 18px;
+                            color: Theme.accent;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Text {
+                        text: root.join_dialog_server_name;
+                        font-size: Theme.text-md;
+                        font-family: Theme.font-medium;
+                        color: Theme.text-primary;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                    }
+                }
+                if root.join_dialog_invites_paused: Text {
+                    text: "Invites are currently paused for this server.";
+                    font-size: 12px;
+                    color: Theme.text-muted;
+                    wrap: word-wrap;
+                }
+                if !root.join_dialog_invites_paused: Text {
+                    text: "Join this server?";
+                    font-size: 13px;
+                    color: Theme.text-primary;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    SecondaryButton { text: "Cancel"; clicked => { root.join_dialog_dismiss(); } }
+                    if !root.join_dialog_invites_paused: PrimaryButton { text: "Join"; clicked => { root.join_dialog_confirm(); } }
+                }
+            }
+        }
+    }
+
+    // Pinned-messages popover (channel-bar pin icon). Anchored top-right,
+    // just under the 48px channel bar; a transparent full-window backdrop
+    // closes it on click-away (popover, not a modal -- no dim).
+    if root.chat_pins_open: Rectangle {
+        width: size_ref.width;
+        height: size_ref.height;
+        TouchArea { clicked => { root.chat_toggle_pins(); } }
+        Rectangle {
+            x: size_ref.width - self.width - 16px;
+            y: 56px;
+            width: min(360px, size_ref.width - 32px);
+            height: min(440px, size_ref.height - 72px);
+            background: Theme.bg-elevated;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            border-radius: Theme.radius-md;
+            drop-shadow-offset-y: Theme.shadow-offset;
+            drop-shadow-color: Theme.shadow-color;
+            VerticalLayout {
+                padding: 12px;
+                spacing: 8px;
+                HorizontalLayout {
+                    Text {
+                        text: "Pinned messages";
+                        font-size: Theme.text-md;
+                        font-family: Theme.font-medium;
+                        color: Theme.text-primary;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    SmallButton { text: "Close"; clicked => { root.chat_toggle_pins(); } }
+                }
+                Rectangle { height: 1px; background: Theme.border-hairline; }
+                if root.chat_pinned_messages.length == 0: Text {
+                    text: "No pinned messages yet.";
+                    font-size: Theme.text-sm;
+                    color: Theme.text-muted;
+                }
+                Flickable {
+                    vertical-stretch: 1;
+                    viewport-height: pins_col.preferred-height;
+                    pins_col := VerticalLayout {
+                        width: parent.width;
+                        spacing: 8px;
+                        for p in root.chat_pinned_messages: Rectangle {
+                            background: Theme.bg-tertiary;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            border-radius: Theme.radius-sm;
+                            height: pin_col.preferred-height + 16px;
+                            pin_col := VerticalLayout {
+                                x: 10px;
+                                y: 8px;
+                                width: parent.width - 20px;
+                                spacing: 2px;
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Text {
+                                        text: p.author_name;
+                                        font-size: Theme.text-sm;
+                                        font-family: Theme.font-medium;
+                                        color: p.author_avatar_color;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: p.meta;
+                                        font-size: Theme.text-xs;
+                                        color: Theme.text-muted;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                Text {
+                                    text: p.body;
+                                    font-size: Theme.text-sm;
+                                    color: Theme.text-primary;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Full-screen attachment lightbox (OpenAttachmentPreview): dark
+    // backdrop, contain-fit image, click or Escape (handled in Rust via
+    // Message::EscapePressed) closes it.
+    if root.attachment_preview_open: Rectangle {
+        width: size_ref.width;
+        height: size_ref.height;
+        background: #000000cc;
+        TouchArea { clicked => { root.attachment_preview_close(); } }
+        if root.attachment_preview.width > 0: Image {
+            x: 32px;
+            y: 32px;
+            width: parent.width - 64px;
+            height: parent.height - 64px;
+            source: root.attachment_preview;
+            image-fit: ImageFit.contain;
+        }
+        if root.attachment_preview.width <= 0: Text {
+            x: (parent.width - self.preferred-width) / 2;
+            y: (parent.height - self.preferred-height) / 2;
+            text: "[image unavailable]";
+            font-size: Theme.text-md;
+            color: Theme.text-muted;
+        }
+    }
+
+    // Global ephemeral toast (App::toast) -- bottom-center floating pill.
+    // Rust clears the text after ~3s; clicking dismisses it immediately.
+    if root.toast_text != "": Rectangle {
+        x: (size_ref.width - self.width) / 2;
+        y: size_ref.height - self.height - 40px;
+        width: toast_label.preferred-width + 32px;
+        height: 36px;
+        border-radius: Theme.radius-md;
+        background: Theme.bg-floating;
+        border-width: 1px;
+        border-color: Theme.border-strong;
+        drop-shadow-offset-y: Theme.shadow-offset-light;
+        drop-shadow-blur: Theme.shadow-blur;
+        drop-shadow-color: Theme.shadow-color;
+        toast_label := Text {
+            width: parent.width;
+            height: parent.height;
+            text: root.toast_text;
+            font-size: Theme.text-sm;
+            font-family: Theme.font-medium;
+            color: Theme.text-primary;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { root.toast_dismissed(); }
         }
     }
 }

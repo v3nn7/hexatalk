@@ -1,7 +1,14 @@
 import { v } from "convex/values";
-import { mutation, query, MutationCtx, QueryCtx } from "./_generated/server";
+import {
+  internalMutation,
+  mutation,
+  query,
+  MutationCtx,
+  QueryCtx,
+} from "./_generated/server";
 import { currentUser } from "./session";
 import { Id } from "./_generated/dataModel";
+import { Perm, requireChannelAccess, requireChannelPerm } from "./roles";
 
 async function requireMembership(
   ctx: QueryCtx | MutationCtx,
@@ -87,6 +94,15 @@ export const join = mutation({
       throw new Error("Not a voice room (use a voice channel or group)");
     }
     await requireMembership(ctx, args.conversationId, me._id);
+    // Server voice channels respect channel overwrites (deny CONNECT_VOICE).
+    if (channel.kind === "channel") {
+      await requireChannelPerm(
+        ctx,
+        args.conversationId,
+        me._id,
+        Perm.CONNECT_VOICE,
+      );
+    }
 
     // Leave any other voice room first (one room at a time).
     const mine = await ctx.db
@@ -161,7 +177,12 @@ export const listInChannel = query({
   },
   handler: async (ctx, args) => {
     const me = await currentUser(ctx, args.sessionToken);
-    await requireMembership(ctx, args.conversationId, me._id);
+    await requireChannelAccess(
+      ctx,
+      args.conversationId,
+      me._id,
+      Perm.CONNECT_VOICE,
+    );
     const rows = await ctx.db
       .query("voiceStates")
       .withIndex("by_conversation", (q) =>
@@ -383,5 +404,33 @@ export const listLinkIce = query({
     return rows
       .filter((row) => row.fromUserId !== me._id)
       .map((row) => ({ id: row._id, candidate: row.candidate }));
+  },
+});
+
+// ─── Maintenance ─────────────────────────────────────────────────────────────
+
+/** Ended links older than this are deleted (ICE is purged with them). */
+const ENDED_LINK_RETENTION_MS = 60 * 60 * 1000;
+
+/**
+ * Maintenance: delete ended voice links (and their leftover ICE rows).
+ * Wire into crons.ts (hourly/daily) — see note for the integrator.
+ */
+export const cleanupEndedVoiceLinks = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const cutoff = Date.now() - ENDED_LINK_RETENTION_MS;
+    // No by_status index — scan a bounded batch; ended links are rare and
+    // this runs on a cron, so a full-ish scan of recent rows is fine.
+    const rows = await ctx.db.query("voiceLinks").take(500);
+    let deleted = 0;
+    for (const row of rows) {
+      if (row.status === "ended" && row.startedAt < cutoff) {
+        await purgeLinkIce(ctx, row._id);
+        await ctx.db.delete("voiceLinks", row._id);
+        deleted += 1;
+      }
+    }
+    return { deleted, scanned: rows.length };
   },
 });

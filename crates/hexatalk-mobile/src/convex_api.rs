@@ -6,15 +6,22 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 
-/// Production deployment (same as desktop). Override at runtime with
-/// `CONVEX_URL` / `NEXT_PUBLIC_CONVEX_URL` for local Convex dev.
+/// Production Convex deployment (same as desktop). Override with
+/// `CONVEX_URL` / `NEXT_PUBLIC_CONVEX_URL` only for local experiments.
+///
+/// Security note: the deployment URL below is NOT a secret — it's a public
+/// endpoint (auth happens per-session after connecting), which is why the
+/// mobile crate keeps it as a plaintext fallback instead of the desktop's
+/// XOR-obfuscation (see `build.rs`/`src/obf.rs` there). Only actual
+/// credentials (TURN, keystore passwords, signing keys) must never be
+/// hardcoded here.
 pub fn convex_url() -> String {
     std::env::var("CONVEX_URL")
         .or_else(|_| std::env::var("NEXT_PUBLIC_CONVEX_URL"))
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| {
-            "https://scrupulous-bear-861.eu-west-1.convex.cloud".to_string()
+            "https://REDACTED.convex.example.com".to_string()
         })
 }
 
@@ -45,6 +52,7 @@ pub struct MessageRow {
     pub deleted: bool,
     pub attachment_url: String,
     pub sent_at: f64,
+    pub author_plus_active: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -128,6 +136,10 @@ pub struct ProfileData {
 pub enum NetEvent {
     AuthOk(AuthSession),
     AuthErr(String),
+    /// Forgot-password: code email accepted (always "ok" from server).
+    PasswordResetCodeSent,
+    /// Forgot-password: password changed; go back to sign-in.
+    PasswordResetOk,
     Conversations(Vec<ConversationRow>),
     Messages(Vec<MessageRow>),
     Friends(Vec<FriendRow>),
@@ -286,7 +298,49 @@ impl Backend {
         });
     }
 
-    pub fn sign_up(&self, username: String, password: String, display_name: String) {
+    pub fn request_password_reset(&self, email: String) {
+        let http = self.http.clone();
+        let tx = self.tx.clone();
+        self.rt.spawn(async move {
+            let args = json!({ "email": email });
+            match convex_call(&http, "action", "auth:requestPasswordReset", args).await {
+                Ok(_) => {
+                    let _ = tx.send(NetEvent::PasswordResetCodeSent);
+                }
+                Err(e) => {
+                    let _ = tx.send(NetEvent::AuthErr(e));
+                }
+            }
+        });
+    }
+
+    pub fn reset_password_with_code(&self, email: String, code: String, new_password: String) {
+        let http = self.http.clone();
+        let tx = self.tx.clone();
+        self.rt.spawn(async move {
+            let args = json!({
+                "email": email,
+                "code": code,
+                "newPassword": new_password,
+            });
+            match convex_call(&http, "action", "auth:resetPasswordWithCode", args).await {
+                Ok(_) => {
+                    let _ = tx.send(NetEvent::PasswordResetOk);
+                }
+                Err(e) => {
+                    let _ = tx.send(NetEvent::AuthErr(e));
+                }
+            }
+        });
+    }
+
+    pub fn sign_up(
+        &self,
+        username: String,
+        password: String,
+        display_name: String,
+        email: String,
+    ) {
         let http = self.http.clone();
         let tx = self.tx.clone();
         self.rt.spawn(async move {
@@ -294,6 +348,7 @@ impl Backend {
                 "username": username,
                 "password": password,
                 "displayName": display_name,
+                "email": email,
             });
             match convex_call(&http, "action", "auth:signUp", args).await {
                 Ok(v) => match parse_auth(&v) {
@@ -791,15 +846,47 @@ impl Clone for LiveWatch {
 }
 
 /// Strip Convex HTTP error wrappers into a short human message.
+/// Never returns empty — empty banners look like "login does nothing".
 pub fn clean_error(raw: &str) -> String {
     let mut s = raw.trim().to_string();
-    // "[Request ID: …] Server Error\nUncaught Error: Actual message\n    at …"
-    if let Some(idx) = s.find("Uncaught Error: ") {
-        s = s[idx + "Uncaught Error: ".len()..].to_string();
-    } else if let Some(idx) = s.find("Server Error") {
-        s = s[idx..].to_string();
-        s = s.replacen("Server Error", "", 1).trim().to_string();
+    if s.is_empty() {
+        return "Something went wrong".to_string();
     }
+
+    let lower = s.to_lowercase();
+    if lower.contains("error sending request")
+        || lower.contains("connection reset")
+        || lower.contains("connection refused")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("dns error")
+        || lower.contains("certificate")
+        || lower.contains("tls handshake")
+        || lower.contains("failed to connect")
+        || lower.contains("network unreachable")
+    {
+        return "Network error — check your connection and try again".to_string();
+    }
+
+    // ConvexError payload may arrive as JSON: {"message":"…"}.
+    if let Ok(v) = serde_json::from_str::<Value>(&s) {
+        if let Some(m) = v
+            .get("message")
+            .and_then(|x| x.as_str())
+            .or_else(|| v.as_str())
+        {
+            s = m.to_string();
+        }
+    }
+
+    // Prefer the real application message if present.
+    for marker in ["Uncaught Error: ", "ConvexError: ", "Uncaught ConvexError: "] {
+        if let Some(idx) = s.find(marker) {
+            s = s[idx + marker.len()..].to_string();
+            break;
+        }
+    }
+
     // Drop stack frames.
     if let Some(idx) = s.find("\n    at ") {
         s = s[..idx].to_string();
@@ -807,7 +894,48 @@ pub fn clean_error(raw: &str) -> String {
     if let Some(idx) = s.find('\n') {
         s = s[..idx].to_string();
     }
-    s.trim().to_string()
+
+    // Strip "[Request ID: …] " prefix when a real message follows.
+    if let Some(idx) = s.find("] ") {
+        let after = s[idx + 2..].trim();
+        if !after.is_empty() && !after.eq_ignore_ascii_case("server error") {
+            s = after.to_string();
+        }
+    }
+
+    let out = s.trim().to_string();
+    // Public HTTP API redacts plain `throw new Error` to a bare "Server Error".
+    if out.is_empty()
+        || out.eq_ignore_ascii_case("server error")
+        || (out.contains("Request ID") && out.to_lowercase().contains("server error"))
+    {
+        return "Login failed — check username and password".to_string();
+    }
+    out
+}
+
+fn extract_error_message(v: &Value) -> String {
+    // ConvexError over the public HTTP API: errorMessage is often the
+    // redacted shell ("[Request ID] Server Error") while the real text is
+    // in `errorData` (string or { message }). Prefer errorData first.
+    if let Some(data) = v.get("errorData").or_else(|| v.get("error")) {
+        if let Some(msg) = data.as_str() {
+            let cleaned = clean_error(msg);
+            if !cleaned.to_lowercase().contains("server error") {
+                return cleaned;
+            }
+        }
+        if let Some(msg) = data.get("message").and_then(|x| x.as_str()) {
+            return clean_error(msg);
+        }
+    }
+    if let Some(msg) = v.get("errorMessage").and_then(|x| x.as_str()) {
+        return clean_error(msg);
+    }
+    if let Some(msg) = v.get("message").and_then(|x| x.as_str()) {
+        return clean_error(msg);
+    }
+    clean_error("request failed")
 }
 
 async fn convex_call(
@@ -823,7 +951,8 @@ async fn convex_call(
         "format": "json",
     });
     let resp = http
-        .post(url)
+        .post(&url)
+        .header("Convex-Client", "hexatalk-mobile-0.3")
         .json(&body)
         .send()
         .await
@@ -832,24 +961,14 @@ async fn convex_call(
     let v: Value = resp
         .json()
         .await
-        .map_err(|e| clean_error(&e.to_string()))?;
+        .map_err(|e| format!("Bad server response ({status}): {}", clean_error(&e.to_string())))?;
     if !status.is_success() {
-        let msg = v
-            .get("errorMessage")
-            .and_then(|x| x.as_str())
-            .or_else(|| v.get("message").and_then(|x| x.as_str()))
-            .unwrap_or("request failed");
-        return Err(clean_error(msg));
+        return Err(extract_error_message(&v));
     }
     // Success shapes: { status: "success", value: ... } or raw value
     if let Some(st) = v.get("status").and_then(|x| x.as_str()) {
         if st == "error" || st == "failure" {
-            let msg = v
-                .get("errorMessage")
-                .or_else(|| v.get("error"))
-                .and_then(|x| x.as_str())
-                .unwrap_or("convex error");
-            return Err(clean_error(msg));
+            return Err(extract_error_message(&v));
         }
         if let Some(val) = v.get("value") {
             return Ok(val.clone());
@@ -952,11 +1071,24 @@ async fn poll_channels(
 }
 
 fn parse_auth(v: &Value) -> Option<AuthSession> {
+    // Auth may nest under `value` if a caller passed the full HTTP envelope.
+    let v = v.get("value").unwrap_or(v);
+    let token = v.get("token")?.as_str()?.to_string();
+    if token.is_empty() {
+        return None;
+    }
+    let user_id = value_id(v.get("userId")?)?;
+    let username = v.get("username")?.as_str()?.to_string();
+    let display_name = v
+        .get("displayName")
+        .and_then(|x| x.as_str())
+        .unwrap_or(username.as_str())
+        .to_string();
     Some(AuthSession {
-        token: v.get("token")?.as_str()?.to_string(),
-        user_id: v.get("userId")?.as_str()?.to_string(),
-        username: v.get("username")?.as_str()?.to_string(),
-        display_name: v.get("displayName")?.as_str()?.to_string(),
+        token,
+        user_id,
+        username,
+        display_name,
         role: v
             .get("role")
             .and_then(|x| x.as_str())
@@ -1006,6 +1138,7 @@ fn parse_messages(v: &Value) -> Vec<MessageRow> {
             deleted: jbool(o, "deleted"),
             attachment_url: jstr(o, "attachmentUrl"),
             sent_at: jf64(o, "sentAt"),
+            author_plus_active: jbool(o, "authorPlusActive"),
         })
         .collect()
 }

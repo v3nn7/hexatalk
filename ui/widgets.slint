@@ -1,7 +1,130 @@
 // Small reusable building blocks shared by every screen: buttons, text
-// inputs, avatars, badges, section labels. Pure presentation -- no app
-// state lives here, only `in`/`out` properties and callbacks.
+// inputs, avatars, badges, section labels, vector icons. Pure presentation
+// -- no app state lives here, only `in`/`out` properties and callbacks.
+// Visual language: "Violet Night" -- rounded corners, borderless filled
+// buttons, violet accent, soft shadows, 120-160ms state animations.
 import { Theme } from "theme.slint";
+
+// ---------- Vector icons (no emoji glyphs) ----------
+
+// Pushpin -- pinned messages. Filled Material-style geometry.
+export component PinIcon inherits Path {
+    in property <brush> fg: Theme.text-muted;
+    width: 16px;
+    height: 16px;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    fill: root.fg;
+    animate fill { duration: 120ms; }
+    commands: "M 16 9 V 4 h 1 V 2 H 7 v 2 h 1 v 5 c 0 1.7 -1.3 3 -3 3 v 2 h 6 v 7 l 1 1 l 1 -1 v -7 h 6 v -2 c -1.7 0 -3 -1.3 -3 -3 z";
+}
+
+// Two people -- member list. Filled Material-style geometry.
+export component MembersIcon inherits Path {
+    in property <brush> fg: Theme.text-muted;
+    width: 18px;
+    height: 18px;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    fill: root.fg;
+    animate fill { duration: 120ms; }
+    commands: "M 16 11 c 1.7 0 3 -1.3 3 -3 s -1.3 -3 -3 -3 s -3 1.3 -3 3 s 1.3 3 3 3 z M 8 11 c 1.7 0 3 -1.3 3 -3 S 9.7 5 8 5 S 5 6.3 5 8 s 1.3 3 3 3 z M 8 13 c -2.3 0 -7 1.2 -7 3.5 V 19 h 14 v -2.5 C 15 14.2 10.3 13 8 13 z M 16 13 c -0.3 0 -0.6 0 -1 0.1 c 1.2 0.8 2 2 2 3.4 V 19 h 6 v -2.5 c 0 -2.3 -4.7 -3.5 -7 -3.5 z";
+}
+
+// Smiley -- emoji picker button. Ring + eyes + smile arc, all recolorable.
+export component SmileyIcon inherits Rectangle {
+    in property <brush> fg: Theme.text-muted;
+    width: 18px;
+    height: 18px;
+    background: transparent;
+
+    // Ring.
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: parent.width / 2;
+        border-width: parent.width * 0.09;
+        border-color: root.fg;
+        background: transparent;
+        animate border-color { duration: 120ms; }
+    }
+    // Eyes.
+    Rectangle {
+        x: parent.width * 0.29;
+        y: parent.height * 0.33;
+        width: parent.width * 0.11;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: root.fg;
+        animate background { duration: 120ms; }
+    }
+    Rectangle {
+        x: parent.width * 0.60;
+        y: parent.height * 0.33;
+        width: parent.width * 0.11;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: root.fg;
+        animate background { duration: 120ms; }
+    }
+    // Smile arc.
+    Path {
+        x: parent.width * 0.26;
+        y: parent.height * 0.46;
+        width: parent.width * 0.48;
+        height: parent.height * 0.30;
+        viewbox-width: 48;
+        viewbox-height: 30;
+        stroke: root.fg;
+        stroke-width: root.width * 0.09;
+        fill: transparent;
+        commands: "M 5 5 Q 24 36 43 5";
+    }
+}
+
+// Speaker -- voice channel / voice room. Drawn from primitives (Roboto
+// ships no speaker glyph).
+export component SpeakerIcon inherits Rectangle {
+    in property <brush> fg: Theme.text-muted;
+    width: 15px;
+    height: 14px;
+    Rectangle { x: 0px; y: 4px; width: 3.5px; height: 6px; background: root.fg; }
+    Path {
+        width: parent.width;
+        height: parent.height;
+        viewbox-width: 15;
+        viewbox-height: 14;
+        fill: root.fg;
+        commands: "M 3.5 4 L 8 1 L 8 13 L 3.5 10 Z";
+    }
+    Path {
+        width: parent.width;
+        height: parent.height;
+        viewbox-width: 15;
+        viewbox-height: 14;
+        stroke: root.fg;
+        stroke-width: 1.3px;
+        commands: "M 10 4.5 A 3 3 0 0 1 10 9.5 M 10.5 2 A 5.4 5.4 0 0 1 10.5 12";
+    }
+}
+
+// Small solid "BOT" chip that sits right after a display name. Shared by
+// the members drawer, message rows and the settings bot list so the tag
+// looks identical everywhere.
+export component BotTag inherits Rectangle {
+    width: label.preferred-width + 10px;
+    height: 14px;
+    border-radius: Theme.radius-sm;
+    background: Theme.accent;
+    label := Text {
+        text: "BOT";
+        font-size: 9px;
+        font-family: Theme.font-medium;
+        color: Theme.text-on-accent;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
 
 export component PrimaryButton inherits Rectangle {
     in property <string> text;
@@ -10,12 +133,12 @@ export component PrimaryButton inherits Rectangle {
     callback clicked;
 
     height: 38px;
+    border-radius: Theme.radius-md;
+    // Filled button: violet, no border; hover brightens one step,
+    // pressed drops one step below the rest state.
     background: touch.pressed ? Theme.accent-pressed : (touch.has-hover ? Theme.accent : Theme.accent-dim);
-    border-width: 1px;
-    border-color: touch.has-hover || touch.pressed ? Theme.accent : Theme.accent-dim;
     opacity: root.enabled ? 1.0 : 0.5;
-    animate background { duration: 120ms; }
-    animate border-color { duration: 120ms; }
+    animate background { duration: 140ms; }
 
     touch := TouchArea {
         enabled: root.enabled && !root.busy;
@@ -40,12 +163,12 @@ export component SecondaryButton inherits Rectangle {
     callback clicked;
 
     height: 34px;
-    background: touch.pressed ? Theme.bg-tertiary : (touch.has-hover ? Theme.bg-hover : Theme.bg-secondary);
-    border-width: 1px;
-    border-color: touch.has-hover ? Theme.border-strong : Theme.border;
+    border-radius: Theme.radius-md;
+    // "Secondary" grey button: solid control grey, no border,
+    // lighter on hover, darker on press.
+    background: touch.pressed ? Theme.bg-control-pressed : (touch.has-hover ? Theme.bg-control-hover : Theme.bg-control);
     opacity: root.enabled ? 1.0 : 0.5;
-    animate background { duration: 120ms; }
-    animate border-color { duration: 120ms; }
+    animate background { duration: 140ms; }
 
     touch := TouchArea {
         enabled: root.enabled;
@@ -55,9 +178,9 @@ export component SecondaryButton inherits Rectangle {
 
     Text {
         text: root.text;
-        color: Theme.text-primary;
+        color: Theme.text-bright;
         font-size: Theme.text-sm;
-        font-family: Theme.font-body;
+        font-family: Theme.font-medium;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -69,12 +192,15 @@ export component DangerButton inherits Rectangle {
     callback clicked;
 
     height: 34px;
-    background: touch.pressed ? #d9525740 : (touch.has-hover ? Theme.danger-soft : transparent);
+    border-radius: Theme.radius-md;
     border-width: 1px;
-    border-color: touch.has-hover || touch.pressed ? Theme.danger : #d9525799;
+    // Outlined-danger: red outline at rest, solid red fill on
+    // hover, darker red when pressed.
+    background: touch.pressed ? Theme.danger-pressed : (touch.has-hover ? Theme.danger : transparent);
+    border-color: touch.has-hover || touch.pressed ? transparent : Theme.danger-dim;
     opacity: root.enabled ? 1.0 : 0.5;
-    animate background { duration: 120ms; }
-    animate border-color { duration: 120ms; }
+    animate background { duration: 140ms; }
+    animate border-color { duration: 140ms; }
 
     touch := TouchArea {
         enabled: root.enabled;
@@ -84,11 +210,12 @@ export component DangerButton inherits Rectangle {
 
     Text {
         text: root.text;
-        color: Theme.danger;
+        color: touch.has-hover || touch.pressed ? Theme.text-bright : Theme.danger;
         font-size: Theme.text-sm;
-        font-family: Theme.font-body;
+        font-family: Theme.font-medium;
         horizontal-alignment: center;
         vertical-alignment: center;
+        animate color { duration: 140ms; }
     }
 }
 
@@ -104,7 +231,7 @@ export component LinkButton inherits Rectangle {
 
     Text {
         text: root.text;
-        color: touch.has-hover ? Theme.accent : Theme.text-muted;
+        color: touch.has-hover ? Theme.accent-hover : Theme.text-muted;
         font-size: Theme.text-sm;
         font-family: Theme.font-body;
         animate color { duration: 120ms; }
@@ -121,7 +248,11 @@ export component FieldLabel inherits Text {
 export component TextInputField inherits Rectangle {
     in property <string> placeholder;
     in property <bool> is-password: false;
+    // Numeric keyboard (e.g. the 6-digit email verification code).
+    in property <bool> is-number: false;
     in property <bool> enabled: true;
+    // Validation error state: danger ring instead of the accent focus ring.
+    in property <bool> error: false;
     in-out property <string> value;
     callback edited(string);
     callback submitted;
@@ -133,13 +264,14 @@ export component TextInputField inherits Rectangle {
     }
 
     height: 38px;
-    background: inner.has-focus ? Theme.bg-elevated : Theme.bg-tertiary;
+    border-radius: Theme.radius-md;
+    // Input: darkest surface, borderless at rest, violet ring on focus.
+    background: Theme.bg-tertiary;
     border-width: 1px;
-    border-color: inner.has-focus ? Theme.accent : Theme.border;
+    border-color: root.error ? Theme.danger : (inner.has-focus ? Theme.accent : transparent);
     // Dim like the shared buttons do when disabled (e.g. while auth is busy).
     opacity: root.enabled ? 1.0 : 0.5;
-    animate background { duration: 120ms; }
-    animate border-color { duration: 120ms; }
+    animate border-color { duration: 140ms; }
 
     inner := TextInput {
         x: 10px;
@@ -149,9 +281,12 @@ export component TextInputField inherits Rectangle {
         vertical-alignment: center;
         text <=> root.value;
         color: Theme.text-primary;
+        // Accent selection: solid violet behind white text.
+        selection-background-color: Theme.accent;
+        selection-foreground-color: Theme.text-on-accent;
         font-size: Theme.text-md;
         font-family: Theme.font-body;
-        input-type: root.is-password ? InputType.password : InputType.text;
+        input-type: root.is-password ? InputType.password : (root.is-number ? InputType.number : InputType.text);
         enabled: root.enabled;
         edited => { root.edited(self.text); }
         accepted => { root.submitted(); }
@@ -168,8 +303,11 @@ export component TextInputField inherits Rectangle {
     }
 }
 
+// Section header: tiny, muted, wide-tracked small caps that organize a
+// panel without competing with the content under it. (No real
+// text-transform in Slint -- the tracking does the small-caps work.)
 export component SectionTitle inherits Text {
-    color: Theme.accent;
+    color: Theme.text-muted;
     font-size: Theme.text-xs;
     font-family: Theme.font-medium;
     letter-spacing: 1px;
@@ -186,10 +324,11 @@ export component StatsChip inherits Rectangle {
     min-width: 52px;
     height: 46px;
     background: Theme.bg-tertiary;
+    border-radius: Theme.radius-md;
     border-width: 1px;
-    border-color: Theme.border;
-    padding: 6px;
+    border-color: Theme.border-hairline;
     VerticalLayout {
+        padding: 6px;
         spacing: 2px;
         Text {
             text: root.label;
@@ -210,10 +349,12 @@ export component StatsChip inherits Rectangle {
 export component Badge inherits Rectangle {
     in property <string> text;
     in property <color> bg: Theme.danger;
-    in property <color> fg: white;
+    in property <color> fg: Theme.text-on-accent;
     width: max(16px, label.preferred-width + 8px);
     height: 16px;
     background: root.bg;
+    // Pill shape -- notification badges are fully rounded.
+    border-radius: 8px;
     border-width: 1px;
     border-color: Theme.bg-tertiary;
     label := Text {
@@ -226,17 +367,25 @@ export component Badge inherits Rectangle {
     }
 }
 
+// Presence dot: solid circle with a ring in the surrounding surface color,
+// so it reads cleanly on top of an avatar. Pass `ring-color` when the dot
+// sits on something other than bg-secondary. `online` keeps the original
+// API; `idle`/`dnd` are additive for richer presence states.
 export component PresenceDot inherits Rectangle {
     in property <bool> online: false;
+    in property <bool> idle: false;
+    in property <bool> dnd: false;
+    in property <color> ring-color: Theme.bg-secondary;
     width: 10px;
     height: 10px;
-    background: root.online ? Theme.online : Theme.offline;
+    border-radius: 5px;
+    background: root.dnd ? Theme.dnd : (root.idle ? Theme.idle : (root.online ? Theme.online : Theme.offline));
     border-width: 2px;
-    border-color: Theme.bg-secondary;
+    border-color: root.ring-color;
 }
 
 // 36x36 avatar: photo image when `photo-source` is non-empty, otherwise a
-// flat-colored initial square. Optional presence dot bottom-right.
+// flat-colored initial circle. Optional presence dot bottom-right.
 export component Avatar inherits Rectangle {
     // Precomputed by Rust (Slint's `string` has no indexing/substring) --
     // single uppercase character shown when there's no photo.
@@ -249,9 +398,11 @@ export component Avatar inherits Rectangle {
 
     width: root.size;
     height: root.size;
+    // Avatars are circles; `clip` keeps the photo inside the ring.
+    border-radius: root.size / 2;
     background: root.photo-source.width > 0 ? transparent : root.avatar-color;
     border-width: root.photo-source.width > 0 ? 0px : 1px;
-    border-color: Theme.border-strong;
+    border-color: Theme.border-hairline;
     clip: true;
 
     if root.photo-source.width > 0: Image {
@@ -263,7 +414,7 @@ export component Avatar inherits Rectangle {
 
     if root.photo-source.width <= 0: Text {
         text: root.initial;
-        color: #050a06;
+        color: Theme.text-on-accent;
         font-size: root.size * 0.4;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -273,6 +424,29 @@ export component Avatar inherits Rectangle {
         online: root.online;
         x: parent.width - self.width;
         y: parent.height - self.height;
+    }
+}
+
+// Tooltip: near-black floating pill, bright text, soft shadow. Place it as
+// an overlay sibling; visibility is the caller's job.
+export component Tooltip inherits Rectangle {
+    in property <string> text;
+    width: label.preferred-width + 16px;
+    height: 26px;
+    background: Theme.bg-floating;
+    border-radius: Theme.radius-md;
+    drop-shadow-offset-x: 0px;
+    drop-shadow-offset-y: Theme.shadow-offset-light;
+    drop-shadow-blur: Theme.shadow-blur;
+    drop-shadow-color: Theme.shadow-color;
+
+    label := Text {
+        text: root.text;
+        color: Theme.text-bright;
+        font-size: Theme.text-sm;
+        font-family: Theme.font-medium;
+        horizontal-alignment: center;
+        vertical-alignment: center;
     }
 }
 
@@ -289,8 +463,8 @@ export component ResizeHandle inherits Rectangle {
     callback drag-ended;
 
     width: 4px;
-    background: touch.has-hover || touch.pressed ? Theme.border-strong : Theme.border;
-    animate background { duration: 120ms; }
+    background: touch.has-hover || touch.pressed ? Theme.border-strong : transparent;
+    animate background { duration: 140ms; }
 
     touch := TouchArea {
         mouse-cursor: MouseCursor.col-resize;

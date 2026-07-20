@@ -2,6 +2,7 @@ import { v } from "convex/values";
 import { mutation, query, MutationCtx, QueryCtx } from "./_generated/server";
 import { currentUser } from "./session";
 import { Id } from "./_generated/dataModel";
+import { Perm, requireChannelPerm, requirePerm } from "./roles";
 
 async function requireMembership(
   ctx: QueryCtx | MutationCtx,
@@ -42,6 +43,10 @@ export const listMemberPublicKeys = query({
     if (!conversation || !supportsGroupKey(conversation.kind)) {
       return { epoch: 0, members: [] as { userId: Id<"users">; publicKey: string }[] };
     }
+    // Private channels (deny VIEW_CHANNELS) don't hand out their key ring.
+    if (conversation.kind === "channel") {
+      await requireChannelPerm(ctx, args.conversationId, me._id, Perm.VIEW_CHANNELS);
+    }
 
     const members = await ctx.db
       .query("conversationMembers")
@@ -78,6 +83,10 @@ export const myPackage = query({
     const conversation = await ctx.db.get("conversations", args.conversationId);
     if (!conversation || !supportsGroupKey(conversation.kind)) {
       return null;
+    }
+    // Private channels (deny VIEW_CHANNELS) don't hand out their key ring.
+    if (conversation.kind === "channel") {
+      await requireChannelPerm(ctx, args.conversationId, me._id, Perm.VIEW_CHANNELS);
     }
 
     const row = await ctx.db
@@ -140,6 +149,17 @@ export const publishPackages = mutation({
     const existingEpoch = conversation.keyEpoch ?? 0;
     const force = args.force === true;
 
+    // Force wipes every member's package and bumps the epoch, so it takes
+    // more than plain membership: for server channels that's MANAGE_CHANNELS
+    // (the server owner passes via ALL_PERMS), for groups only the creator.
+    if (force) {
+      if (conversation.kind === "channel" && conversation.serverId) {
+        await requirePerm(ctx, conversation.serverId, me._id, Perm.MANAGE_CHANNELS);
+      } else if (conversation.createdBy !== me._id) {
+        throw new Error("Only the group creator can force a key rotation");
+      }
+    }
+
     if (existingEpoch > 0 && !force) {
       // Another member already bootstrapped — client should fetch myPackage.
       return { epoch: existingEpoch, created: false };
@@ -149,9 +169,7 @@ export const publishPackages = mutation({
     }
     if (!force && args.epoch !== 1 && existingEpoch === 0) {
       // First bootstrap must start at epoch 1.
-      if (args.epoch !== 1) {
-        throw new Error("First group key epoch must be 1");
-      }
+      throw new Error("First group key epoch must be 1");
     }
 
     const memberRows = await ctx.db
@@ -268,7 +286,14 @@ export const shareWithMembers = mutation({
         )
         .unique();
       if (existing) {
-        if (existing.epoch === epoch) continue;
+        // Always re-seal, even when the epoch already matches: the caller
+        // proved they hold the current key (checked above), so resealing
+        // against `pkg.userId`'s CURRENT public key is always safe and is
+        // exactly what fixes a member whose local identity changed (e.g. a
+        // reinstall or the client's data-dir being renamed) without a full
+        // key rotation — their old package silently fails to unseal
+        // forever otherwise, since nothing else ever revisits it once the
+        // epoch matches.
         await ctx.db.patch("conversationKeyPackages", existing._id, {
           epoch,
           sealedKey: pkg.sealedKey,

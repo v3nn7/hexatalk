@@ -78,8 +78,17 @@ impl AdpcmEncoder {
 
     /// Encodes exactly one 20 ms frame (`pcm.len() == FRAME_SAMPLES`).
     pub(super) fn encode_frame(&mut self, pcm: &[i16]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(WIRE_FRAME_BYTES);
+        self.encode_frame_into(pcm, &mut out);
+        out
+    }
+
+    /// Allocation-free variant of `encode_frame`: reuses `out`'s capacity so
+    /// the 50 Hz capture path doesn't allocate a fresh `Vec` per frame.
+    pub(super) fn encode_frame_into(&mut self, pcm: &[i16], out: &mut Vec<u8>) {
         debug_assert_eq!(pcm.len(), FRAME_SAMPLES);
-        let mut out = Vec::with_capacity(4 + pcm.len() / 2);
+        out.clear();
+        out.reserve(4 + pcm.len() / 2);
         out.push(WIRE_MAGIC);
         out.extend_from_slice(&(self.predictor as i16).to_le_bytes());
         out.push(self.step_index as u8);
@@ -95,7 +104,6 @@ impl AdpcmEncoder {
         if let Some(lo) = pending_nibble {
             out.push(lo);
         }
-        out
     }
 
     fn encode_sample(&mut self, sample: i32) -> u8 {
@@ -136,18 +144,35 @@ impl AdpcmEncoder {
     }
 }
 
+/// Hard upper bound on a wire payload. A legit frame is exactly
+/// `WIRE_FRAME_BYTES` (244 B); anything dramatically larger is a corrupt or
+/// hostile packet, and decoding it would let one packet force a large
+/// `Vec` allocation on the receive path. Generous headroom (4x) so future
+/// format tweaks within the same magic keep working.
+const MAX_WIRE_PAYLOAD: usize = 4 + (FRAME_SAMPLES / 2) * 4;
+
 /// Decodes one RTP payload into 24 kHz mono i16 samples. Returns `None`
 /// (drop the packet) if the format tag doesn't match or the payload is
 /// malformed — a mismatched peer produces silence, never garbage.
 pub(super) fn decode_frame(payload: &[u8]) -> Option<Vec<i16>> {
-    if payload.len() < 4 || payload[0] != WIRE_MAGIC {
+    if payload.len() < 4 || payload.len() > MAX_WIRE_PAYLOAD {
         return None;
+    }
+    let mut out = Vec::with_capacity((payload.len() - 4) * 2);
+    decode_frame_into(payload, &mut out).then_some(out)
+}
+
+/// Allocation-free variant of `decode_frame`: clears and refills `out`,
+/// returning `false` (drop the packet) on a malformed/foreign payload.
+pub(super) fn decode_frame_into(payload: &[u8], out: &mut Vec<i16>) -> bool {
+    out.clear();
+    if payload.len() < 4 || payload.len() > MAX_WIRE_PAYLOAD || payload[0] != WIRE_MAGIC {
+        return false;
     }
     let mut predictor = i16::from_le_bytes([payload[1], payload[2]]) as i32;
     let mut step_index = (payload[3] as i32).clamp(0, 88);
 
-    let nibbles = (payload.len() - 4) * 2;
-    let mut out = Vec::with_capacity(nibbles);
+    out.reserve((payload.len() - 4) * 2);
     for &byte in &payload[4..] {
         for nibble in [byte & 0x0F, byte >> 4] {
             let step = STEP_TABLE[step_index as usize];
@@ -171,7 +196,7 @@ pub(super) fn decode_frame(payload: &[u8]) -> Option<Vec<i16>> {
             out.push(predictor as i16);
         }
     }
-    Some(out)
+    true
 }
 
 #[cfg(test)]
@@ -210,6 +235,20 @@ mod tests {
         assert!(decode_frame(&[]).is_none());
         assert!(decode_frame(&[0x00, 0, 0, 0]).is_none());
         assert!(decode_frame(&[0xFF, 0, 0, 0, 1, 2, 3]).is_none());
+    }
+
+    #[test]
+    fn rejects_oversized_payload() {
+        // Right magic, but absurdly long: must be dropped, not decoded into
+        // a giant allocation.
+        let oversized = {
+            let mut v = vec![WIRE_MAGIC, 0, 0, 0];
+            v.resize(MAX_WIRE_PAYLOAD + 1, 0x55);
+            v
+        };
+        assert!(decode_frame(&oversized).is_none());
+        let mut scratch = Vec::new();
+        assert!(!decode_frame_into(&oversized, &mut scratch));
     }
 
     #[test]

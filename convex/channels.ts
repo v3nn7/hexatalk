@@ -7,6 +7,7 @@ import {
   DEFAULT_EVERYONE_PERMS,
   Perm,
   channelPermissions,
+  highestRolePosition,
   requirePerm,
   requireServerMember,
 } from "./roles";
@@ -18,6 +19,31 @@ function slugify(raw: string): string {
 /** Permissions an @everyone overwrite may tune (member-facing defaults). */
 const EVERYONE_OVERWRITE_PERMS =
   Perm.VIEW_CHANNELS | Perm.SEND_MESSAGES | Perm.CONNECT_VOICE | Perm.SPEAK;
+
+/** Add every server member to a conversation, paginating the member scan
+ * so large servers are fully covered (not just the first 500). */
+async function addAllServerMembersToConversation(
+  ctx: MutationCtx,
+  serverId: Id<"servers">,
+  conversationId: Id<"conversations">,
+) {
+  let cursor: string | null = null;
+  let isDone = false;
+  while (!isDone) {
+    const page = await ctx.db
+      .query("serverMembers")
+      .withIndex("by_server", (q) => q.eq("serverId", serverId))
+      .paginate({ numItems: 500, cursor });
+    for (const member of page.page) {
+      await ctx.db.insert("conversationMembers", {
+        conversationId,
+        userId: member.userId,
+      });
+    }
+    cursor = page.continueCursor;
+    isDone = page.isDone;
+  }
+}
 
 /** Id of the server's position-0 (@everyone) role, creating it when an old
  * server predates default roles — mirrors ensureDefaultRole in roles.ts. */
@@ -112,16 +138,23 @@ export const deleteCategory = mutation({
     const cat = await ctx.db.get("channelCategories", args.categoryId);
     if (!cat) throw new Error("Category not found");
     await requirePerm(ctx, cat.serverId, me._id, Perm.MANAGE_CHANNELS);
-    const channels = await ctx.db
-      .query("conversations")
-      .withIndex("by_server", (q) => q.eq("serverId", cat.serverId))
-      .take(200);
-    for (const ch of channels) {
-      if (ch.categoryId === args.categoryId) {
-        await ctx.db.patch("conversations", ch._id, {
-          categoryId: undefined,
-        });
+    // Paginate so channels beyond the first 200 are also unassigned.
+    let cursor: string | null = null;
+    let isDone = false;
+    while (!isDone) {
+      const page = await ctx.db
+        .query("conversations")
+        .withIndex("by_server", (q) => q.eq("serverId", cat.serverId))
+        .paginate({ numItems: 200, cursor });
+      for (const ch of page.page) {
+        if (ch.categoryId === args.categoryId) {
+          await ctx.db.patch("conversations", ch._id, {
+            categoryId: undefined,
+          });
+        }
       }
+      cursor = page.continueCursor;
+      isDone = page.isDone;
     }
     await ctx.db.delete("channelCategories", args.categoryId);
     return null;
@@ -265,15 +298,55 @@ export const setOverwrite = mutation({
     if (!ch || ch.kind !== "channel" || !ch.serverId) {
       throw new Error("Not a server channel");
     }
-    if (ch.isSystem && ch.isAnnouncement) {
-      // Allow staff to still tune overwrites on announcements.
-    }
-    await requirePerm(ctx, ch.serverId, me._id, Perm.MANAGE_ROLES);
+    const { server, membership, perms: myPerms } = await requirePerm(
+      ctx,
+      ch.serverId,
+      me._id,
+      Perm.MANAGE_ROLES,
+    );
 
-    const allow = args.allow & ALL_PERMS;
-    const deny = args.deny & ALL_PERMS;
+    let allow = args.allow & ALL_PERMS;
+    let deny = args.deny & ALL_PERMS;
     if (allow & deny) {
       throw new Error("A permission cannot be both allowed and denied");
+    }
+
+    // The overwrite target must belong to this server — otherwise junk
+    // overwrites for arbitrary role/user ids could be planted.
+    if (args.targetType === "role") {
+      const role = await ctx.db.get(
+        "serverRoles",
+        args.targetId as Id<"serverRoles">,
+      );
+      if (!role || role.serverId !== ch.serverId) {
+        throw new Error("Role not found on this server");
+      }
+      if (role.position === 0) {
+        // The @everyone overwrite may only tune member-facing defaults —
+        // it can never grant/revoke management bits server-wide.
+        allow &= EVERYONE_OVERWRITE_PERMS;
+        deny &= EVERYONE_OVERWRITE_PERMS;
+      } else if (
+        server.ownerId !== me._id &&
+        role.position >= (await highestRolePosition(ctx, membership))
+      ) {
+        // Discord-style hierarchy, mirrors updateRole in roles.ts.
+        throw new Error(
+          "You can't set overwrites for a role at or above your highest role",
+        );
+      }
+    } else {
+      const target = await ctx.db.get("users", args.targetId as Id<"users">);
+      if (!target) {
+        throw new Error("User not found");
+      }
+      await requireServerMember(ctx, ch.serverId, target._id);
+    }
+
+    // Never allow permission bits you don't hold yourself (owner bypasses),
+    // same rule as updateRole in roles.ts.
+    if (server.ownerId !== me._id && (allow & ~myPerms) !== 0) {
+      throw new Error("You can't allow permissions you don't have");
     }
 
     const existing = await ctx.db
@@ -289,24 +362,6 @@ export const setOverwrite = mutation({
     if (allow === 0 && deny === 0) {
       if (existing) await ctx.db.delete("channelOverwrites", existing._id);
       return null;
-    }
-
-    // The overwrite target must belong to this server — otherwise junk
-    // overwrites for arbitrary role/user ids could be planted.
-    if (args.targetType === "role") {
-      const role = await ctx.db.get(
-        "serverRoles",
-        args.targetId as Id<"serverRoles">,
-      );
-      if (!role || role.serverId !== ch.serverId) {
-        throw new Error("Role not found on this server");
-      }
-    } else {
-      const target = await ctx.db.get("users", args.targetId as Id<"users">);
-      if (!target) {
-        throw new Error("User not found");
-      }
-      await requireServerMember(ctx, ch.serverId, target._id);
     }
 
     if (existing) {
@@ -413,12 +468,18 @@ export const setMute = mutation({
       return null;
     }
 
+    // A mute expiry in the past is meaningless — treat it as "no expiry".
+    const mutedUntil =
+      args.mutedUntil !== undefined && args.mutedUntil > Date.now()
+        ? args.mutedUntil
+        : undefined;
+
     const doc = {
       userId: me._id,
       scope: args.scope,
       targetId: args.targetId,
       muted: true,
-      mutedUntil: args.mutedUntil,
+      mutedUntil,
       suppressMentions: args.suppressMentions ?? false,
       updatedAt: Date.now(),
     };
@@ -527,16 +588,11 @@ export const ensureAnnouncementChannel = mutation({
       isSystem: true,
       position: -1000,
     });
-    const members = await ctx.db
-      .query("serverMembers")
-      .withIndex("by_server", (q) => q.eq("serverId", args.serverId))
-      .take(500);
-    for (const m of members) {
-      await ctx.db.insert("conversationMembers", {
-        conversationId,
-        userId: m.userId,
-      });
-    }
+    await addAllServerMembersToConversation(
+      ctx,
+      args.serverId,
+      conversationId,
+    );
     return conversationId;
   },
 });
@@ -576,16 +632,11 @@ export const createTextChannel = mutation({
       categoryId: args.categoryId,
       position,
     });
-    const members = await ctx.db
-      .query("serverMembers")
-      .withIndex("by_server", (q) => q.eq("serverId", args.serverId))
-      .take(500);
-    for (const member of members) {
-      await ctx.db.insert("conversationMembers", {
-        conversationId,
-        userId: member.userId,
-      });
-    }
+    await addAllServerMembersToConversation(
+      ctx,
+      args.serverId,
+      conversationId,
+    );
     return conversationId;
   },
 });

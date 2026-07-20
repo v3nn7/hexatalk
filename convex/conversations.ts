@@ -199,6 +199,45 @@ export const markRead = mutation({
   },
 });
 
+/**
+ * Per-member read markers for one conversation (Discord-like read
+ * receipts). Only members can read them. Display name is resolved live
+ * from users so renames show up immediately.
+ */
+export const readStates = query({
+  args: { sessionToken: v.string(), conversationId: v.id("conversations") },
+  handler: async (ctx, args) => {
+    const me = await currentUser(ctx, args.sessionToken);
+    const myMembership = await ctx.db
+      .query("conversationMembers")
+      .withIndex("by_conversation_and_user", (q) =>
+        q.eq("conversationId", args.conversationId).eq("userId", me._id),
+      )
+      .unique();
+    if (!myMembership) {
+      throw new Error("You're not a member of this chat");
+    }
+
+    const members = await ctx.db
+      .query("conversationMembers")
+      .withIndex("by_conversation", (q) =>
+        q.eq("conversationId", args.conversationId),
+      )
+      .take(200);
+
+    return Promise.all(
+      members.map(async (m) => {
+        const user = await ctx.db.get("users", m.userId);
+        return {
+          userId: m.userId,
+          displayName: user?.displayName ?? "Unknown",
+          lastReadAt: m.lastReadAt ?? 0,
+        };
+      }),
+    );
+  },
+});
+
 export const listMyConversations = query({
   args: { sessionToken: v.string() },
   handler: async (ctx, args) => {

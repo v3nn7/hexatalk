@@ -6,12 +6,20 @@ import {
   isStaff,
   platformRole,
 } from "./session";
+import {
+  FREE_BIO_MAX,
+  FREE_STATUS_MAX,
+  PLUS_BIO_MAX,
+  PLUS_STATUS_MAX,
+  isPlusActive,
+  isValidHexColor,
+  plusPublicFields,
+} from "./plus";
 
 const ONLINE_MS = 90_000;
 
-// Must match `AVATAR_PALETTE` in src/main.rs (the client's swatch picker) --
-// any mismatch means every profile save gets rejected here with "Invalid
-// avatar color" the moment the color isn't already the user's current one.
+// Must match `AVATAR_PALETTE` in src/main.rs (the client's free swatch
+// picker). Free users may only pick these; HexaTalk Plus may use any #RRGGBB.
 export const AVATAR_PALETTE = [
   "#3FB36B",
   "#2E9E6B",
@@ -28,6 +36,13 @@ export const AVATAR_PALETTE = [
 // point itself -- a malformed/invalid key just means ECDH with it will
 // fail later, handled gracefully client-side.
 const PUBLIC_KEY_BASE64_LENGTH = 44;
+const PUBLIC_KEY_BASE64_PATTERN = /^[A-Za-z0-9+/]{43}=$/;
+
+/** Strip C0/C1 control characters (keeps normal whitespace like spaces). */
+function stripControlChars(input: string): string {
+  // eslint-disable-next-line no-control-regex
+  return input.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, "");
+}
 
 // Always overwrites rather than "set once": the matching private key lives
 // only on the user's device, so losing it (reinstall, wiped profile
@@ -43,7 +58,10 @@ export const setPublicKey = mutation({
   },
   handler: async (ctx, args) => {
     const me = await currentUser(ctx, args.sessionToken);
-    if (args.publicKey.length !== PUBLIC_KEY_BASE64_LENGTH) {
+    if (
+      args.publicKey.length !== PUBLIC_KEY_BASE64_LENGTH ||
+      !PUBLIC_KEY_BASE64_PATTERN.test(args.publicKey)
+    ) {
       throw new Error("Invalid public key");
     }
     await ctx.db.patch("users", me._id, { publicKey: args.publicKey });
@@ -61,20 +79,37 @@ export const updateProfile = mutation({
   },
   handler: async (ctx, args) => {
     const me = await currentUser(ctx, args.sessionToken);
+    const plus = isPlusActive(me);
 
-    const displayName = args.displayName.trim();
+    const displayName = stripControlChars(args.displayName.trim());
     if (displayName.length === 0) {
       throw new Error("Display name can't be empty");
     }
     if (displayName.length > 50) {
       throw new Error("Display name is too long");
     }
-    if (!AVATAR_PALETTE.includes(args.avatarColor)) {
-      throw new Error("Invalid avatar color");
+
+    // Free: fixed palette only. Plus: any #RRGGBB. Always allow keeping the
+    // color already on the account (so expiry doesn't brick a custom hex).
+    const colorOk =
+      AVATAR_PALETTE.includes(args.avatarColor) ||
+      args.avatarColor === me.avatarColor ||
+      (plus && isValidHexColor(args.avatarColor));
+    if (!colorOk) {
+      throw new Error(
+        plus
+          ? "Invalid avatar color (use #RRGGBB)"
+          : "Invalid avatar color — HexaTalk Plus unlocks custom colors",
+      );
     }
 
-    const statusMessage = args.statusMessage.trim().slice(0, 100);
-    const bio = args.bio.trim().slice(0, 300);
+    const statusMax = plus ? PLUS_STATUS_MAX : FREE_STATUS_MAX;
+    const bioMax = plus ? PLUS_BIO_MAX : FREE_BIO_MAX;
+    const statusMessage = stripControlChars(args.statusMessage.trim()).slice(
+      0,
+      statusMax,
+    );
+    const bio = stripControlChars(args.bio.trim()).slice(0, bioMax);
 
     await ctx.db.patch("users", me._id, {
       displayName,
@@ -108,6 +143,10 @@ export const getProfile = query({
     const avatarImageUrl = user.avatarStorageId
       ? await ctx.storage.getUrl(user.avatarStorageId)
       : null;
+    const profileBannerUrl =
+      user.profileBannerStorageId && isPlusActive(user)
+        ? await ctx.storage.getUrl(user.profileBannerStorageId)
+        : null;
 
     const forward = await ctx.db
       .query("friendRequests")
@@ -183,18 +222,21 @@ export const getProfile = query({
           .unique()
       : null;
 
+    const plus = plusPublicFields(user);
     return {
       userId: user._id,
       username: user.username,
       displayName: user.displayName,
       avatarColor: user.avatarColor ?? "",
       avatarImageUrl: avatarImageUrl ?? "",
+      profileBannerUrl: profileBannerUrl ?? "",
       statusMessage: user.statusMessage ?? "",
       bio: user.bio ?? "",
       lastSeenAt,
       presence: presenceLabel,
       isStaff: isStaff(user),
       platformRole: platformRole(user),
+      plusActive: plus.plusActive,
       isFriend,
       relation,
       requestId,
@@ -226,9 +268,14 @@ export const setAvatarImage = mutation({
     const me = await currentUser(ctx, args.sessionToken);
 
     const metadata = await ctx.db.system.get("_storage", args.storageId);
-    if (!metadata || metadata.size > MAX_AVATAR_BYTES) {
+    if (
+      !metadata ||
+      metadata.size > MAX_AVATAR_BYTES ||
+      (metadata.contentType !== undefined &&
+        !metadata.contentType.startsWith("image/"))
+    ) {
       await ctx.storage.delete(args.storageId);
-      throw new Error("Image must be smaller than 2MB");
+      throw new Error("Image must be an image file smaller than 2MB");
     }
 
     const previousId = me.avatarStorageId;

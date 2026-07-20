@@ -42,6 +42,8 @@ baked!(update_version_url, OBF_UPDATE_VERSION_URL);
 baked!(update_download_url, OBF_UPDATE_DOWNLOAD_URL);
 baked!(update_signature_url, OBF_UPDATE_SIGNATURE_URL);
 baked!(update_public_key_b64, OBF_UPDATE_PUBLIC_KEY_B64);
+baked!(update_delta_base_url, OBF_UPDATE_DELTA_BASE_URL);
+baked!(update_delta_key_b64, OBF_UPDATE_DELTA_KEY_B64);
 
 #[cfg(test)]
 mod tests {
@@ -58,5 +60,7 @@ mod tests {
         assert!(update_signature_url().ends_with(".sig"));
         // 32 raw bytes base64-encoded = 44 chars with padding.
         assert_eq!(update_public_key_b64().len(), 44);
+        assert!(update_delta_base_url().starts_with("https://") && update_delta_base_url().ends_with('/'));
+        assert_eq!(update_delta_key_b64().len(), 44);
     }
 }

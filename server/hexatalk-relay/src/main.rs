@@ -11,19 +11,22 @@
 //!       the client treats this as "ready" and starts sending ciphertext
 //!     - `⏳ peer left (N peers remaining)` — informational after connect
 //!     - `❌ <reason>`                     — fatal, client aborts (non-transient)
-//! - After the handshake, every BINARY (and non-status TEXT) frame from one
-//!   peer is forwarded verbatim to all other members of the same room.
-//!   Payloads are opaque E2EE ciphertext — never logged.
+//! - After the handshake, every BINARY frame from one peer is forwarded
+//!   verbatim to all other members of the same room. Payloads are opaque
+//!   E2EE ciphertext — never logged. TEXT frames from clients are dropped
+//!   (anti-spoofing: the only text on the wire is server status lines).
+//!
+//! No TLS here — terminate TLS (`wss://`) at a reverse proxy in front.
 //!
 //! Extras (from `crates/reprotocol/RELAY.md` wishlist):
 //!   `GET /v1/limits` — JSON capability descriptor, `GET /healthz` — liveness.
 
 use std::collections::HashMap;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -41,6 +44,12 @@ const DEFAULT_MAX_PEERS: usize = 16;
 /// Client chunks Noise frames at ~60 KiB; 1 MiB is a sane relay cap
 /// (see RELAY.md: >= 64–128 KiB required, 25 MiB only for unchunked clients).
 const DEFAULT_MAX_FRAME: usize = 1024 * 1024;
+/// Active WebSocket connections accepted from a single source IP.
+const DEFAULT_MAX_CONN_PER_IP: usize = 32;
+/// Total rooms kept in memory across the whole server.
+const DEFAULT_MAX_ROOMS: usize = 10_000;
+/// Rooms a single source IP may create.
+const DEFAULT_MAX_ROOMS_PER_IP: usize = 64;
 const MAX_HTTP_HEAD: usize = 16 * 1024;
 const HTTP_HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 /// Per-peer outbound queue. ~256 x 60 KiB worst case buffered per peer.
@@ -63,11 +72,22 @@ USAGE:
     hexatalk-relay [OPTIONS]
 
 OPTIONS:
-    --bind <ADDR>        Listen address            [default: 0.0.0.0:9000]
-    --token <TOKEN>      Shared secret rooms must present as ?token= (optional)
-    --max-peers <N>      Max peers per room        [default: 16]
-    --max-frame <BYTES>  Max WebSocket frame size  [default: 1048576]
-    -h, --help           Print this help
+    --bind <ADDR>            Listen address                [default: 0.0.0.0:9000]
+    --token <TOKEN>          Shared secret required as ?token= (overrides RELAY_TOKEN)
+    --max-peers <N>          Max peers per room            [default: 16]
+    --max-frame <BYTES>      Max WebSocket frame size      [default: 1048576]
+    --max-conn-per-ip <N>    Max active connections per IP [default: 32]
+    --max-rooms <N>          Max rooms total               [default: 10000]
+    --max-rooms-per-ip <N>   Max rooms per IP              [default: 64]
+    -h, --help               Print this help
+
+ENVIRONMENT:
+    RELAY_TOKEN   Shared secret used when --token is absent; preferred in
+                  production (keeps the secret out of the process list).
+
+PRODUCTION:
+    Always set a token and put the relay behind a TLS reverse proxy
+    (wss://). The relay itself speaks plain WebSocket only.
 
 LOGS:
     Set RUST_LOG=debug for verbose output. Payloads are never logged.
@@ -82,6 +102,9 @@ struct Config {
     token: Option<String>,
     max_peers: usize,
     max_frame: usize,
+    max_conn_per_ip: usize,
+    max_rooms: usize,
+    max_rooms_per_ip: usize,
 }
 
 fn parse_args() -> Result<Config, String> {
@@ -94,9 +117,12 @@ fn parse_args() -> Result<Config, String> {
         .opt_value_from_str("--bind")
         .map_err(|e| format!("--bind: {e}"))?
         .unwrap_or_else(|| DEFAULT_BIND.to_string());
+    // --token wins over RELAY_TOKEN; the env var is the production path
+    // (a CLI secret is visible in `ps` and unit files).
     let token: Option<String> = args
         .opt_value_from_str("--token")
-        .map_err(|e| format!("--token: {e}"))?;
+        .map_err(|e| format!("--token: {e}"))?
+        .or_else(|| std::env::var("RELAY_TOKEN").ok());
     let max_peers: usize = args
         .opt_value_from_str("--max-peers")
         .map_err(|e| format!("--max-peers: {e}"))?
@@ -105,10 +131,25 @@ fn parse_args() -> Result<Config, String> {
         .opt_value_from_str("--max-frame")
         .map_err(|e| format!("--max-frame: {e}"))?
         .unwrap_or(DEFAULT_MAX_FRAME);
+    let max_conn_per_ip: usize = args
+        .opt_value_from_str("--max-conn-per-ip")
+        .map_err(|e| format!("--max-conn-per-ip: {e}"))?
+        .unwrap_or(DEFAULT_MAX_CONN_PER_IP);
+    let max_rooms: usize = args
+        .opt_value_from_str("--max-rooms")
+        .map_err(|e| format!("--max-rooms: {e}"))?
+        .unwrap_or(DEFAULT_MAX_ROOMS);
+    let max_rooms_per_ip: usize = args
+        .opt_value_from_str("--max-rooms-per-ip")
+        .map_err(|e| format!("--max-rooms-per-ip: {e}"))?
+        .unwrap_or(DEFAULT_MAX_ROOMS_PER_IP);
 
     let rest = args.finish();
     if !rest.is_empty() {
         return Err(format!("unknown argument(s): {rest:?}"));
+    }
+    if matches!(&token, Some(t) if t.is_empty()) {
+        return Err("--token / RELAY_TOKEN must not be empty".into());
     }
     if max_peers < 2 {
         return Err("--max-peers must be >= 2".into());
@@ -116,11 +157,23 @@ fn parse_args() -> Result<Config, String> {
     if max_frame < 1024 {
         return Err("--max-frame must be >= 1024".into());
     }
+    if max_conn_per_ip == 0 {
+        return Err("--max-conn-per-ip must be >= 1".into());
+    }
+    if max_rooms == 0 {
+        return Err("--max-rooms must be >= 1".into());
+    }
+    if max_rooms_per_ip == 0 {
+        return Err("--max-rooms-per-ip must be >= 1".into());
+    }
     Ok(Config {
         bind,
         token,
         max_peers,
         max_frame,
+        max_conn_per_ip,
+        max_rooms,
+        max_rooms_per_ip,
     })
 }
 
@@ -133,11 +186,18 @@ type PeerTx = mpsc::Sender<Message>;
 #[derive(Default)]
 struct Room {
     peers: HashMap<u64, PeerTx>,
+    /// IP that created the room; its per-IP room quota is released when
+    /// the room is dropped.
+    owner: Option<IpAddr>,
 }
 
 #[derive(Default)]
 struct State {
     rooms: HashMap<String, Room>,
+    /// Active connections per source IP (all paths, not only rooms).
+    conns_per_ip: HashMap<IpAddr, usize>,
+    /// Rooms created per source IP.
+    rooms_per_ip: HashMap<IpAddr, usize>,
 }
 
 struct Shared {
@@ -145,7 +205,49 @@ struct Shared {
     next_peer_id: AtomicU64,
     token: Option<String>,
     max_peers: usize,
+    max_conn_per_ip: usize,
+    max_rooms: usize,
+    max_rooms_per_ip: usize,
     bytes_forwarded: AtomicU64,
+}
+
+/// Lock the shared state, recovering from a poisoned mutex instead of
+/// panicking every subsequent task: a panicked peer task leaves the state
+/// consistent enough (all mutations are single lock scopes) to keep serving.
+fn lock_state(shared: &Shared) -> MutexGuard<'_, State> {
+    shared.state.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Release the per-IP connection slot when the connection task ends.
+struct ConnGuard {
+    shared: Arc<Shared>,
+    ip: IpAddr,
+}
+
+impl Drop for ConnGuard {
+    fn drop(&mut self) {
+        let mut st = lock_state(&self.shared);
+        if let Some(n) = st.conns_per_ip.get_mut(&self.ip) {
+            *n -= 1;
+            if *n == 0 {
+                st.conns_per_ip.remove(&self.ip);
+            }
+        }
+    }
+}
+
+/// Constant-time comparison: no early exit on mismatching bytes (token
+/// length itself is not secret — it comes from local config).
+fn token_eq(provided: &str, expected: &str) -> bool {
+    let (a, b) = (provided.as_bytes(), expected.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// Broadcast a frame to every room member except `exclude`.
@@ -154,7 +256,7 @@ struct Shared {
 /// (backpressure) and finally drop the frame for that one slow consumer.
 async fn broadcast(shared: &Arc<Shared>, room_id: &str, exclude: u64, msg: Message) {
     let targets: Vec<(u64, PeerTx)> = {
-        let st = shared.state.lock().unwrap();
+        let st = lock_state(shared);
         match st.rooms.get(room_id) {
             Some(room) => room
                 .peers
@@ -278,6 +380,35 @@ async fn handle_connection(
 ) {
     let _ = stream.set_nodelay(true);
 
+    // Per-IP connection cap, enforced before any protocol work. The guard
+    // releases the slot on every exit path below.
+    let ip = addr.ip();
+    let over_limit = {
+        let mut st = lock_state(&shared);
+        let n = st.conns_per_ip.entry(ip).or_insert(0);
+        if *n >= shared.max_conn_per_ip {
+            true
+        } else {
+            *n += 1;
+            false
+        }
+    };
+    if over_limit {
+        warn!(%addr, "rejected: too many connections from this IP");
+        respond_http(
+            &mut stream,
+            "429 Too Many Requests",
+            "text/plain",
+            "too many connections\n",
+        )
+        .await;
+        return;
+    }
+    let _conn_guard = ConnGuard {
+        shared: Arc::clone(&shared),
+        ip,
+    };
+
     let head = match tokio::time::timeout(HTTP_HEAD_TIMEOUT, read_http_head(&mut stream)).await {
         Ok(Ok(h)) => h,
         Ok(Err(e)) => {
@@ -365,7 +496,7 @@ async fn handle_ws(
     // as a fatal (non-transient) relay error instead of retrying forever.
     if let Some(expected) = &shared.token {
         let provided = query_param(query, "token").unwrap_or("");
-        if provided != expected {
+        if !token_eq(provided, expected) {
             warn!(%addr, "rejected: invalid token");
             send_text_close(&mut ws, "❌ invalid token").await;
             return;
@@ -378,23 +509,45 @@ async fn handle_ws(
     }
     let room_id = room_id.to_string();
 
-    // Join the room.
+    // Join the room, enforcing the room limits. `Err(line)` is a client-facing
+    // ❌ status line (fatal, non-transient — same contract as "room full").
     let peer_id = shared.next_peer_id.fetch_add(1, Ordering::Relaxed);
     let (tx, mut rx) = mpsc::channel::<Message>(PEER_QUEUE);
-    let count = {
-        let mut st = shared.state.lock().unwrap();
-        let room = st.rooms.entry(room_id.clone()).or_default();
-        if room.peers.len() >= shared.max_peers {
-            None
-        } else {
-            room.peers.insert(peer_id, tx.clone());
-            Some(room.peers.len())
+    let count: Result<usize, String> = {
+        let mut st = lock_state(&shared);
+        match st.rooms.get_mut(&room_id) {
+            Some(room) => {
+                if room.peers.len() >= shared.max_peers {
+                    Err(format!("❌ room full (max {})", shared.max_peers))
+                } else {
+                    room.peers.insert(peer_id, tx.clone());
+                    Ok(room.peers.len())
+                }
+            }
+            None => {
+                if st.rooms.len() >= shared.max_rooms {
+                    Err("❌ server room limit reached, try again later".to_string())
+                } else if st.rooms_per_ip.get(&addr.ip()).copied().unwrap_or(0)
+                    >= shared.max_rooms_per_ip
+                {
+                    Err("❌ too many rooms from your address".to_string())
+                } else {
+                    *st.rooms_per_ip.entry(addr.ip()).or_insert(0) += 1;
+                    let room = Room {
+                        peers: HashMap::from([(peer_id, tx.clone())]),
+                        owner: Some(addr.ip()),
+                    };
+                    st.rooms.insert(room_id.clone(), room);
+                    Ok(1)
+                }
+            }
         }
     };
     let count = match count {
-        Some(c) => c,
-        None => {
-            send_text_close(&mut ws, &format!("❌ room full (max {})", shared.max_peers)).await;
+        Ok(c) => c,
+        Err(line) => {
+            warn!(%addr, room = %room_id, %line, "rejected: room limits");
+            send_text_close(&mut ws, &line).await;
             return;
         }
     };
@@ -445,6 +598,7 @@ async fn handle_ws(
 
     // Reader loop: forward opaque ciphertext to the rest of the room.
     let mut bytes_in = 0u64;
+    let mut text_dropped = 0u64;
     loop {
         let msg = match tokio::time::timeout(IDLE_TIMEOUT, ws_stream.next()).await {
             Ok(Some(Ok(m))) => m,
@@ -464,28 +618,41 @@ async fn handle_ws(
                 shared.bytes_forwarded.fetch_add(bin.len() as u64, Ordering::Relaxed);
                 broadcast(&shared, &room_id, peer_id, Message::Binary(bin)).await;
             }
-            Message::Text(text) => {
-                // Clients only send binary, but relay non-status text verbatim
-                // just in case (the peer's client filters status lines itself).
-                broadcast(&shared, &room_id, peer_id, Message::Text(text)).await;
+            Message::Text(_) => {
+                // Anti-spoofing: legit clients send ciphertext only as BINARY
+                // frames. Forwarding client text would let a malicious peer
+                // inject fake ❌/✅/⏳ status lines into other sessions —
+                // the only text on the wire is server-generated. Drop it.
+                text_dropped += 1;
             }
             Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
             Message::Close(_) => break,
         }
     }
 
-    // Disconnect: remove from room, notify the rest, drop empty rooms.
+    // Disconnect: remove from room, notify the rest, drop empty rooms and
+    // release the owner's per-IP room quota.
     drop(tx);
     writer.abort();
     let remaining = {
-        let mut st = shared.state.lock().unwrap();
+        let mut st = lock_state(&shared);
         let mut remaining = 0;
+        let mut owner = None;
         if let Some(room) = st.rooms.get_mut(&room_id) {
             room.peers.remove(&peer_id);
             remaining = room.peers.len();
+            owner = room.owner;
         }
         if remaining == 0 {
             st.rooms.remove(&room_id);
+            if let Some(ip) = owner {
+                if let Some(n) = st.rooms_per_ip.get_mut(&ip) {
+                    *n -= 1;
+                    if *n == 0 {
+                        st.rooms_per_ip.remove(&ip);
+                    }
+                }
+            }
         }
         remaining
     };
@@ -498,7 +665,7 @@ async fn handle_ws(
         )
         .await;
     }
-    info!(%addr, peer_id, room = %room_id, remaining, bytes_in, "peer left");
+    info!(%addr, peer_id, room = %room_id, remaining, bytes_in, text_dropped, "peer left");
 }
 
 // ---------------------------------------------------------------------------
@@ -535,13 +702,23 @@ async fn main() {
         next_peer_id: AtomicU64::new(1),
         token: cfg.token,
         max_peers: cfg.max_peers,
+        max_conn_per_ip: cfg.max_conn_per_ip,
+        max_rooms: cfg.max_rooms,
+        max_rooms_per_ip: cfg.max_rooms_per_ip,
         bytes_forwarded: AtomicU64::new(0),
     });
+
+    if shared.token.is_none() {
+        warn!("no --token / RELAY_TOKEN set: the relay is open to anyone — set a token in production");
+    }
 
     info!(
         bind = %cfg.bind,
         max_peers = cfg.max_peers,
         max_frame = cfg.max_frame,
+        max_conn_per_ip = cfg.max_conn_per_ip,
+        max_rooms = cfg.max_rooms,
+        max_rooms_per_ip = cfg.max_rooms_per_ip,
         token_required = shared.token.is_some(),
         "hexatalk-relay listening"
     );

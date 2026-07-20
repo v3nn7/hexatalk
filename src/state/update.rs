@@ -22,9 +22,10 @@ use crate::media::call;
 use crate::media::notify::{notify_desktop, ringtone_start, ringtone_stop};
 use crate::media::screenshare;
 use crate::net::convex_parse::{
-    expect_null, expect_string, humanize_error, obj_f64, obj_str, obj_str_list, parse_admin_stats,
-    parse_admin_user_detail, parse_clear_conversation_result, parse_me, parse_message_reports,
-    parse_object_array, parse_profile_view, parse_server_stats, parse_session, value_as_bool,
+    expect_null, expect_string, humanize_error, obj_f64, obj_ms, obj_str, obj_str_list,
+    parse_admin_stats, parse_admin_user_detail, parse_clear_conversation_result,
+    parse_deep_link_info, parse_me, parse_message_reports, parse_object_array, parse_profile_view,
+    parse_server_stats, parse_session, value_as_bool,
 };
 use crate::net::peer;
 use crate::net::subscriptions::{mark_read_task, typing_ping_task};
@@ -64,6 +65,72 @@ fn extract_invite_code(input: &str) -> String {
         None => trimmed,
     };
     code.trim_matches('/').to_string()
+}
+
+/// Open a https URL in the user's default browser (Plus buy page / Stripe Portal).
+fn open_external_url(url: &str) {
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(url).spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    }
+}
+
+/// Extracts and percent-decodes `<slug>` out of a `vyrapp://join/<slug>`
+/// deep link. `None` for anything that doesn't match that exact shape.
+fn parse_deep_link_slug(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("vyrapp://")?.strip_prefix("join/")?;
+    let raw = rest
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim_matches('/');
+    if raw.is_empty() {
+        return None;
+    }
+    let slug = percent_decode(raw).trim().to_lowercase();
+    if slug.is_empty() { None } else { Some(slug) }
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 3 <= bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Minimal query-string escape for username in buy.vyrapp.pro?u=…
+fn urlencoding_lite(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 impl App {
@@ -141,6 +208,14 @@ impl App {
             Message::SwitchAuthMode(mode) => {
                 self.auth_mode = mode;
                 self.auth_error = None;
+                self.auth_username_error = None;
+                self.auth_password_error = None;
+                self.auth_email_error = None;
+                if mode != AuthMode::ForgotPassword {
+                    self.password_reset_code_sent = false;
+                    self.password_reset_code_input.clear();
+                    self.password_confirm_input.clear();
+                }
                 Task::none()
             }
             Message::UsernameInputChanged(value) => {
@@ -149,6 +224,7 @@ impl App {
                 if self.auth_error.is_some() {
                     self.auth_error = None;
                 }
+                self.auth_username_error = None;
                 Task::none()
             }
             Message::PasswordInputChanged(value) => {
@@ -156,6 +232,7 @@ impl App {
                 if self.auth_error.is_some() {
                     self.auth_error = None;
                 }
+                self.auth_password_error = None;
                 Task::none()
             }
             Message::DisplayNameInputChanged(value) => {
@@ -164,6 +241,27 @@ impl App {
             }
             Message::EmailInputChanged(value) => {
                 self.email_input = value;
+                if self.auth_error.is_some() {
+                    self.auth_error = None;
+                }
+                self.auth_email_error = None;
+                Task::none()
+            }
+            Message::PasswordConfirmInputChanged(value) => {
+                self.password_confirm_input = value;
+                self.auth_password_error = None;
+                if self.auth_error.is_some() {
+                    self.auth_error = None;
+                }
+                Task::none()
+            }
+            Message::PasswordResetCodeInputChanged(value) => {
+                // Keep digits only, max 6.
+                self.password_reset_code_input = value
+                    .chars()
+                    .filter(|c| c.is_ascii_digit())
+                    .take(6)
+                    .collect();
                 if self.auth_error.is_some() {
                     self.auth_error = None;
                 }
@@ -178,15 +276,95 @@ impl App {
                 if self.auth_busy {
                     return Task::none();
                 }
+
+                // ---- Forgot password (email code) ----
+                if self.auth_mode == AuthMode::ForgotPassword {
+                    let email = self.email_input.trim().to_lowercase();
+                    self.auth_email_error = None;
+                    self.auth_password_error = None;
+                    self.auth_error = None;
+                    if email.is_empty() || !email.contains('@') || !email.contains('.') {
+                        self.auth_email_error = Some("Enter a valid email address".to_string());
+                        return Task::none();
+                    }
+                    self.auth_busy = true;
+                    let mut client = client;
+                    if !self.password_reset_code_sent {
+                        return Task::perform(
+                            async move {
+                                client
+                                    .action(
+                                        "auth:requestPasswordReset",
+                                        btreemap! {
+                                            "email".to_string() => Value::String(email),
+                                        },
+                                    )
+                                    .await
+                                    .map_err(|err| humanize_error(&err.to_string()))
+                                    .and_then(expect_null)
+                            },
+                            Message::PasswordResetCodeSent,
+                        );
+                    }
+                    let code = self.password_reset_code_input.trim().to_string();
+                    let password = self.password_input.clone();
+                    let confirm = self.password_confirm_input.clone();
+                    if code.len() != 6 {
+                        self.auth_busy = false;
+                        self.auth_error = Some("Enter the 6-digit code from your email".into());
+                        return Task::none();
+                    }
+                    if password.len() < 6 {
+                        self.auth_busy = false;
+                        self.auth_password_error =
+                            Some("Password must be at least 6 characters".into());
+                        return Task::none();
+                    }
+                    if password != confirm {
+                        self.auth_busy = false;
+                        self.auth_password_error = Some("Passwords don't match".into());
+                        return Task::none();
+                    }
+                    return Task::perform(
+                        async move {
+                            client
+                                .action(
+                                    "auth:resetPasswordWithCode",
+                                    btreemap! {
+                                        "email".to_string() => Value::String(email),
+                                        "code".to_string() => Value::String(code),
+                                        "newPassword".to_string() => Value::String(password),
+                                    },
+                                )
+                                .await
+                                .map_err(|err| humanize_error(&err.to_string()))
+                                .and_then(expect_null)
+                        },
+                        Message::PasswordResetFinished,
+                    );
+                }
+
                 let username = self.username_input.trim().to_lowercase();
                 let password = self.password_input.clone();
-                if username.is_empty() || password.is_empty() {
-                    self.auth_error = Some("Enter a username and password".to_string());
+                // Per-field validation: errors land under the field they
+                // concern (the UI also keeps the submit button disabled
+                // while required fields are empty, so empty fields here are
+                // mostly the Enter-key path).
+                self.auth_username_error = None;
+                self.auth_password_error = None;
+                self.auth_email_error = None;
+                if username.is_empty() {
+                    self.auth_username_error = Some("Enter a username".to_string());
+                }
+                if password.is_empty() {
+                    self.auth_password_error = Some("Enter a password".to_string());
+                }
+                if self.auth_username_error.is_some() || self.auth_password_error.is_some() {
                     return Task::none();
                 }
                 if self.auth_mode == AuthMode::Register {
                     if username.len() < 3 {
-                        self.auth_error =
+                        self.auth_username_error =
                             Some("Username must be at least 3 characters".to_string());
                         return Task::none();
                     }
@@ -194,18 +372,20 @@ impl App {
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
                     {
-                        self.auth_error =
-                            Some("Username can only use letters, numbers, _ and -".to_string());
+                        self.auth_username_error = Some(
+                            "Username can only use letters, numbers, _ and -".to_string(),
+                        );
                         return Task::none();
                     }
                     if password.len() < 6 {
-                        self.auth_error =
+                        self.auth_password_error =
                             Some("Password must be at least 6 characters".to_string());
                         return Task::none();
                     }
                     let email = self.email_input.trim();
                     if email.is_empty() || !email.contains('@') || !email.contains('.') {
-                        self.auth_error = Some("Enter a valid email address".to_string());
+                        self.auth_email_error =
+                            Some("Enter a valid email address".to_string());
                         return Task::none();
                     }
                 }
@@ -225,6 +405,7 @@ impl App {
                 let function_name = match self.auth_mode {
                     AuthMode::Login => "auth:signIn",
                     AuthMode::Register => "auth:signUp",
+                    AuthMode::ForgotPassword => unreachable!("handled above"),
                 };
                 let mut args = btreemap! {
                     "username".to_string() => Value::String(username),
@@ -248,6 +429,34 @@ impl App {
                     },
                     Message::AuthFinished,
                 )
+            }
+            Message::PasswordResetCodeSent(Ok(())) => {
+                self.auth_busy = false;
+                self.password_reset_code_sent = true;
+                self.auth_error = None;
+                self.show_toast("If that email is registered, a code is on its way");
+                Task::none()
+            }
+            Message::PasswordResetCodeSent(Err(err)) => {
+                self.auth_busy = false;
+                self.auth_error = Some(humanize_error(&err));
+                Task::none()
+            }
+            Message::PasswordResetFinished(Ok(())) => {
+                self.auth_busy = false;
+                self.password_input.clear();
+                self.password_confirm_input.clear();
+                self.password_reset_code_input.clear();
+                self.password_reset_code_sent = false;
+                self.auth_mode = AuthMode::Login;
+                self.auth_error = None;
+                self.show_toast("Password updated — sign in with the new one");
+                Task::none()
+            }
+            Message::PasswordResetFinished(Err(err)) => {
+                self.auth_busy = false;
+                self.auth_error = Some(humanize_error(&err));
+                Task::none()
             }
             Message::AuthFinished(Ok(session)) => {
                 self.auth_busy = false;
@@ -936,6 +1145,10 @@ impl App {
                 Task::none()
             }
             Message::MessagesUpdated(messages) => {
+                // First history payload after opening a conversation -- the
+                // chat pane leaves the "Loading…" state (even for an empty
+                // history, which then shows the empty state instead).
+                self.chat_history_loading = false;
                 let messages = self.decrypt_incoming_messages(messages);
                 // Mention ping (Discord-style): mention toast + message
                 // beep when a genuinely new, recent message pings us (by
@@ -1732,6 +1945,7 @@ impl App {
                 self.active_conversation_kind = Some(summary.kind.clone());
                 self.active_conversation_peer_id = summary.peer_user_id.clone();
                 self.active_peer_name = Some(summary.title.clone());
+                self.chat_history_loading = true;
                 self.messages.clear();
                 self.pinned_messages.clear();
                 self.pins_panel_open = false;
@@ -1765,6 +1979,7 @@ impl App {
                 self.active_conversation_kind = Some("direct".to_string());
                 self.active_conversation_peer_id = peer_id;
                 self.active_peer_name = Some(title);
+                self.chat_history_loading = true;
                 self.messages.clear();
                 self.pinned_messages.clear();
                 self.pins_panel_open = false;
@@ -1785,6 +2000,7 @@ impl App {
                 ])
             }
             Message::ConversationOpened(Err(err)) => {
+                self.chat_history_loading = false;
                 self.chat_error = Some(err);
                 Task::none()
             }
@@ -1857,6 +2073,7 @@ impl App {
                 self.active_conversation_kind = Some("group".to_string());
                 self.active_conversation_peer_id = None;
                 self.active_peer_name = Some(title);
+                self.chat_history_loading = true;
                 self.messages.clear();
                 self.pinned_messages.clear();
                 self.pins_panel_open = false;
@@ -1905,6 +2122,7 @@ impl App {
                 };
                 let name = self.new_server_name_input.trim().to_string();
                 if name.is_empty() {
+                    self.server_status = Some("Enter a server name".to_string());
                     return Task::none();
                 }
                 let mut client = client;
@@ -2289,6 +2507,104 @@ impl App {
                 self.server_status = Some(err);
                 Task::none()
             }
+            Message::DeepLinkReceived(url) => {
+                let Some(slug) = parse_deep_link_slug(&url) else {
+                    eprintln!("warning: ignoring malformed deep link: {url}");
+                    return Task::none();
+                };
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                self.pending_join_slug = Some(slug.clone());
+                let mut client = client;
+                Task::perform(
+                    async move {
+                        client
+                            .query(
+                                "servers:resolveCustomSlug",
+                                btreemap! { "slug".to_string() => Value::String(slug) },
+                            )
+                            .await
+                            .map_err(|err| humanize_error(&err.to_string()))
+                            .and_then(parse_deep_link_info)
+                    },
+                    Message::DeepLinkResolved,
+                )
+            }
+            Message::DeepLinkResolved(Ok(Some(info))) => {
+                self.pending_join_server_id = info.server_id;
+                self.pending_join_server_name = info.name;
+                self.pending_join_server_icon = info.icon_url.clone();
+                self.pending_join_invite_code = info.invite_code;
+                self.pending_join_invites_paused = info.invites_paused;
+                self.show_join_dialog = true;
+                self.fetch_missing_avatars(std::iter::once(info.icon_url))
+            }
+            Message::DeepLinkResolved(Ok(None)) => {
+                self.pending_join_slug = None;
+                self.show_toast("That server link is no longer valid");
+                Task::none()
+            }
+            Message::DeepLinkResolved(Err(err)) => {
+                self.pending_join_slug = None;
+                self.show_toast(err);
+                Task::none()
+            }
+            Message::ConfirmJoinDeepLink => {
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                if self.pending_join_invite_code.is_empty() {
+                    return Task::none();
+                }
+                let invite_code = self.pending_join_invite_code.clone();
+                let mut client = client;
+                Task::perform(
+                    async move {
+                        client
+                            .mutation(
+                                "servers:joinByInviteCode",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(session.token),
+                                    "inviteCode".to_string() => Value::String(invite_code),
+                                },
+                            )
+                            .await
+                            .map_err(|err| err.to_string())
+                            .and_then(expect_string)
+                            .map(|_| ())
+                    },
+                    Message::JoinDeepLinkFinished,
+                )
+            }
+            Message::JoinDeepLinkFinished(Ok(())) => {
+                self.show_join_dialog = false;
+                self.pending_join_slug = None;
+                self.pending_join_server_id.clear();
+                self.pending_join_server_name.clear();
+                self.pending_join_server_icon.clear();
+                self.pending_join_invite_code.clear();
+                self.pending_join_invites_paused = false;
+                self.show_toast("Joined server");
+                Task::none()
+            }
+            Message::JoinDeepLinkFinished(Err(err)) => {
+                self.show_toast(err);
+                Task::none()
+            }
+            Message::DismissJoinDialog => {
+                self.show_join_dialog = false;
+                self.pending_join_slug = None;
+                self.pending_join_server_id.clear();
+                self.pending_join_server_name.clear();
+                self.pending_join_server_icon.clear();
+                self.pending_join_invite_code.clear();
+                self.pending_join_invites_paused = false;
+                Task::none()
+            }
             Message::CopyInviteCode(code) => {
                 self.show_toast("Invite code copied");
                 write_clipboard_text(code);
@@ -2320,11 +2636,10 @@ impl App {
                     "channel".to_string()
                 });
                 self.active_conversation_peer_id = None;
-                self.active_peer_name = Some(if channel.channel_type == "voice" {
-                    format!("v {}", channel.name)
-                } else {
-                    format!("#{}", channel.name)
-                });
+                // Plain channel name -- the sidebar rows and the chat header
+                // draw their own glyph ("#" / speaker), no prefix baked in.
+                self.active_peer_name = Some(channel.name.clone());
+                self.chat_history_loading = true;
                 self.messages.clear();
                 self.pinned_messages.clear();
                 self.pins_panel_open = false;
@@ -2376,6 +2691,7 @@ impl App {
                 };
                 let name = self.new_channel_name_input.trim().to_string();
                 if name.is_empty() {
+                    self.server_status = Some("Enter a channel name".to_string());
                     return Task::none();
                 }
                 let channel_type = if self.new_channel_is_voice {
@@ -3231,12 +3547,10 @@ impl App {
 
                 // Direct chats: live peerseal (Noise E2EE) for realtime, plus
                 // Convex as the durable shared history (no local vault copy).
-                if is_direct {
-                    if self.editing_message_id.take().is_some() {
-                        self.chat_error =
-                            Some("Edits aren't supported on the live secure channel yet".into());
-                        return Task::none();
-                    }
+                // Edits skip the live path entirely -- they go through the
+                // shared edit handler below, re-encrypted with TKR3 when the
+                // original was an encrypted history blob.
+                if is_direct && self.editing_message_id.is_none() {
                     let Some(peer_id) = self.active_conversation_peer_id.clone() else {
                         self.chat_error = Some("Secure channel is not running".into());
                         return Task::none();
@@ -3284,13 +3598,27 @@ impl App {
                         if !session.store_chat_history || !self.chat_store_enabled {
                             return scroll_chat_to_bottom();
                         }
-                        // Durable copy on Convex (shared history for both sides).
+                        // Durable copy on Convex (shared history for both
+                        // sides), E2EE with TKR3: attachment bytes leave the
+                        // device as ciphertext and the key travels inside the
+                        // encrypted payload envelope (same convention as
+                        // group attachments). Never fall back to plaintext.
+                        let mut payload = crypto::MessagePayload::text_only(body.clone());
+                        let (ct_bytes, att_key, att_nonce) =
+                            crypto::encrypt_attachment(&att.bytes);
+                        payload.att_key = Some(att_key);
+                        payload.att_nonce = Some(att_nonce);
+                        let body_ct =
+                            match self.dm_encrypt_for_peer(&conversation_id, &peer_id, &payload) {
+                                Ok(ct) => ct,
+                                Err(err) => {
+                                    self.chat_error = Some(err);
+                                    return scroll_chat_to_bottom();
+                                }
+                            };
                         self.send_busy = true;
                         let mut client = client;
                         let session_token = session.token.clone();
-                        let content_type = att.content_type.clone();
-                        let bytes = att.bytes;
-                        let caption = body.clone();
                         return Task::batch([
                             scroll_chat_to_bottom(),
                             Task::perform(
@@ -3308,8 +3636,8 @@ impl App {
                                     let http = reqwest::Client::new();
                                     let response = http
                                         .post(&upload_url)
-                                        .header("Content-Type", content_type.as_str())
-                                        .body(bytes)
+                                        .header("Content-Type", "application/octet-stream")
+                                        .body(ct_bytes)
                                         .send()
                                         .await
                                         .map_err(|err| format!("Upload failed: {err}"))?;
@@ -3334,8 +3662,9 @@ impl App {
                                             btreemap! {
                                                 "sessionToken".to_string() => Value::String(session_token),
                                                 "conversationId".to_string() => Value::String(conversation_id),
-                                                "body".to_string() => Value::String(caption),
+                                                "body".to_string() => Value::String(body_ct),
                                                 "attachmentStorageId".to_string() => Value::String(parsed.storage_id),
+                                                "encrypted".to_string() => Value::Boolean(true),
                                             },
                                         )
                                         .await
@@ -3355,10 +3684,20 @@ impl App {
                             None,
                             String::new(),
                         );
-                        // Durable shared history on Convex (unless storage disabled).
+                        // Durable shared history on Convex (unless storage
+                        // disabled), E2EE with TKR3 -- never plaintext.
                         if !session.store_chat_history || !self.chat_store_enabled {
                             return scroll_chat_to_bottom();
                         }
+                        let payload = crypto::MessagePayload::text_only(body.clone());
+                        let body_ct =
+                            match self.dm_encrypt_for_peer(&conversation_id, &peer_id, &payload) {
+                                Ok(ct) => ct,
+                                Err(err) => {
+                                    self.chat_error = Some(err);
+                                    return scroll_chat_to_bottom();
+                                }
+                            };
                         self.send_busy = true;
                         let mut client = client;
                         let session_token = session.token.clone();
@@ -3372,7 +3711,8 @@ impl App {
                                             btreemap! {
                                                 "sessionToken".to_string() => Value::String(session_token),
                                                 "conversationId".to_string() => Value::String(conversation_id),
-                                                "body".to_string() => Value::String(body),
+                                                "body".to_string() => Value::String(body_ct),
+                                                "encrypted".to_string() => Value::Boolean(true),
                                             },
                                         )
                                         .await
@@ -3418,6 +3758,26 @@ impl App {
                                     "Group key not ready — wait a moment and try again".into(),
                                 );
                                 return Task::none();
+                            }
+                        }
+                        if kind == "direct" {
+                            // Durable DM history is TKR3-encrypted; re-encrypt
+                            // the edit as a fresh ratchet message (the live
+                            // peerseal channel doesn't carry edits -- the
+                            // peer picks them up from Convex history).
+                            let Some(peer_id) = self.active_conversation_peer_id.clone() else {
+                                self.chat_error =
+                                    Some("Could not re-encrypt edited message".into());
+                                return Task::none();
+                            };
+                            let payload = crypto::MessagePayload::text_only(body_to_send.clone());
+                            match self.dm_encrypt_for_peer(&conv, &peer_id, &payload) {
+                                Ok(ct) => body_to_send = ct,
+                                Err(_) => {
+                                    self.chat_error =
+                                        Some("Could not re-encrypt edited message".into());
+                                    return Task::none();
+                                }
                             }
                         }
                     }
@@ -3772,7 +4132,7 @@ impl App {
                 Task::none()
             }
             Message::StoreHistoryGlobalFinished(Err(err)) => {
-                self.settings_profile_status = Some(err);
+                self.settings_profile_status = Some((err, true));
                 Task::none()
             }
             Message::ToggleHideOnline => {
@@ -3867,7 +4227,7 @@ impl App {
                 Task::none()
             }
             Message::PrivacyFlagFinished(Err(err)) => {
-                self.settings_profile_status = Some(err);
+                self.settings_profile_status = Some((err, true));
                 Task::none()
             }
             Message::SignOutOtherSessions => {
@@ -3908,7 +4268,7 @@ impl App {
                 Task::none()
             }
             Message::SignOutOthersFinished(Err(err)) => {
-                self.settings_profile_status = Some(err);
+                self.settings_profile_status = Some((err, true));
                 Task::none()
             }
             Message::ToggleStoreHistoryThisChat => {
@@ -4645,7 +5005,7 @@ impl App {
                 };
                 let name = self.new_bot_name_input.trim().to_string();
                 if name.len() < 2 {
-                    self.bot_status = Some("Bot needs a name (min 2 chars)".into());
+                    self.bot_status = Some(("Bot needs a name (min 2 chars)".into(), true));
                     return Task::none();
                 }
                 let mut client = client;
@@ -4680,7 +5040,7 @@ impl App {
             Message::BotCreateFinished(Ok((label, token))) => {
                 self.new_bot_name_input.clear();
                 self.bot_token_reveal = Some(token);
-                self.bot_status = Some(format!("Created {label} — copy token now!"));
+                self.bot_status = Some((format!("Created {label} — copy token now!"), false));
                 self.show_toast("Bot created");
                 // refresh list
                 let client = self.client.clone();
@@ -4715,7 +5075,7 @@ impl App {
                 Task::none()
             }
             Message::BotCreateFinished(Err(err)) => {
-                self.bot_status = Some(err);
+                self.bot_status = Some((err, true));
                 Task::none()
             }
             Message::RefreshMyBots => {
@@ -4767,7 +5127,7 @@ impl App {
                     return Task::none();
                 };
                 let Some(server) = self.selected_server.clone() else {
-                    self.bot_status = Some("Open a server first".into());
+                    self.bot_status = Some(("Open a server first".into(), true));
                     return Task::none();
                 };
                 let username = self.bot_invite_username_input.trim().to_string();
@@ -4800,7 +5160,7 @@ impl App {
                 Task::none()
             }
             Message::InviteBotFinished(Err(err)) => {
-                self.bot_status = Some(err);
+                self.bot_status = Some((err, true));
                 Task::none()
             }
             Message::RegenerateBotToken(bot_id) => {
@@ -4837,11 +5197,11 @@ impl App {
             }
             Message::BotTokenFinished(Ok(token)) => {
                 self.bot_token_reveal = Some(token);
-                self.bot_status = Some("New token ready — copy it now".into());
+                self.bot_status = Some(("New token ready — copy it now".into(), false));
                 Task::none()
             }
             Message::BotTokenFinished(Err(err)) => {
-                self.bot_status = Some(err);
+                self.bot_status = Some((err, true));
                 Task::none()
             }
             Message::DeleteBot(bot_id) => {
@@ -4874,7 +5234,7 @@ impl App {
                 Task::done(Message::RefreshMyBots)
             }
             Message::DeleteBotFinished(Err(err)) => {
-                self.bot_status = Some(err);
+                self.bot_status = Some((err, true));
                 Task::none()
             }
 
@@ -5055,6 +5415,11 @@ impl App {
                 let next = !both_muted;
                 self.call_muted.store(next, Ordering::Relaxed);
                 self.call_output_muted.store(next, Ordering::Relaxed);
+                Task::none()
+            }
+            Message::ToggleDeafen => {
+                let current = self.call_output_muted.load(Ordering::Relaxed);
+                self.call_output_muted.store(!current, Ordering::Relaxed);
                 Task::none()
             }
             Message::CallActionFinished(Err(err)) => {
@@ -5444,8 +5809,9 @@ impl App {
             }
             Message::ProfileLoaded(Ok(profile)) => {
                 let avatar_url = profile.avatar_image_url.clone();
+                let banner_url = profile.profile_banner_url.clone();
                 self.viewing_profile = Some(profile);
-                self.fetch_missing_avatars(std::iter::once(avatar_url))
+                self.fetch_missing_avatars([avatar_url, banner_url].into_iter())
             }
             Message::ProfileLoaded(Err(err)) => {
                 self.profile_error = Some(err);
@@ -5479,7 +5845,12 @@ impl App {
                 self.settings_open = true;
                 self.settings_category = SettingsCategory::Account;
                 self.bot_status = None;
-                Task::batch([Task::done(Message::RefreshMyBots)])
+                self.plus_busy_status = None;
+                self.plus_checkout_busy = false;
+                Task::batch([
+                    Task::done(Message::RefreshMyBots),
+                    Task::done(Message::PlusRefreshStatus),
+                ])
             }
             Message::CloseSettings => {
                 self.settings_open = false;
@@ -5489,6 +5860,9 @@ impl App {
                 self.settings_category = category;
                 if category == SettingsCategory::Bots {
                     return Task::done(Message::RefreshMyBots);
+                }
+                if category == SettingsCategory::Plus {
+                    return Task::done(Message::PlusRefreshStatus);
                 }
                 Task::none()
             }
@@ -5517,7 +5891,7 @@ impl App {
                 };
                 let display_name = self.settings_display_name_input.trim().to_string();
                 if display_name.is_empty() {
-                    self.settings_profile_status = Some("Display name can't be empty".to_string());
+                    self.settings_profile_status = Some(("Display name can't be empty".to_string(), true));
                     return Task::none();
                 }
                 let status_message = self.settings_status_input.trim().to_string();
@@ -5551,11 +5925,11 @@ impl App {
                     session.bio = self.settings_bio_input.trim().to_string();
                     session.avatar_color = self.settings_avatar_color.clone();
                 }
-                self.settings_profile_status = Some("Profile saved".to_string());
+                self.settings_profile_status = Some(("Profile saved".to_string(), false));
                 Task::none()
             }
             Message::ProfileSaveFinished(Err(err)) => {
-                self.settings_profile_status = Some(err);
+                self.settings_profile_status = Some((err, true));
                 Task::none()
             }
             Message::SettingsCurrentPasswordChanged(value) => {
@@ -5578,26 +5952,24 @@ impl App {
                     return Task::none();
                 };
                 if self.settings_current_password_input.is_empty() {
-                    self.settings_password_status = Some("Enter your current password".to_string());
+                    self.settings_password_status = Some(("Enter your current password".to_string(), true));
                     return Task::none();
                 }
                 if self.settings_new_password_input.len() < 6 {
-                    self.settings_password_status =
-                        Some("New password must be at least 6 characters".to_string());
+                    self.settings_password_status = Some(("New password must be at least 6 characters".to_string(), true));
                     return Task::none();
                 }
                 if self.settings_new_password_input != self.settings_confirm_password_input {
-                    self.settings_password_status = Some("Passwords don't match".to_string());
+                    self.settings_password_status = Some(("Passwords don't match".to_string(), true));
                     return Task::none();
                 }
                 if self.settings_new_password_input == self.settings_current_password_input {
-                    self.settings_password_status =
-                        Some("New password must be different from the current one".to_string());
+                    self.settings_password_status = Some(("New password must be different from the current one".to_string(), true));
                     return Task::none();
                 }
                 let current_password = self.settings_current_password_input.clone();
                 let new_password = self.settings_new_password_input.clone();
-                self.settings_password_status = Some("Changing password…".to_string());
+                self.settings_password_status = Some(("Changing password…".to_string(), false));
                 let mut client = client;
                 Task::perform(
                     async move {
@@ -5621,14 +5993,138 @@ impl App {
                 self.settings_current_password_input.clear();
                 self.settings_new_password_input.clear();
                 self.settings_confirm_password_input.clear();
-                self.settings_password_status = Some("Password changed".to_string());
+                self.settings_password_status = Some(("Password changed".to_string(), false));
                 self.show_toast("Password changed");
                 Task::none()
             }
             Message::PasswordChangeFinished(Err(err)) => {
-                self.settings_password_status = Some(humanize_error(&err));
+                self.settings_password_status = Some((humanize_error(&err), true));
                 Task::none()
             }
+
+            Message::PlusSubscribe => {
+                // Purchase landing lives on the buy subdomain (not in-app Stripe form).
+                // Pass HexaTalk username so the page can prefill / map the account.
+                let username = self
+                    .session
+                    .as_ref()
+                    .map(|s| s.username.clone())
+                    .unwrap_or_default();
+                let mut url = "https://buy.vyrapp.pro".to_string();
+                if !username.is_empty() {
+                    url.push_str(&format!(
+                        "?u={}",
+                        urlencoding_lite(&username)
+                    ));
+                }
+                self.plus_checkout_busy = false;
+                self.plus_busy_status = Some(
+                    "Opened buy.vyrapp.pro — finish payment, then refresh status.".into(),
+                );
+                open_external_url(&url);
+                Task::none()
+            }
+            Message::PlusManageBilling => {
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                self.plus_checkout_busy = true;
+                self.plus_busy_status = Some("Opening billing portal…".into());
+                let mut client = client;
+                Task::perform(
+                    async move {
+                        let result = client
+                            .action(
+                                "plus:createBillingPortal",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(session.token),
+                                },
+                            )
+                            .await
+                            .map_err(|err| err.to_string())?;
+                        match result {
+                            FunctionResult::Value(Value::Object(obj)) => {
+                                let url = obj_str(&obj, "url");
+                                if url.is_empty() {
+                                    Err("Stripe did not return a portal URL".into())
+                                } else {
+                                    Ok(url)
+                                }
+                            }
+                            FunctionResult::ErrorMessage(err) => Err(err),
+                            FunctionResult::ConvexError(err) => Err(format!("{err:?}")),
+                            _ => Err("Unexpected server response".into()),
+                        }
+                    },
+                    Message::PlusCheckoutUrl,
+                )
+            }
+            Message::PlusCheckoutUrl(Ok(url)) => {
+                self.plus_checkout_busy = false;
+                self.plus_busy_status =
+                    Some("Browser opened — finish payment, then refresh status.".into());
+                open_external_url(&url);
+                Task::none()
+            }
+            Message::PlusCheckoutUrl(Err(err)) => {
+                self.plus_checkout_busy = false;
+                self.plus_busy_status = Some(humanize_error(&err));
+                Task::none()
+            }
+            Message::PlusRefreshStatus => {
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                let token = session.token.clone();
+                let mut client = client;
+                Task::perform(
+                    async move {
+                        let result = client
+                            .query(
+                                "plus:getMyStatus",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(token),
+                                },
+                            )
+                            .await
+                            .map_err(|err| err.to_string())?;
+                        match result {
+                            FunctionResult::Value(Value::Object(obj)) => {
+                                let active = obj.get("active").map(value_as_bool).unwrap_or(false);
+                                let expires = obj_ms(&obj, "expiresAt");
+                                Ok((active, expires))
+                            }
+                            FunctionResult::ErrorMessage(err) => Err(err),
+                            FunctionResult::ConvexError(err) => Err(format!("{err:?}")),
+                            _ => Err("Unexpected server response".into()),
+                        }
+                    },
+                    Message::PlusStatusRefreshed,
+                )
+            }
+            Message::PlusStatusRefreshed(Ok((active, expires))) => {
+                if let Some(session) = &mut self.session {
+                    session.plus_active = active;
+                    session.plus_expires_at = expires;
+                }
+                self.plus_busy_status = Some(if active {
+                    "Plus is active.".into()
+                } else {
+                    "Plus is not active.".into()
+                });
+                Task::none()
+            }
+            Message::PlusStatusRefreshed(Err(err)) => {
+                self.plus_busy_status = Some(humanize_error(&err));
+                Task::none()
+            }
+
             Message::SettingsInputDeviceSelected(name) => {
                 self.settings_input_device = if name.is_empty() { None } else { Some(name) };
                 self.persist_settings();
@@ -5646,10 +6142,17 @@ impl App {
             }
 
             Message::AvatarImageLoaded(url, Ok(bytes)) => {
+                self.avatar_image_failed.remove(&url);
                 self.avatar_image_cache.insert(url, Arc::from(bytes));
                 Task::none()
             }
-            Message::AvatarImageLoaded(_, Err(_)) => Task::none(),
+            // Remember the failure so the UI stops showing the row as
+            // "loading image..." forever (view-model reads this set and
+            // renders the "[image unavailable]" fallback instead).
+            Message::AvatarImageLoaded(url, Err(_)) => {
+                self.avatar_image_failed.insert(url);
+                Task::none()
+            }
             Message::PickAvatarImage => {
                 if self.avatar_upload_busy {
                     return Task::none();
@@ -5686,7 +6189,7 @@ impl App {
             }
             Message::AvatarFilePicked(AvatarPick::TooLarge) => {
                 self.avatar_upload_busy = false;
-                self.settings_profile_status = Some("Image must be smaller than 2MB".to_string());
+                self.settings_profile_status = Some(("Image must be smaller than 2MB".to_string(), true));
                 Task::none()
             }
             Message::AvatarFilePicked(AvatarPick::Ready(bytes, content_type)) => {
@@ -5698,7 +6201,7 @@ impl App {
                     self.avatar_upload_busy = false;
                     return Task::none();
                 };
-                self.settings_profile_status = Some("Uploading...".to_string());
+                self.settings_profile_status = Some(("Uploading...".to_string(), false));
                 let mut client = client;
                 Task::perform(
                     async move {
@@ -5747,7 +6250,7 @@ impl App {
             }
             Message::AvatarUploadFinished(Ok(url)) => {
                 self.avatar_upload_busy = false;
-                self.settings_profile_status = Some("Photo updated".to_string());
+                self.settings_profile_status = Some(("Photo updated".to_string(), false));
                 if let Some(session) = &mut self.session {
                     session.avatar_image_url = url.clone();
                 }
@@ -5755,7 +6258,7 @@ impl App {
             }
             Message::AvatarUploadFinished(Err(err)) => {
                 self.avatar_upload_busy = false;
-                self.settings_profile_status = Some(err);
+                self.settings_profile_status = Some((err, true));
                 Task::none()
             }
             Message::RemoveAvatarImage => {
@@ -5786,11 +6289,11 @@ impl App {
                 if let Some(session) = &mut self.session {
                     session.avatar_image_url.clear();
                 }
-                self.settings_profile_status = Some("Photo removed".to_string());
+                self.settings_profile_status = Some(("Photo removed".to_string(), false));
                 Task::none()
             }
             Message::AvatarRemoveFinished(Err(err)) => {
-                self.settings_profile_status = Some(err);
+                self.settings_profile_status = Some((err, true));
                 Task::none()
             }
 

@@ -12,6 +12,32 @@ pub(crate) fn notify_desktop(summary: &str, body: &str) {
         .show();
 }
 
+/// Rate-limited variant of `notify_desktop`: toasts with the same `summary`
+/// are suppressed when they arrive faster than `min_interval`, so a burst of
+/// incoming messages can't flood the OS notification center. First toast of
+/// each kind always goes through immediately.
+pub(crate) fn notify_desktop_throttled(
+    summary: &str,
+    body: &str,
+    min_interval: std::time::Duration,
+) {
+    use std::sync::{Mutex, OnceLock};
+    static LAST_SHOWN: OnceLock<
+        Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    > = OnceLock::new();
+    let now = std::time::Instant::now();
+    let map = LAST_SHOWN.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    if let Ok(mut times) = map.lock() {
+        if let Some(last) = times.get(summary) {
+            if now.duration_since(*last) < min_interval {
+                return;
+            }
+        }
+        times.insert(summary.to_string(), now);
+    }
+    notify_desktop(summary, body);
+}
+
 /// Incoming-call ringtone: `assets/sounds/callsound.mp3`, embedded into the
 /// binary at compile time and looped through the Win32 MCI (which plays MP3
 /// natively, so no decoder dependency is needed). The file is materialized
@@ -48,10 +74,23 @@ fn materialize_sound(filename: &str, bytes: &[u8]) -> Option<std::path::PathBuf>
     Some(path)
 }
 
-/// Plays the notification sound once. Every call restarts playback cleanly,
-/// so rapid consecutive notifications retrigger instead of stacking.
+/// Plays the notification sound once. Rapid consecutive notifications are
+/// throttled (one playback per `NOTIFY_SOUND_MIN_INTERVAL`): each play is a
+/// close/open/play MCI sequence, and retriggering it faster than that just
+/// restarts the first milliseconds of the sample over and over, which reads
+/// as stutter rather than "more notifications".
 #[cfg(windows)]
 pub(crate) fn notification_sound() {
+    use std::sync::{Mutex, OnceLock};
+    static LAST_PLAYED: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
+    const NOTIFY_SOUND_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(800);
+    let slot = LAST_PLAYED.get_or_init(|| Mutex::new(None));
+    if let Ok(mut last) = slot.lock() {
+        if last.is_some_and(|t| t.elapsed() < NOTIFY_SOUND_MIN_INTERVAL) {
+            return;
+        }
+        *last = Some(std::time::Instant::now());
+    }
     let Some(path) = materialize_sound("hexatalk_notification.mp3", NOTIFICATION_BYTES) else {
         return;
     };

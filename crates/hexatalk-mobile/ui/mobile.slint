@@ -1,0 +1,947 @@
+// HexaTalk mobile UI — Violet Night (same tokens as desktop ui/theme.slint).
+// Native TextInput → system IME + long-press Paste on Android (Slint backend).
+
+// App mark — same launcher icon, not a letter "H".
+component AppLogo inherits Rectangle {
+    in property <length> size: 40px;
+    width: root.size;
+    height: root.size;
+    border-radius: root.size / 2;
+    background: #141019;
+    clip: true;
+    Image {
+        width: parent.width;
+        height: parent.height;
+        source: @image-url("../assets/hexatalkicon.png");
+        image-fit: cover;
+    }
+}
+
+export struct ConvItem {
+    id: string,
+    title: string,
+    kind: string,
+    unread: bool,
+    initial: string,
+}
+
+export struct FriendItem {
+    user_id: string,
+    label: string,
+    subtitle: string,
+    online: bool,
+    initial: string,
+}
+
+export struct RequestItem {
+    request_id: string,
+    label: string,
+    note: string,
+}
+
+export struct ServerItem {
+    server_id: string,
+    name: string,
+    is_owner: bool,
+    invite: string,
+    initial: string,
+}
+
+export struct ChannelItem {
+    conversation_id: string,
+    name: string,
+    is_voice: bool,
+}
+
+export struct MsgItem {
+    id: string,
+    author: string,
+    body: string,
+    meta: string,
+    mine: bool,
+    plus: bool,
+}
+
+export enum Screen { Auth, Home, Chat, Server, Profile }
+export enum HomeTab { Chats, Friends, Servers }
+
+export component AppWindow inherits Window {
+    title: "HexaTalk";
+    preferred-width: 390px;
+    preferred-height: 780px;
+    background: #221d2c;
+
+    // ---- state from Rust ----
+    in-out property <Screen> screen: Screen.Auth;
+    in-out property <HomeTab> home_tab: HomeTab.Chats;
+    in-out property <bool> busy: false;
+    in-out property <string> banner: "";
+    in-out property <bool> banner_error: false;
+
+    // auth
+    in-out property <bool> sign_up: false;
+    in-out property <bool> forgot_password: false;
+    in-out property <bool> password_reset_code_sent: false;
+    in-out property <string> username: "";
+    in-out property <string> password: "";
+    in-out property <string> password_confirm: "";
+    in-out property <string> reset_code: "";
+    in-out property <string> display_name: "";
+    in-out property <string> email: "";
+    in-out property <bool> show_password: false;
+
+    // session
+    in property <string> my_name: "";
+    in property <string> my_username: "";
+
+    // lists
+    in property <[ConvItem]> conversations: [];
+    in property <[FriendItem]> friends: [];
+    in property <[RequestItem]> incoming: [];
+    in property <[ServerItem]> servers: [];
+    in property <[ChannelItem]> channels: [];
+    in property <[MsgItem]> messages: [];
+    in-out property <string> search: "";
+    in-out property <string> draft: "";
+    in property <string> chat_title: "";
+    in property <string> server_name: "";
+    in-out property <string> add_friend: "";
+    in-out property <string> friend_note: "";
+    in-out property <string> new_server: "";
+    in-out property <string> join_code: "";
+    in-out property <string> profile_display: "";
+    in-out property <string> profile_status: "";
+    in-out property <string> profile_bio: "";
+
+    // callbacks
+    callback submit_auth();
+    callback toggle_sign_up();
+    callback toggle_forgot_password();
+    callback set_home_tab(HomeTab);
+    callback open_chat(string, string);
+    callback open_dm(string, string);
+    callback open_server(string, string);
+    callback open_channel(string, string);
+    callback go_back();
+    callback send_message();
+    callback send_friend_request();
+    callback accept_request(string);
+    callback decline_request(string);
+    callback create_server();
+    callback join_server();
+    callback open_profile();
+    callback save_profile();
+    callback sign_out();
+    callback draft_changed(string);
+
+    // ---------- helpers ----------
+    pure function muted() -> color { #9c94ad }
+    pure function text() -> color { #e3deee }
+    pure function accent() -> color { #8b5cf6 }
+    pure function panel() -> color { #1c1726 }
+    pure function elevated() -> color { #2c2538 }
+    pure function border() -> color { #383045 }
+    pure function tertiary() -> color { #141019 }
+
+    VerticalLayout {
+        padding: 0;
+        spacing: 0;
+
+        // safe-area-ish top
+        Rectangle { height: 28px; background: tertiary(); }
+
+        if banner != "": Rectangle {
+            background: banner_error ? #3a1820 : #2c2538;
+            height: banner_lab.preferred-height + 16px;
+            banner_lab := Text {
+                x: 14px; y: 8px; width: parent.width - 28px;
+                text: banner;
+                color: banner_error ? #f87171 : text();
+                font-size: 13px;
+                wrap: word-wrap;
+            }
+        }
+
+        // ================= AUTH =================
+        if screen == Screen.Auth: Flickable {
+            viewport-height: auth_col.preferred-height;
+            auth_col := VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+                alignment: start;
+
+                Rectangle { height: 24px; }
+                HorizontalLayout {
+                    alignment: center;
+                    AppLogo { size: 72px; }
+                }
+                Text {
+                    text: "HexaTalk";
+                    color: text();
+                    font-size: 26px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "Chat · friends · servers";
+                    color: muted();
+                    font-size: 14px;
+                    horizontal-alignment: center;
+                }
+                Rectangle { height: 12px; }
+
+                Rectangle {
+                    background: panel();
+                    border-radius: 16px;
+                    border-width: 1px;
+                    border-color: border();
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 8px;
+
+                        Text {
+                            text: forgot_password
+                                ? "Reset password"
+                                : (sign_up ? "Create account" : "Welcome back");
+                            color: text();
+                            font-size: 18px;
+                            font-weight: 600;
+                        }
+                        Text {
+                            text: forgot_password
+                                ? (password_reset_code_sent
+                                    ? "Enter the code from your email"
+                                    : "We'll email a code to your verified address")
+                                : (sign_up ? "Pick a username and password" : "Sign in to continue");
+                            color: muted();
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+
+                        if !forgot_password: Text { text: "USERNAME"; color: muted(); font-size: 11px; font-weight: 600; }
+                        if !forgot_password: TextInput {
+                            text <=> username;
+                            font-size: 16px;
+                            color: text();
+                            selection-background-color: accent();
+                            height: 44px;
+                        }
+
+                        if sign_up && !forgot_password: Text { text: "DISPLAY NAME"; color: muted(); font-size: 11px; font-weight: 600; }
+                        if sign_up && !forgot_password: TextInput {
+                            text <=> display_name;
+                            font-size: 16px;
+                            color: text();
+                            height: 44px;
+                        }
+
+                        if sign_up || forgot_password: Text { text: "EMAIL"; color: muted(); font-size: 11px; font-weight: 600; }
+                        if sign_up || forgot_password: TextInput {
+                            text <=> email;
+                            input-type: InputType.text;
+                            font-size: 16px;
+                            color: text();
+                            height: 44px;
+                        }
+
+                        if forgot_password && password_reset_code_sent: Text { text: "CODE"; color: muted(); font-size: 11px; font-weight: 600; }
+                        if forgot_password && password_reset_code_sent: TextInput {
+                            text <=> reset_code;
+                            input-type: InputType.number;
+                            font-size: 16px;
+                            color: text();
+                            height: 44px;
+                        }
+
+                        if !forgot_password || password_reset_code_sent: Text {
+                            text: forgot_password ? "NEW PASSWORD" : "PASSWORD";
+                            color: muted(); font-size: 11px; font-weight: 600;
+                        }
+                        if !forgot_password || password_reset_code_sent: TextInput {
+                            text <=> password;
+                            input-type: root.show_password ? InputType.text : InputType.password;
+                            font-size: 16px;
+                            color: text();
+                            height: 44px;
+                        }
+
+                        if forgot_password && password_reset_code_sent: Text { text: "CONFIRM"; color: muted(); font-size: 11px; font-weight: 600; }
+                        if forgot_password && password_reset_code_sent: TextInput {
+                            text <=> password_confirm;
+                            input-type: root.show_password ? InputType.text : InputType.password;
+                            font-size: 16px;
+                            color: text();
+                            height: 44px;
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            TouchArea {
+                                height: 36px;
+                                width: 120px;
+                                Rectangle {
+                                    background: elevated();
+                                    border-radius: 10px;
+                                    border-width: 1px;
+                                    border-color: border();
+                                    Text {
+                                        width: 100%; height: 100%;
+                                        text: show_password ? "Hide" : "Show";
+                                        color: text();
+                                        font-size: 13px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                clicked => { show_password = !show_password; }
+                            }
+                        }
+
+                        Rectangle { height: 8px; }
+                        // Always accept taps (except while in-flight). Gating on
+                        // `username != ""` broke Android IME: the bound property
+                        // can lag the visible field, so the button stayed dead
+                        // even with text on screen. Rust re-validates empties.
+                        TouchArea {
+                            height: 48px;
+                            enabled: !busy;
+                            Rectangle {
+                                background: busy ? #6939d1 : accent();
+                                border-radius: 12px;
+                                Text {
+                                    width: 100%; height: 100%;
+                                    text: busy
+                                        ? "Please wait…"
+                                        : (forgot_password
+                                            ? (password_reset_code_sent ? "Set new password" : "Send reset code")
+                                            : (sign_up ? "Create account" : "Sign in"));
+                                    color: white;
+                                    font-size: 16px;
+                                    font-weight: 600;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            clicked => { submit_auth(); }
+                        }
+
+                        if !forgot_password && !sign_up: TouchArea {
+                            height: 32px;
+                            Text {
+                                width: 100%; height: 100%;
+                                text: "Forgot password?";
+                                color: #c4b5fd;
+                                font-size: 13px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            clicked => { toggle_forgot_password(); }
+                        }
+
+                        TouchArea {
+                            height: 36px;
+                            Text {
+                                width: 100%; height: 100%;
+                                text: forgot_password
+                                    ? "Back to sign in"
+                                    : (sign_up ? "Already have an account?  Sign in" : "New here?  Create account");
+                                color: #c4b5fd;
+                                font-size: 13px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            clicked => {
+                                if (forgot_password) {
+                                    toggle_forgot_password();
+                                } else {
+                                    toggle_sign_up();
+                                }
+                            }
+                        }
+                        Text {
+                            text: "Tip: long-press a field → Paste (system keyboard).";
+                            color: muted();
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+                Rectangle { height: 40px; }
+            }
+        }
+
+        // ================= HOME =================
+        if screen == Screen.Home: VerticalLayout {
+            // header
+            Rectangle {
+                background: panel();
+                height: 64px;
+                HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 14px;
+                    spacing: 10px;
+                    alignment: center;
+                    AppLogo { size: 40px; }
+                    VerticalLayout {
+                        spacing: 2px;
+                        Text {
+                            text: home_tab == HomeTab.Chats ? "Chats" : (home_tab == HomeTab.Friends ? "Friends" : "Servers");
+                            color: text(); font-size: 20px; font-weight: 700;
+                        }
+                        Text { text: "@" + my_username; color: muted(); font-size: 12px; }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    TouchArea {
+                        width: 40px; height: 40px;
+                        Rectangle {
+                            background: elevated(); border-radius: 20px;
+                            Text {
+                                width: 100%; height: 100%; text: "⚙"; color: text();
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                        }
+                        clicked => { open_profile(); }
+                    }
+                }
+            }
+
+            // search (native)
+            Rectangle {
+                height: 52px;
+                background: #221d2c;
+                VerticalLayout {
+                    padding-left: 14px; padding-right: 14px; padding-top: 6px;
+                    Rectangle {
+                        background: tertiary();
+                        border-radius: 22px;
+                        border-width: 1px;
+                        border-color: border();
+                        height: 40px;
+                        HorizontalLayout {
+                            padding-left: 14px; padding-right: 14px;
+                            TextInput {
+                                text <=> search;
+                                // placeholder: "Search…";
+                                font-size: 15px;
+                                color: text();
+                                vertical-stretch: 1;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // content
+            Flickable {
+                vertical-stretch: 1;
+                viewport-height: list_col.preferred-height;
+                list_col := VerticalLayout {
+                    padding: 12px;
+                    spacing: 8px;
+
+                    if home_tab == HomeTab.Chats: VerticalLayout {
+                        spacing: 8px;
+                        for c in conversations: TouchArea {
+                            height: 64px;
+                            clicked => { open_chat(c.id, c.title); }
+                            Rectangle {
+                                background: elevated();
+                                border-radius: 14px;
+                                border-width: 1px;
+                                border-color: border();
+                                HorizontalLayout {
+                                    padding: 10px;
+                                    spacing: 10px;
+                                    alignment: center;
+                                    Rectangle {
+                                        width: 44px; height: 44px; border-radius: 22px; background: #3d3452;
+                                        Text {
+                                            width: 100%; height: 100%;
+                                            text: c.initial;
+                                            color: white; font-size: 16px; font-weight: 600;
+                                            horizontal-alignment: center; vertical-alignment: center;
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        spacing: 2px;
+                                        Text { text: c.title; color: text(); font-size: 15px; font-weight: 600; overflow: elide; }
+                                        Text { text: c.kind; color: muted(); font-size: 12px; }
+                                    }
+                                    if c.unread: Text { text: "●"; color: accent(); font-size: 12px; vertical-alignment: center; }
+                                }
+                            }
+                        }
+                    }
+                    if home_tab == HomeTab.Chats && conversations.length == 0: Text {
+                        text: "No chats yet — add a friend and message them.";
+                        color: muted(); font-size: 14px; horizontal-alignment: center;
+                    }
+
+                    if home_tab == HomeTab.Friends: VerticalLayout {
+                        spacing: 8px;
+                        Text { text: "Add friend"; color: muted(); font-size: 12px; font-weight: 600; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Rectangle {
+                                horizontal-stretch: 1; background: tertiary(); border-radius: 10px; height: 42px;
+                                border-width: 1px; border-color: border();
+                                HorizontalLayout {
+                                    padding-left: 10px; padding-right: 10px;
+                                    TextInput {
+                                        text <=> add_friend;
+                                        // placeholder: "username";
+                                        font-size: 15px; color: text();
+                                    }
+                                }
+                            }
+                            TouchArea {
+                                width: 72px; height: 42px;
+                                Rectangle {
+                                    background: accent(); border-radius: 10px;
+                                    Text {
+                                        width: 100%; height: 100%; text: "Add"; color: white;
+                                        font-size: 14px; font-weight: 600;
+                                        horizontal-alignment: center; vertical-alignment: center;
+                                    }
+                                }
+                                clicked => { send_friend_request(); }
+                            }
+                        }
+                        TextInput {
+                            text <=> friend_note;
+                            // placeholder: "Optional note";
+                            font-size: 14px; color: text();
+                            height: 40px;
+                        }
+
+                        if incoming.length > 0: Text {
+                            text: "Incoming"; color: #c4b5fd; font-size: 13px; font-weight: 600;
+                        }
+                        for r in incoming: Rectangle {
+                            background: elevated(); border-radius: 12px; border-width: 1px; border-color: border();
+                            VerticalLayout {
+                                padding: 10px; spacing: 6px;
+                                Text { text: r.label; color: text(); font-size: 14px; font-weight: 600; }
+                                if r.note != "": Text { text: r.note; color: muted(); font-size: 12px; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    TouchArea {
+                                        height: 34px; width: 80px;
+                                        Rectangle {
+                                            background: accent(); border-radius: 8px;
+                                            Text {
+                                                width: 100%; height: 100%; text: "Accept"; color: white;
+                                                font-size: 13px; horizontal-alignment: center; vertical-alignment: center;
+                                            }
+                                        }
+                                        clicked => { accept_request(r.request_id); }
+                                    }
+                                    TouchArea {
+                                        height: 34px; width: 80px;
+                                        Rectangle {
+                                            background: elevated(); border-radius: 8px; border-width: 1px; border-color: border();
+                                            Text {
+                                                width: 100%; height: 100%; text: "Decline"; color: text();
+                                                font-size: 13px; horizontal-alignment: center; vertical-alignment: center;
+                                            }
+                                        }
+                                        clicked => { decline_request(r.request_id); }
+                                    }
+                                }
+                            }
+                        }
+
+                        for f in friends: TouchArea {
+                            height: 64px;
+                            clicked => { open_dm(f.user_id, f.label); }
+                            Rectangle {
+                                background: elevated(); border-radius: 14px; border-width: 1px; border-color: border();
+                                HorizontalLayout {
+                                    padding: 10px; spacing: 10px; alignment: center;
+                                    Rectangle {
+                                        width: 44px; height: 44px; border-radius: 22px; background: #3d3452;
+                                        Text {
+                                            width: 100%; height: 100%;
+                                            text: f.initial;
+                                            color: white; font-size: 16px; font-weight: 600;
+                                            horizontal-alignment: center; vertical-alignment: center;
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        Text { text: f.label; color: text(); font-size: 15px; font-weight: 600; overflow: elide; }
+                                        Text {
+                                            text: f.subtitle + (f.online ? " · Online" : " · Offline");
+                                            color: f.online ? #23a55a : muted(); font-size: 12px;
+                                        }
+                                    }
+                                    Text { text: "Message ›"; color: #c4b5fd; font-size: 12px; vertical-alignment: center; }
+                                }
+                            }
+                        }
+                    }
+
+                    if home_tab == HomeTab.Servers: VerticalLayout {
+                        spacing: 8px;
+                        Text { text: "Create server"; color: muted(); font-size: 12px; font-weight: 600; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Rectangle {
+                                horizontal-stretch: 1; height: 42px; background: tertiary();
+                                border-radius: 10px; border-width: 1px; border-color: border();
+                                HorizontalLayout {
+                                    padding-left: 10px; padding-right: 10px;
+                                    TextInput { text <=> new_server; font-size: 15px; color: text(); }
+                                }
+                            }
+                            TouchArea {
+                                width: 80px; height: 42px;
+                                Rectangle {
+                                    background: accent(); border-radius: 10px;
+                                    Text {
+                                        width: 100%; height: 100%; text: "Create"; color: white;
+                                        font-size: 14px; font-weight: 600;
+                                        horizontal-alignment: center; vertical-alignment: center;
+                                    }
+                                }
+                                clicked => { create_server(); }
+                            }
+                        }
+                        Text { text: "Join with invite"; color: muted(); font-size: 12px; font-weight: 600; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Rectangle {
+                                horizontal-stretch: 1; height: 42px; background: tertiary();
+                                border-radius: 10px; border-width: 1px; border-color: border();
+                                HorizontalLayout {
+                                    padding-left: 10px; padding-right: 10px;
+                                    TextInput {
+                                        text <=> join_code;
+                                        // placeholder: "Code or hexatalk://invite/…";
+                                        font-size: 15px; color: text();
+                                    }
+                                }
+                            }
+                            TouchArea {
+                                width: 72px; height: 42px;
+                                Rectangle {
+                                    background: accent(); border-radius: 10px;
+                                    Text {
+                                        width: 100%; height: 100%; text: "Join"; color: white;
+                                        font-size: 14px; font-weight: 600;
+                                        horizontal-alignment: center; vertical-alignment: center;
+                                    }
+                                }
+                                clicked => { join_server(); }
+                            }
+                        }
+                        Text {
+                            text: "Long-press the invite field → Paste.";
+                            color: muted(); font-size: 12px; wrap: word-wrap;
+                        }
+                        for s in servers: TouchArea {
+                            height: 64px;
+                            clicked => { open_server(s.server_id, s.name); }
+                            Rectangle {
+                                background: elevated(); border-radius: 14px; border-width: 1px; border-color: border();
+                                HorizontalLayout {
+                                    padding: 10px; spacing: 10px; alignment: center;
+                                    Rectangle {
+                                        width: 44px; height: 44px; border-radius: 22px; background: #3d3452;
+                                        Text {
+                                            width: 100%; height: 100%; text: s.initial;
+                                            color: white; font-size: 16px; font-weight: 600;
+                                            horizontal-alignment: center; vertical-alignment: center;
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        Text { text: s.name; color: text(); font-size: 15px; font-weight: 600; overflow: elide; }
+                                        Text {
+                                            text: s.is_owner ? ("Owner · " + s.invite) : "Member";
+                                            color: muted(); font-size: 12px; overflow: elide;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // bottom tabs
+            Rectangle {
+                background: panel();
+                border-width: 1px;
+                border-color: border();
+                height: 62px;
+                HorizontalLayout {
+                    TouchArea {
+                        horizontal-stretch: 1;
+                        clicked => { set_home_tab(HomeTab.Chats); }
+                        Rectangle {
+                            background: home_tab == HomeTab.Chats ? #8b5cf638 : transparent;
+                            border-radius: 12px;
+                            Text {
+                                width: 100%; height: 100%;
+                                text: "Chats";
+                                color: home_tab == HomeTab.Chats ? accent() : muted();
+                                font-size: 12px; font-weight: 600;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                        }
+                    }
+                    TouchArea {
+                        horizontal-stretch: 1;
+                        clicked => { set_home_tab(HomeTab.Friends); }
+                        Rectangle {
+                            background: home_tab == HomeTab.Friends ? #8b5cf638 : transparent;
+                            border-radius: 12px;
+                            Text {
+                                width: 100%; height: 100%;
+                                text: "Friends";
+                                color: home_tab == HomeTab.Friends ? accent() : muted();
+                                font-size: 12px; font-weight: 600;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                        }
+                    }
+                    TouchArea {
+                        horizontal-stretch: 1;
+                        clicked => { set_home_tab(HomeTab.Servers); }
+                        Rectangle {
+                            background: home_tab == HomeTab.Servers ? #8b5cf638 : transparent;
+                            border-radius: 12px;
+                            Text {
+                                width: 100%; height: 100%;
+                                text: "Servers";
+                                color: home_tab == HomeTab.Servers ? accent() : muted();
+                                font-size: 12px; font-weight: 600;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ================= CHAT =================
+        if screen == Screen.Chat: VerticalLayout {
+            Rectangle {
+                background: panel(); height: 56px;
+                HorizontalLayout {
+                    padding-left: 8px; padding-right: 12px; spacing: 8px; alignment: center;
+                    TouchArea {
+                        width: 40px; height: 40px;
+                        Rectangle {
+                            background: elevated(); border-radius: 20px;
+                            Text {
+                                width: 100%; height: 100%; text: "←"; color: text(); font-size: 18px;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                        }
+                        clicked => { go_back(); }
+                    }
+                    Text {
+                        text: chat_title; color: text(); font-size: 16px; font-weight: 600;
+                        vertical-alignment: center; overflow: elide; horizontal-stretch: 1;
+                    }
+                }
+            }
+            Flickable {
+                vertical-stretch: 1;
+                viewport-height: msg_col.preferred-height;
+                msg_col := VerticalLayout {
+                    padding: 12px; spacing: 8px;
+                    if messages.length == 0: Text {
+                        text: "Say hello 👋\nMessages sync with desktop.";
+                        color: muted(); font-size: 14px; horizontal-alignment: center;
+                    }
+                    for m in messages: HorizontalLayout {
+                        alignment: m.mine ? end : start;
+                        Rectangle {
+                            max-width: 300px;
+                            background: m.mine ? #453868 : elevated();
+                            border-radius: 16px;
+                            border-width: 1px;
+                            border-color: m.mine ? #8b5cf666 : border();
+                            VerticalLayout {
+                                padding: 10px; spacing: 4px;
+                                if !m.mine: HorizontalLayout {
+                                    spacing: 6px;
+                                    Text { text: m.author; color: #c4b5fd; font-size: 12px; font-weight: 600; }
+                                    if m.plus: Rectangle {
+                                        background: #c9a227; border-radius: 4px; height: 14px;
+                                        width: plus_l.preferred-width + 8px;
+                                        plus_l := Text {
+                                            text: "PLUS"; color: #1a1400; font-size: 9px; font-weight: 700;
+                                            horizontal-alignment: center; vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                                Text { text: m.body; color: text(); font-size: 15px; wrap: word-wrap; }
+                                Text { text: m.meta; color: muted(); font-size: 10px; }
+                            }
+                        }
+                    }
+                }
+            }
+            Rectangle {
+                background: panel();
+                VerticalLayout {
+                    padding: 10px; spacing: 6px;
+                    Rectangle {
+                        background: tertiary(); border-radius: 24px; border-width: 1px; border-color: border();
+                        height: 48px;
+                        HorizontalLayout {
+                            padding-left: 14px; padding-right: 6px; spacing: 6px; alignment: center;
+                            TextInput {
+                                text <=> draft;
+                                // placeholder: "Message…";
+                                font-size: 16px; color: text();
+                                horizontal-stretch: 1;
+                                edited => { draft_changed(self.text); }
+                                accepted => { send_message(); }
+                            }
+                            TouchArea {
+                                width: 72px; height: 38px;
+                                enabled: !busy && draft != "";
+                                Rectangle {
+                                    background: draft == "" ? #6939d1 : accent();
+                                    border-radius: 19px;
+                                    Text {
+                                        width: 100%; height: 100%; text: "Send"; color: white;
+                                        font-size: 14px; font-weight: 600;
+                                        horizontal-alignment: center; vertical-alignment: center;
+                                    }
+                                }
+                                clicked => { send_message(); }
+                            }
+                        }
+                    }
+                    Text {
+                        text: "Long-press the message field to paste.";
+                        color: muted(); font-size: 11px; horizontal-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // ================= SERVER =================
+        if screen == Screen.Server: VerticalLayout {
+            Rectangle {
+                background: panel(); height: 56px;
+                HorizontalLayout {
+                    padding-left: 8px; padding-right: 12px; spacing: 8px; alignment: center;
+                    TouchArea {
+                        width: 40px; height: 40px;
+                        Rectangle {
+                            background: elevated(); border-radius: 20px;
+                            Text {
+                                width: 100%; height: 100%; text: "←"; color: text(); font-size: 18px;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                        }
+                        clicked => { go_back(); }
+                    }
+                    Text {
+                        text: server_name; color: text(); font-size: 16px; font-weight: 600;
+                        vertical-alignment: center; overflow: elide; horizontal-stretch: 1;
+                    }
+                }
+            }
+            Flickable {
+                vertical-stretch: 1;
+                viewport-height: ch_col.preferred-height;
+                ch_col := VerticalLayout {
+                    padding: 12px; spacing: 6px;
+                    Text { text: "CHANNELS"; color: muted(); font-size: 11px; font-weight: 600; }
+                    for ch in channels: TouchArea {
+                        height: 48px;
+                        enabled: !ch.is_voice;
+                        clicked => { open_channel(ch.conversation_id, ch.is_voice ? ch.name : ("#" + ch.name)); }
+                        Rectangle {
+                            background: elevated(); border-radius: 12px; border-width: 1px; border-color: border();
+                            HorizontalLayout {
+                                padding-left: 12px; alignment: center;
+                                Text {
+                                    text: ch.is_voice ? ("🔊  " + ch.name) : ("#  " + ch.name);
+                                    color: ch.is_voice ? muted() : text();
+                                    font-size: 15px; vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ================= PROFILE =================
+        if screen == Screen.Profile: VerticalLayout {
+            Rectangle {
+                background: panel(); height: 56px;
+                HorizontalLayout {
+                    padding-left: 8px; padding-right: 12px; spacing: 8px; alignment: center;
+                    TouchArea {
+                        width: 40px; height: 40px;
+                        Rectangle {
+                            background: elevated(); border-radius: 20px;
+                            Text {
+                                width: 100%; height: 100%; text: "←"; color: text(); font-size: 18px;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                        }
+                        clicked => { go_back(); }
+                    }
+                    Text {
+                        text: "Profile"; color: text(); font-size: 18px; font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            Flickable {
+                vertical-stretch: 1;
+                viewport-height: prof.preferred-height;
+                prof := VerticalLayout {
+                    padding: 16px; spacing: 10px;
+                    Text { text: "@" + my_username; color: muted(); font-size: 13px; horizontal-alignment: center; }
+                    Text { text: "DISPLAY NAME"; color: muted(); font-size: 11px; font-weight: 600; }
+                    TextInput { text <=> profile_display; font-size: 16px; color: text(); height: 44px; }
+                    Text { text: "STATUS"; color: muted(); font-size: 11px; font-weight: 600; }
+                    TextInput { text <=> profile_status; font-size: 16px; color: text(); height: 44px; }
+                    Text { text: "BIO"; color: muted(); font-size: 11px; font-weight: 600; }
+                    TextInput {
+                        text <=> profile_bio;
+                        // placeholder: "About you";
+                        font-size: 15px; color: text();
+                        height: 88px;
+                        // multiline-ish single field
+                    }
+                    TouchArea {
+                        height: 48px;
+                        Rectangle {
+                            background: accent(); border-radius: 12px;
+                            Text {
+                                width: 100%; height: 100%; text: busy ? "Saving…" : "Save profile";
+                                color: white; font-size: 16px; font-weight: 600;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                        }
+                        clicked => { save_profile(); }
+                    }
+                    TouchArea {
+                        height: 48px;
+                        Rectangle {
+                            background: #3a1820; border-radius: 12px; border-width: 1px; border-color: #da373c99;
+                            Text {
+                                width: 100%; height: 100%; text: "Sign out";
+                                color: #f87171; font-size: 15px; font-weight: 600;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                        }
+                        clicked => { sign_out(); }
+                    }
+                }
+            }
+        }
+
+        Rectangle { height: 12px; background: tertiary(); }
+    }
+}

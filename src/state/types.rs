@@ -4,7 +4,13 @@
 //! tiny `Friend` display helpers.
 
 /// A presence timestamp within this many ms of "now" counts as online.
-const ONLINE_THRESHOLD_MS: i64 = 15_000;
+///
+/// Must stay aligned with Convex `friends.ONLINE_MS` (90s) and the server
+/// heartbeat write throttle (`presence.HEARTBEAT_WRITE_INTERVAL_MS` = 30s).
+/// A shorter client window (the old 15s) marked people offline between
+/// heartbeats even though the backend still treated them as online — members
+/// list / peer dots flickered "offline" constantly.
+const ONLINE_THRESHOLD_MS: i64 = 90_000;
 
 /// `last_seen_at` is ms since epoch (0 = never seen).
 pub(crate) fn is_online(last_seen_at: i64) -> bool {
@@ -42,6 +48,11 @@ pub(crate) struct Session {
     pub(crate) presence_status: String,
     pub(crate) email: String,
     pub(crate) email_verified: bool,
+    /// HexaTalk Plus (cosmetic). From auth:me / refreshed via plus:getMyStatus.
+    pub(crate) plus_active: bool,
+    /// ms epoch; 0 if inactive.
+    pub(crate) plus_expires_at: i64,
+    pub(crate) profile_banner_url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -215,6 +226,7 @@ pub(crate) struct ChatMessage {
     pub(crate) author_avatar_color: String,
     pub(crate) author_avatar_url: String,
     pub(crate) author_is_bot: bool,
+    pub(crate) author_plus_active: bool,
     pub(crate) body: String,
     pub(crate) kind: String,
     pub(crate) attachment_url: String,
@@ -251,6 +263,8 @@ pub(crate) struct ProfileView {
     pub(crate) favorite: bool,
     pub(crate) nickname: String,
     pub(crate) private_note: String,
+    pub(crate) plus_active: bool,
+    pub(crate) profile_banner_url: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,6 +287,8 @@ pub(crate) struct AdminUserRow {
 pub(crate) enum AuthMode {
     Login,
     Register,
+    /// Logged-out password reset via email code.
+    ForgotPassword,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -282,6 +298,19 @@ pub(crate) enum SidebarTab {
     Requests,
     Servers,
     Admin,
+}
+
+/// Result of `servers:resolveCustomSlug` for a `vyrapp://join/<slug>` deep
+/// link -- just enough to render the join-confirmation dialog and, if
+/// accepted, drive it through the existing `joinByInviteCode` mutation.
+#[derive(Debug, Clone)]
+pub(crate) struct DeepLinkJoinInfo {
+    pub(crate) server_id: String,
+    pub(crate) name: String,
+    pub(crate) icon_url: String,
+    pub(crate) invites_paused: bool,
+    /// Empty when `invites_paused` is true.
+    pub(crate) invite_code: String,
 }
 
 #[derive(Debug, Clone)]
@@ -403,6 +432,7 @@ pub(crate) struct ServerMemberRow {
     pub(crate) is_bot: bool,
     /// user | moderator | admin (platform staff badge)
     pub(crate) platform_role: String,
+    pub(crate) plus_active: bool,
     pub(crate) last_seen_at: i64,
     /// All custom roles this member currently holds (multi-role, Discord-style).
     pub(crate) roles: Vec<MemberRoleTag>,
@@ -452,6 +482,7 @@ pub(crate) enum ResizePanel {
 pub(crate) enum SettingsCategory {
     Account,
     Privacy,
+    Plus,
     Bots,
     Voice,
     About,

@@ -73,7 +73,9 @@ impl RelayConnection {
     ) -> Result<Self> {
         ensure_rustls_provider();
         let url = room_join_url(relay_url, room_id, token)?;
-        tracing::info!(%url, "connecting to relay");
+        // Never log the query string — it carries the room token.
+        let log_url = url.split_once('?').map(|(base, _)| base).unwrap_or(&url);
+        tracing::info!(url = %log_url, "connecting to relay");
 
         let request = url
             .as_str()

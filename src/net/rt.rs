@@ -110,6 +110,19 @@ pub(crate) fn write_clipboard_text(text: impl Into<String>) {
     }
 }
 
+/// Aborts the wrapped task when dropped. Scopes a child task's lifetime to
+/// the job that spawned it: when `SubscriptionRegistry` aborts a job (or the
+/// job finishes on its own), locals are dropped and this guard kills the
+/// child -- without it a `tokio::spawn`ed engine (mic capture, call engine)
+/// kept running orphaned after its subscription went away.
+pub(crate) struct AbortOnDrop<T>(pub(crate) JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct SubscriptionRegistry {
     running: HashMap<String, JoinHandle<()>>,

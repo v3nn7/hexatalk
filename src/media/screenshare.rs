@@ -68,6 +68,31 @@ const MAX_WIDTH: u32 = 1280;
 const JPEG_QUALITY: u8 = 55;
 const TARGET_FPS: u64 = 8;
 
+/// A share target resolved to a live capture handle. Resolving (enumerating
+/// every monitor/window via `xcap::*::all()`) per frame was a measurable
+/// chunk of the 8 fps frame budget, so the handle is cached by the capture
+/// thread and only re-resolved after capture failures (window moved to
+/// another virtual desktop, transient OS hiccup, ...).
+enum ResolvedTarget {
+    Monitor(xcap::Monitor),
+    Window(xcap::Window),
+}
+
+fn resolve_target(target: &ShareTarget) -> Option<ResolvedTarget> {
+    match target {
+        ShareTarget::Monitor(name) => xcap::Monitor::all()
+            .ok()?
+            .into_iter()
+            .find(|m| m.name().map(|n| &n == name).unwrap_or(false))
+            .map(ResolvedTarget::Monitor),
+        ShareTarget::Window(title) => xcap::Window::all()
+            .ok()?
+            .into_iter()
+            .find(|w| w.title().map(|t| &t == title).unwrap_or(false))
+            .map(ResolvedTarget::Window),
+    }
+}
+
 /// xcap doesn't capture the mouse cursor (it's composited by the OS
 /// separately from whatever backs the screenshot), so it's drawn in here
 /// after the fact: grab the cursor's absolute screen position and paint a
@@ -114,21 +139,13 @@ fn draw_cursor_marker(img: &mut xcap::image::RgbaImage, x: i32, y: i32) {
     }
 }
 
-fn capture_once(target: &ShareTarget) -> Option<Vec<u8>> {
+fn capture_once(target: &ResolvedTarget) -> Option<Vec<u8>> {
     let (mut rgba, origin_x, origin_y) = match target {
-        ShareTarget::Monitor(name) => {
-            let monitor = xcap::Monitor::all()
-                .ok()?
-                .into_iter()
-                .find(|m| m.name().map(|n| &n == name).unwrap_or(false))?;
+        ResolvedTarget::Monitor(monitor) => {
             let image = monitor.capture_image().ok()?;
             (image, monitor.x().unwrap_or(0), monitor.y().unwrap_or(0))
         }
-        ShareTarget::Window(title) => {
-            let window = xcap::Window::all()
-                .ok()?
-                .into_iter()
-                .find(|w| w.title().map(|t| &t == title).unwrap_or(false))?;
+        ResolvedTarget::Window(window) => {
             let image = window.capture_image().ok()?;
             (image, window.x().unwrap_or(0), window.y().unwrap_or(0))
         }
@@ -150,7 +167,9 @@ fn capture_once(target: &ShareTarget) -> Option<Vec<u8>> {
     };
 
     let rgb = resized.to_rgb8();
-    let mut buf = Vec::new();
+    // A 1280px-wide JPEG at quality 55 lands well under 100 KB; pre-sizing
+    // avoids the encode loop's repeated growth reallocations.
+    let mut buf = Vec::with_capacity(96 * 1024);
     let mut encoder = JpegEncoder::new_with_quality(&mut buf, JPEG_QUALITY);
     encoder
         .encode(
@@ -181,11 +200,18 @@ pub(crate) fn spawn_capture_thread(
     stop: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
-        let interval = Duration::from_millis(1000 / TARGET_FPS);
+        // Fractional-fps-safe pacing (`from_millis(1000 / TARGET_FPS)`
+        // truncates, e.g. 7 fps would pace at 142 ms instead of ~142.86 ms).
+        let interval = Duration::from_secs_f64(1.0 / TARGET_FPS as f64);
+        // Resolved lazily and re-resolved about once a second while captures
+        // keep failing, so a transiently-uncapturable target (minimized
+        // window, locked screen) recovers without a full restart.
+        let mut resolved = resolve_target(&target);
         let mut consecutive_failures = 0u32;
         while !stop.load(Ordering::Relaxed) {
             let started = Instant::now();
-            match capture_once(&target) {
+            let frame = resolved.as_ref().and_then(capture_once);
+            match frame {
                 Some(jpeg) => {
                     consecutive_failures = 0;
                     if frame_tx.send(jpeg).is_err() {
@@ -196,6 +222,9 @@ pub(crate) fn spawn_capture_thread(
                     consecutive_failures += 1;
                     if consecutive_failures >= MAX_CONSECUTIVE_CAPTURE_FAILURES {
                         break;
+                    }
+                    if consecutive_failures % (TARGET_FPS as u32) == 0 {
+                        resolved = resolve_target(&target);
                     }
                 }
             }
@@ -208,6 +237,57 @@ pub(crate) fn spawn_capture_thread(
 }
 
 const MSG_KIND_SYS_AUDIO: u8 = 4;
+
+/// Resampling accumulator for loopback capture: downsamples the device rate
+/// to the 24 kHz wire rate by integer-step decimation and ships 20 ms
+/// (480-sample) mono chunks. Lives entirely inside the cpal callback
+/// closure — the old version shared its phase/buffer through `Arc<Mutex>`,
+/// which cost a lock/unlock pair per *sample* (~48k locks/sec) for state
+/// that only ever had one accessor.
+struct SysAudioSink {
+    step: f32,
+    phase: f32,
+    pcm: Vec<i16>,
+    msg_tx: tokio::sync::mpsc::UnboundedSender<Bytes>,
+    enabled: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+}
+
+impl SysAudioSink {
+    fn new(
+        sample_rate: u32,
+        msg_tx: tokio::sync::mpsc::UnboundedSender<Bytes>,
+        enabled: Arc<AtomicBool>,
+        stop: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            step: (sample_rate as f32 / 24_000.0).max(1.0),
+            phase: 0.0,
+            pcm: Vec::with_capacity(480),
+            msg_tx,
+            enabled,
+            stop,
+        }
+    }
+
+    fn push(&mut self, mono: f32) {
+        if self.stop.load(Ordering::Relaxed) || !self.enabled.load(Ordering::Relaxed) {
+            return;
+        }
+        self.phase += 1.0;
+        if self.phase < self.step {
+            return;
+        }
+        self.phase -= self.step;
+        let s = (mono.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+        self.pcm.push(s);
+        if self.pcm.len() >= 480 {
+            let msg = encode_sys_audio_chunk(&self.pcm);
+            self.pcm.clear();
+            let _ = self.msg_tx.send(msg);
+        }
+    }
+}
 
 fn looks_like_loopback(name: &str) -> bool {
     let n = name.to_lowercase();
@@ -257,49 +337,25 @@ pub(crate) fn spawn_system_audio_thread(
 
     std::thread::spawn(move || {
         let err_fn = |e| eprintln!("[sys-audio] stream error: {e}");
-        let enabled_c = Arc::clone(&enabled);
-        let stop_c = Arc::clone(&stop);
-        let step = (sample_rate as f32 / 24_000.0).max(1.0);
-        let phase = Arc::new(std::sync::Mutex::new(0.0_f32));
-        let pcm_buf = Arc::new(std::sync::Mutex::new(Vec::<i16>::with_capacity(480)));
-        let msg_tx = Arc::new(msg_tx);
-
-        let make_push = || {
-            let enabled_c = Arc::clone(&enabled_c);
-            let stop_c = Arc::clone(&stop_c);
-            let phase = Arc::clone(&phase);
-            let pcm_buf = Arc::clone(&pcm_buf);
-            let msg_tx = Arc::clone(&msg_tx);
-            move |mono: f32| {
-                if stop_c.load(Ordering::Relaxed) || !enabled_c.load(Ordering::Relaxed) {
-                    return;
-                }
-                let mut phase = phase.lock().unwrap_or_else(|e| e.into_inner());
-                *phase += 1.0;
-                if *phase < step {
-                    return;
-                }
-                *phase -= step;
-                let s = (mono.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-                let mut buf = pcm_buf.lock().unwrap_or_else(|e| e.into_inner());
-                buf.push(s);
-                if buf.len() >= 480 {
-                    let chunk = std::mem::take(&mut *buf);
-                    let _ = msg_tx.send(encode_sys_audio_chunk(&chunk));
-                }
-            }
+        let make_sink = || {
+            SysAudioSink::new(
+                sample_rate,
+                msg_tx.clone(),
+                Arc::clone(&enabled),
+                Arc::clone(&stop),
+            )
         };
 
         let stream = match sample_format {
             cpal::SampleFormat::F32 => {
-                let push = make_push();
+                let mut sink = make_sink();
                 device.build_input_stream(
                     &stream_config,
                     move |data: &[f32], _| {
                         for frame in data.chunks(channels.max(1)) {
                             let mono =
                                 frame.iter().copied().sum::<f32>() / frame.len().max(1) as f32;
-                            push(mono);
+                            sink.push(mono);
                         }
                     },
                     err_fn,
@@ -307,7 +363,7 @@ pub(crate) fn spawn_system_audio_thread(
                 )
             }
             cpal::SampleFormat::I16 => {
-                let push = make_push();
+                let mut sink = make_sink();
                 device.build_input_stream(
                     &stream_config,
                     move |data: &[i16], _| {
@@ -315,7 +371,7 @@ pub(crate) fn spawn_system_audio_thread(
                             let mono = frame.iter().map(|&s| s as f32).sum::<f32>()
                                 / frame.len().max(1) as f32
                                 / i16::MAX as f32;
-                            push(mono);
+                            sink.push(mono);
                         }
                     },
                     err_fn,

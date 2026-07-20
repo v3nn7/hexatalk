@@ -14,6 +14,15 @@ export struct RoleTagRow {
     color: color,
 }
 
+// NOTE for the Rust view-model side (src/ui/viewmodel.rs): the Discord-style
+// chat UI would benefit from two extra fields here -- `author_name_color:
+// color` (role-based nick color; message_row.slint currently falls back to
+// `author_avatar_color`) and `is_date_divider: bool` (date separators are
+// currently encoded as `is_call_log` rows with an empty author, so they
+// share rendering with real call-log lines). They were NOT added yet because
+// viewmodel.rs constructs ChatMessageRow field-by-field without
+// `..Default::default()`, so new fields must land together with the Rust
+// update.
 export struct ChatMessageRow {
     id: string,
     author_id: string,
@@ -23,6 +32,8 @@ export struct ChatMessageRow {
     author_photo: image,
     author_photo_url: string,
     is_bot: bool,
+    // HexaTalk Plus cosmetic badge on the author line.
+    is_plus: bool,
     mine: bool,
     encrypted: bool,
     is_call_log: bool,
@@ -49,6 +60,16 @@ export struct ChatMessageRow {
     mentions_me: bool,
     mentions_everyone: bool,
     ping_label: string,
+}
+
+// One row of the header pinned-messages panel (flat projection of a pinned
+// ChatMessage -- see viewmodel::pinned_rows).
+export struct PinnedMessageRow {
+    id: string,
+    author_name: string,
+    author_avatar_color: color,
+    meta: string,
+    body: string,
 }
 
 export struct ReportRow {
@@ -188,6 +209,7 @@ export struct MemberRow {
     photo_url: string,
     online: bool,
     is_bot: bool,
+    is_plus: bool,
     badge_text: string,
     badge_bg: color,
     badge_fg: color,

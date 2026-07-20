@@ -4,6 +4,16 @@ import { currentUser, requireStaff } from "./session";
 import { Id } from "./_generated/dataModel";
 
 const SNAPSHOT_MAX_LEN = 2000;
+const REVIEW_NOTE_MAX_LEN = 500;
+
+/** Strip control characters (incl. NUL) and trim — report snapshots and
+ * notes are rendered in the admin panel, so keep them plain and bounded. */
+function sanitizeText(raw: string, maxLen: number): string {
+  return raw
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+    .trim()
+    .slice(0, maxLen);
+}
 
 async function requireMembership(
   ctx: QueryCtx | MutationCtx,
@@ -67,7 +77,7 @@ export const reportMessage = mutation({
       message.conversationId,
     );
     const conversationLabel =
-      conversation?.name?.trim() ||
+      sanitizeText(conversation?.name ?? "", 80) ||
       (conversation?.kind === "direct" ? "Direct message" : "Conversation");
 
     await ctx.db.insert("messageReports", {
@@ -78,7 +88,7 @@ export const reportMessage = mutation({
       reporterUsername: reporter.username,
       authorId: message.authorId,
       authorUsername: message.authorName,
-      messageBodySnapshot: args.messageBody.slice(0, SNAPSHOT_MAX_LEN),
+      messageBodySnapshot: sanitizeText(args.messageBody, SNAPSHOT_MAX_LEN),
       reason: args.reason,
       status: "pending",
       createdAt: Date.now(),
@@ -139,12 +149,20 @@ export const adminResolveReport = mutation({
     if (!report) {
       throw new Error("Report not found");
     }
+    // A report is resolved once — re-resolving would silently rewrite the
+    // audit trail (reviewer, timestamp, note) of the original decision.
+    if (report.status !== "pending") {
+      throw new Error("This report was already reviewed");
+    }
+    const reviewNote = args.reviewNote
+      ? sanitizeText(args.reviewNote, REVIEW_NOTE_MAX_LEN)
+      : "";
     await ctx.db.patch("messageReports", args.reportId, {
       status: args.status,
       reviewedBy: staff._id,
       reviewedByUsername: staff.username,
       reviewedAt: Date.now(),
-      reviewNote: args.reviewNote?.trim() || undefined,
+      reviewNote: reviewNote.length > 0 ? reviewNote : undefined,
     });
     return null;
   },

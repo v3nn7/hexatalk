@@ -1,6 +1,6 @@
 import { v } from "convex/values";
 import { mutation, query, MutationCtx, QueryCtx } from "./_generated/server";
-import { currentUser } from "./session";
+import { currentUser, platformRank, platformRole } from "./session";
 import { Id } from "./_generated/dataModel";
 import {
   assignedRoleIds,
@@ -158,15 +158,23 @@ export const createChannel = mutation({
       channelType,
     });
 
-    const members = await ctx.db
-      .query("serverMembers")
-      .withIndex("by_server", (q) => q.eq("serverId", args.serverId))
-      .take(500);
-    for (const member of members) {
-      await ctx.db.insert("conversationMembers", {
-        conversationId,
-        userId: member.userId,
-      });
+    // Paginate the member fan-out so a channel on a large server includes
+    // every member, not just the first 500.
+    let cursor: string | null = null;
+    let isDone = false;
+    while (!isDone) {
+      const page = await ctx.db
+        .query("serverMembers")
+        .withIndex("by_server", (q) => q.eq("serverId", args.serverId))
+        .paginate({ numItems: 500, cursor });
+      for (const member of page.page) {
+        await ctx.db.insert("conversationMembers", {
+          conversationId,
+          userId: member.userId,
+        });
+      }
+      cursor = page.continueCursor;
+      isDone = page.isDone;
     }
 
     return conversationId;
@@ -177,6 +185,14 @@ export const joinByInviteCode = mutation({
   args: { sessionToken: v.string(), inviteCode: v.string() },
   handler: async (ctx, args) => {
     const me = await currentUser(ctx, args.sessionToken);
+    // Bots don't use invite codes — the owner adds them via
+    // bots.inviteToServer. Joining by code would let a leaked bot token
+    // plant the bot on arbitrary servers.
+    if (me.isBot) {
+      throw new Error(
+        "Bots join servers through their owner's bot invite, not invite codes",
+      );
+    }
     const code = args.inviteCode.trim().toUpperCase();
     const server = await ctx.db
       .query("servers")
@@ -344,7 +360,8 @@ export const removeServerIcon = mutation({
 
 /**
  * Vanity slug (custom server URL path). Only HexaTalk platform admins
- * (users.role === "admin") may set this — not regular server owners.
+ * (platformRank >= 100, i.e. admins and owners) may set this — not regular
+ * server owners.
  */
 export const setCustomSlug = mutation({
   args: {
@@ -354,7 +371,7 @@ export const setCustomSlug = mutation({
   },
   handler: async (ctx, args) => {
     const me = await currentUser(ctx, args.sessionToken);
-    if (me.role !== "admin") {
+    if (platformRank(me) < 100) {
       throw new Error("Only HexaTalk administration can set custom server URLs");
     }
     const server = await ctx.db.get("servers", args.serverId);
@@ -392,13 +409,40 @@ export const clearCustomSlug = mutation({
   },
   handler: async (ctx, args) => {
     const me = await currentUser(ctx, args.sessionToken);
-    if (me.role !== "admin") {
+    if (platformRank(me) < 100) {
       throw new Error("Only HexaTalk administration can set custom server URLs");
     }
     const server = await ctx.db.get("servers", args.serverId);
     if (!server) throw new Error("Server not found");
     await ctx.db.patch("servers", server._id, { customSlug: undefined });
     return null;
+  },
+});
+
+/**
+ * Resolves a vanity slug (from a `vyrapp://join/<slug>` deep link) to the
+ * info needed for a join-confirmation prompt. Public: called before the
+ * client has any server membership, sometimes before login even finishes.
+ */
+export const resolveCustomSlug = query({
+  args: { slug: v.string() },
+  handler: async (ctx, args) => {
+    const slug = args.slug.trim().toLowerCase();
+    const server = await ctx.db
+      .query("servers")
+      .withIndex("by_customSlug", (q) => q.eq("customSlug", slug))
+      .unique();
+    if (!server) return null;
+    const iconUrl = server.iconStorageId
+      ? await ctx.storage.getUrl(server.iconStorageId)
+      : null;
+    return {
+      serverId: server._id,
+      name: server.name,
+      iconUrl: iconUrl ?? "",
+      invitesPaused: server.invitesPaused ?? false,
+      inviteCode: server.invitesPaused ? "" : server.inviteCode,
+    };
   },
 });
 
@@ -415,6 +459,13 @@ export const listChannels = query({
 
     const rows = await Promise.all(
       channels.map(async (c) => {
+        // Permission gate first: channels the member can't see are dropped
+        // before the (potentially expensive) unread/mention scan below.
+        const perms = await channelPermissions(ctx, c._id, me._id);
+        if ((perms & Perm.VIEW_CHANNELS) !== Perm.VIEW_CHANNELS) {
+          return null;
+        }
+
         // Unread @-mention badge for the sidebar channel row: count
         // messages newer than my read marker that ping me (or @everyone).
         // Membership rows carry lastReadAt; absent row = never read.
@@ -446,11 +497,6 @@ export const listChannels = query({
               mentionCount += 1;
             }
           }
-        }
-
-        const perms = await channelPermissions(ctx, c._id, me._id);
-        if ((perms & Perm.VIEW_CHANNELS) !== Perm.VIEW_CHANNELS) {
-          return null;
         }
 
         const muteRow = await ctx.db
@@ -569,6 +615,16 @@ export const deleteServer = mutation({
           await ctx.db.delete("typing", row._id);
         }
 
+        const voiceRows = await ctx.db
+          .query("voiceStates")
+          .withIndex("by_conversation", (q) =>
+            q.eq("conversationId", channel._id),
+          )
+          .take(200);
+        for (const row of voiceRows) {
+          await ctx.db.delete("voiceStates", row._id);
+        }
+
         await ctx.db.delete("conversations", channel._id);
       }
       channels = await ctx.db
@@ -588,6 +644,39 @@ export const deleteServer = mutation({
       }
       serverMembers = await ctx.db
         .query("serverMembers")
+        .withIndex("by_server", (q) => q.eq("serverId", args.serverId))
+        .take(500);
+    }
+
+    // Server-scoped leftovers: roles, categories, channel overwrites.
+    // (Server-scoped notificationPrefs have no by-target index, so they
+    // can't be cleaned up efficiently here — orphaned but harmless.)
+    const roles = await ctx.db
+      .query("serverRoles")
+      .withIndex("by_server", (q) => q.eq("serverId", args.serverId))
+      .take(100);
+    for (const role of roles) {
+      await ctx.db.delete("serverRoles", role._id);
+    }
+
+    const categories = await ctx.db
+      .query("channelCategories")
+      .withIndex("by_server", (q) => q.eq("serverId", args.serverId))
+      .take(100);
+    for (const category of categories) {
+      await ctx.db.delete("channelCategories", category._id);
+    }
+
+    let overwrites = await ctx.db
+      .query("channelOverwrites")
+      .withIndex("by_server", (q) => q.eq("serverId", args.serverId))
+      .take(500);
+    while (overwrites.length > 0) {
+      for (const ow of overwrites) {
+        await ctx.db.delete("channelOverwrites", ow._id);
+      }
+      overwrites = await ctx.db
+        .query("channelOverwrites")
         .withIndex("by_server", (q) => q.eq("serverId", args.serverId))
         .take(500);
     }
@@ -751,16 +840,22 @@ export const serverStats = query({
       .query("serverMembers")
       .withIndex("by_server", (q) => q.eq("serverId", args.serverId))
       .take(1000);
-    // Oldest membership = the server's longest-standing member.
+    // Oldest membership = the server's longest-standing member. Find the
+    // minimum joinedAt first, then resolve that single user — avoids a
+    // users-table read per member.
     let oldestJoinedAt = 0;
-    let oldestName = "";
+    let oldestUserId: Id<"users"> | null = null;
     for (const m of members) {
       if (oldestJoinedAt === 0 || m.joinedAt < oldestJoinedAt) {
-        const u = await ctx.db.get("users", m.userId);
-        if (u) {
-          oldestJoinedAt = m.joinedAt;
-          oldestName = u.displayName || u.username;
-        }
+        oldestJoinedAt = m.joinedAt;
+        oldestUserId = m.userId;
+      }
+    }
+    let oldestName = "";
+    if (oldestUserId) {
+      const oldestUser = await ctx.db.get("users", oldestUserId);
+      if (oldestUser) {
+        oldestName = oldestUser.displayName || oldestUser.username;
       }
     }
 
@@ -849,14 +944,11 @@ export const listMembers = query({
         user.hideOnlineStatus === true && user._id !== me._id
           ? 0
           : (presence?.lastSeenAt ?? 0);
-      const platformRole =
-        user.username === "v3nn7" || user.role === "owner"
-          ? "owner"
-          : user.role === "admin"
-            ? "admin"
-            : user.role === "moderator"
-              ? "moderator"
-              : "user";
+      // Centralized in session.ts (pinned owner list lives there).
+      const userPlatformRole = platformRole(user);
+      const plusActive =
+        typeof user.plusExpiresAt === "number" &&
+        user.plusExpiresAt > Date.now();
       result.push({
         userId: user._id,
         displayName: user.displayName,
@@ -865,7 +957,8 @@ export const listMembers = query({
         avatarImageUrl: avatarImageUrl ?? "",
         isOwner: user._id === server.ownerId,
         isBot: user.isBot === true,
-        platformRole,
+        platformRole: userPlatformRole,
+        plusActive,
         lastSeenAt,
         joinedAt: membership.joinedAt,
         roles:
@@ -908,12 +1001,9 @@ export const kickMember = mutation({
       throw new Error("The server owner can't be kicked");
     }
     const targetUser = await ctx.db.get("users", args.userId);
-    if (
-      targetUser &&
-      (targetUser.role === "admin" ||
-        targetUser.role === "owner" ||
-        targetUser.username === "v3nn7")
-    ) {
+    // Platform admins/owner (rank >= 100, including the pinned owner) are
+    // unkickable — mirrors isProtectedTarget in session.ts.
+    if (targetUser && platformRank(targetUser) >= 100) {
       throw new Error("HexaTalk staff/owner cannot be kicked from servers");
     }
 
@@ -976,9 +1066,6 @@ export const renameChannel = mutation({
     if (!channel || channel.kind !== "channel" || !channel.serverId) {
       throw new Error("Channel not found");
     }
-    if (!channel.serverId) {
-      throw new Error("Channel not found");
-    }
     await requirePerm(ctx, channel.serverId, me._id, Perm.MANAGE_CHANNELS);
     if (channel.isSystem) {
       throw new Error("System channels can't be renamed");
@@ -1011,7 +1098,17 @@ export const deleteChannel = mutation({
       .query("conversations")
       .withIndex("by_server", (q) => q.eq("serverId", serverId))
       .take(200);
-    if (siblingChannels.length <= 1) {
+    const isTextChannel = (channel.channelType ?? "text") === "text";
+    if (isTextChannel) {
+      // Edge case: a voice-only server is useless, so the last *text*
+      // channel is protected — not just the last channel of any type.
+      const remainingText = siblingChannels.filter(
+        (c) => c._id !== channel._id && (c.channelType ?? "text") === "text",
+      );
+      if (remainingText.length === 0) {
+        throw new Error("A server needs at least one text channel");
+      }
+    } else if (siblingChannels.length <= 1) {
       throw new Error("A server needs at least one channel");
     }
 
@@ -1047,6 +1144,13 @@ export const deleteChannel = mutation({
       .take(200);
     for (const row of typingRows) {
       await ctx.db.delete("typing", row._id);
+    }
+
+    // Don't leave a dangling welcomeChannelId pointing at the deleted
+    // channel — fall back to the first text channel instead.
+    const serverDoc = await ctx.db.get("servers", serverId);
+    if (serverDoc?.welcomeChannelId === args.conversationId) {
+      await ctx.db.patch("servers", serverId, { welcomeChannelId: undefined });
     }
 
     await ctx.db.delete("conversations", args.conversationId);

@@ -30,7 +30,7 @@ use crate::ui::viewmodel;
 use crate::update_check::CURRENT_APP_VERSION;
 use std::env;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use slint::ComponentHandle;
 use slint::Model;
@@ -47,6 +47,12 @@ mod slint_ui {
 /// Set by `scroll_chat_to_bottom()`, consumed (and cleared) by the chat
 /// screen's UI sync step, which pulses the message list's scroll-to-end.
 static CHAT_SCROLL_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Monotonic counter bumped once per consumed CHAT_SCROLL_PENDING. The
+/// Slint side watches the exported `chat_scroll_pulse` property for changes
+/// (an increment = "scroll the message list to the end") -- a plain bool
+/// couldn't signal two scrolls in a row with no intervening state change.
+static CHAT_SCROLL_PULSE: AtomicU32 = AtomicU32::new(0);
 
 fn scroll_chat_to_bottom<T: Send + 'static>() -> Task<T> {
     CHAT_SCROLL_PENDING.store(true, Ordering::Relaxed);
@@ -72,6 +78,104 @@ const PEER_CLEAR_HISTORY_CTRL: &str = "\u{001e}TALKYSS_CLEAR_HISTORY\u{001e}";
 /// accounts with very large friends lists.
 const MAX_BACKGROUND_PEER_SESSIONS: usize = 25;
 
+/// Loopback port used purely as a single-instance lock + IPC channel for
+/// `vyrapp://` deep links -- whichever process wins the bind is "the" running
+/// instance; a second launch forwards its URL here and exits. Picked high
+/// and specific enough that a collision with an unrelated local service is
+/// unlikely.
+const DEEPLINK_PORT: u16 = 47812;
+
+/// Registers `vyrapp://` under HKCU (no admin rights needed) so Windows
+/// routes `vyrapp://join/<slug>` links to this exe. Best-effort: failures
+/// (non-Windows, sandboxed, `reg.exe` missing) are logged and swallowed --
+/// this must never block the app from starting.
+fn register_url_protocol() {
+    if !cfg!(windows) {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let open_command = format!("\"{}\" \"%1\"", exe.display());
+    let steps: [&[&str]; 3] = [
+        &["add", r"HKCU\Software\Classes\vyrapp", "/ve", "/d", "URL:Vyr Protocol", "/f"],
+        &["add", r"HKCU\Software\Classes\vyrapp", "/v", "URL Protocol", "/d", "", "/f"],
+        &[
+            "add",
+            r"HKCU\Software\Classes\vyrapp\shell\open\command",
+            "/ve",
+            "/d",
+            open_command.as_str(),
+            "/f",
+        ],
+    ];
+    for args in steps {
+        #[allow(unused_mut)]
+        let mut cmd = std::process::Command::new("reg.exe");
+        cmd.args(args);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        if let Err(err) = cmd.output() {
+            eprintln!("warning: failed to register vyrapp:// protocol: {err}");
+            return;
+        }
+    }
+}
+
+/// `vyrapp://` argv, if this process was launched with one (deep-link click,
+/// cold start or otherwise).
+fn deep_link_arg() -> Option<String> {
+    std::env::args()
+        .skip(1)
+        .find(|a| a.starts_with("vyrapp://"))
+}
+
+/// Single-instance gate for deep links: binds the loopback lock port. `Ok`
+/// means this process is the primary instance (caller should later spawn
+/// `run_deeplink_listener` on the returned listener); `Err` means another
+/// instance already owns it, so this process forwards its own `vyrapp://`
+/// argv (if any) over the socket and the caller should exit immediately
+/// without creating a window.
+fn claim_single_instance_or_forward() -> Option<std::net::TcpListener> {
+    match std::net::TcpListener::bind(("127.0.0.1", DEEPLINK_PORT)) {
+        Ok(listener) => Some(listener),
+        Err(_) => {
+            if let Some(url) = deep_link_arg() {
+                if let Ok(mut stream) =
+                    std::net::TcpStream::connect(("127.0.0.1", DEEPLINK_PORT))
+                {
+                    use std::io::Write;
+                    let _ = writeln!(stream, "{url}");
+                    let _ = stream.flush();
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Runs on a background thread for the lifetime of the primary instance:
+/// accepts one connection per forwarded deep link, reads the URL line, and
+/// pushes it into the update loop exactly like any other background-job
+/// result (see `Message::DeepLinkReceived`).
+fn run_deeplink_listener(listener: std::net::TcpListener, tx: UnboundedSender<Message>) {
+    use std::io::BufRead;
+    for stream in listener.incoming().flatten() {
+        let mut reader = std::io::BufReader::new(stream);
+        let mut line = String::new();
+        if reader.read_line(&mut line).is_ok() {
+            let url = line.trim().to_string();
+            if !url.is_empty() {
+                let _ = tx.send(Message::DeepLinkReceived(url));
+            }
+        }
+    }
+}
+
 // ---------- Entry point ----------
 
 /// One-time rebrand migration: move the per-user data dir
@@ -79,6 +183,19 @@ const MAX_BACKGROUND_PEER_SESSIONS: usize = 25;
 /// exists, so the session token, E2EE identity keys, ratchet state and the
 /// encrypted history vault all survive the rename. Runs before anything
 /// reads the new dir.
+///
+/// If `%APPDATA%/HexaTalk` already exists (e.g. this device ran the app
+/// once right after the rebrand, before ever seeing a `Talkyss` dir to
+/// migrate from — which silently generated a *fresh* peerseal identity),
+/// the plain rename above never fires again, since it only renames when the
+/// destination doesn't exist at all. That orphaned the real identity key
+/// (and history vault, session, ...) in the legacy folder forever: every
+/// group/channel key package sealed to the old identity's public key then
+/// fails to unseal with the new one ("wrong identity?"). So on top of the
+/// rename, do a recursive per-file merge: copy any legacy file that's
+/// missing on the new side over, without ever touching a file that's
+/// already there. Safe to run every launch — once both sides agree, it's a
+/// no-op walk.
 fn migrate_legacy_data_dir() {
     let Ok(base) = env::var("APPDATA") else {
         return;
@@ -86,12 +203,51 @@ fn migrate_legacy_data_dir() {
     let base = std::path::Path::new(&base);
     let legacy = base.join("Talkyss");
     let current = base.join("HexaTalk");
-    if legacy.is_dir() && !current.exists() {
-        let _ = std::fs::rename(&legacy, &current);
+    if !legacy.is_dir() {
+        return;
+    }
+    if !current.exists() {
+        if std::fs::rename(&legacy, &current).is_ok() {
+            return;
+        }
+        // Cross-device rename etc. can fail; fall through to the merge copy.
+    }
+    merge_missing_files(&legacy, &current);
+}
+
+/// Recursively copies every file under `src` that has no counterpart under
+/// `dst` yet (by relative path), creating parent directories as needed.
+/// Never overwrites an existing `dst` file.
+fn merge_missing_files(src: &std::path::Path, dst: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(src) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            let _ = std::fs::create_dir_all(&dst_path);
+            merge_missing_files(&src_path, &dst_path);
+        } else if file_type.is_file() && !dst_path.exists() {
+            let _ = std::fs::copy(&src_path, &dst_path);
+        }
     }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    register_url_protocol();
+
+    // Must run before any UI/tokio setup: if another instance already owns
+    // the lock port, this process's only job is forwarding its `vyrapp://`
+    // argv (if any) and exiting -- opening a second window would be wrong
+    // regardless of whether a link was actually clicked.
+    let Some(deeplink_listener) = claim_single_instance_or_forward() else {
+        std::process::exit(0);
+    };
+
     migrate_legacy_data_dir();
 
     dotenvy::from_filename(".env.local").ok();
@@ -112,7 +268,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| obf::convex_url().to_string());
 
     if deployment_url.is_empty() {
-        eprintln!("Missing CONVEX_URL in .env.local. Run `npx convex dev` and rebuild.");
+        eprintln!("Missing CONVEX_URL (baked at compile time from .env.local). Rebuild the app.");
         std::process::exit(1);
     }
 
@@ -141,10 +297,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (tx, rx) = unbounded_channel::<Message>();
     wire_callbacks(&ui, tx.clone());
 
+    // Same funnel for a deep link that arrives via someone else's forwarded
+    // argv (see `run_deeplink_listener`) and one on this process's own cold
+    // start -- both just become a `Message::DeepLinkReceived` on `tx`.
+    {
+        let tx = tx.clone();
+        std::thread::spawn(move || run_deeplink_listener(deeplink_listener, tx));
+    }
+    if let Some(url) = deep_link_arg() {
+        let _ = tx.send(Message::DeepLinkReceived(url));
+    }
+
     let ui_weak = ui.as_weak();
     std::thread::spawn(move || {
-        let tokio_rt = tokio::runtime::Runtime::new().expect("failed to start tokio runtime");
-        tokio_rt.block_on(run_pump(deployment_url, rx, tx, ui_weak));
+        // A dead pump thread leaves the window alive but the app brain-dead
+        // -- every UI action (including window close, which routes through
+        // the pump) silently does nothing and the user has to kill the
+        // process. Fail visibly instead: log and quit the event loop.
+        let tokio_rt = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(err) => {
+                eprintln!("fatal: failed to start tokio runtime: {err}");
+                let _ = slint::invoke_from_event_loop(|| {
+                    let _ = slint::quit_event_loop();
+                });
+                return;
+            }
+        };
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tokio_rt.block_on(run_pump(deployment_url, rx, tx, ui_weak));
+        }));
+        if let Err(payload) = panicked {
+            eprintln!("fatal: update loop panicked: {payload:?}");
+            let _ = slint::invoke_from_event_loop(|| {
+                let _ = slint::quit_event_loop();
+            });
+        }
     });
 
     // `ui.run()` would end the Slint event loop as soon as the last window
@@ -207,6 +395,13 @@ fn apply_window_action(app: &mut App, ui_weak: &slint::Weak<slint_ui::AppWindow>
         WindowAction::ShowAndFocus => {
             if let Some(ui) = ui_weak.upgrade() {
                 let _ = ui.window().show();
+                // `show()` alone can leave the window minimized or buried
+                // behind others on Windows -- tray "Open" should raise and
+                // focus it like clicking the taskbar icon does.
+                let _ = ui.window().with_winit_window(|window| {
+                    window.set_minimized(false);
+                    window.focus_window();
+                });
             }
         }
         WindowAction::Exit => {
@@ -233,7 +428,13 @@ struct UiSnapshot {
     password_input: String,
     display_name_input: String,
     email_input: String,
+    password_confirm_input: String,
+    password_reset_code_input: String,
+    password_reset_code_sent: bool,
     auth_error: String,
+    auth_username_error: String,
+    auth_password_error: String,
+    auth_email_error: String,
     auth_busy: bool,
     email_verify_input: String,
     email_verify_code_input: String,
@@ -250,6 +451,19 @@ struct UiSnapshot {
     command_palette_open: bool,
     command_palette_query: String,
     command_palette_results: Vec<String>,
+    /// Ephemeral status toast (`App::toast`), rendered as a floating pill;
+    /// Rust clears it itself after 3s on the Tick.
+    toast: Option<String>,
+    /// Full-screen attachment lightbox target (`App::attachment_preview_url`).
+    attachment_preview_url: Option<String>,
+    /// Scroll-to-bottom pulse for the chat message list (see
+    /// CHAT_SCROLL_PULSE); filled by `sync_ui`, not `from_app`.
+    chat_scroll_pulse: i32,
+    /// `vyrapp://join/<slug>` confirmation dialog (`App::show_join_dialog`).
+    join_dialog_open: bool,
+    join_dialog_server_name: String,
+    join_dialog_server_icon_url: String,
+    join_dialog_invites_paused: bool,
 }
 
 struct ServerSettingsRaw {
@@ -289,11 +503,11 @@ struct SettingsRaw {
     settings_status_input: String,
     settings_bio_input: String,
     settings_avatar_color: String,
-    settings_profile_status: Option<String>,
+    settings_profile_status: Option<(String, bool)>,
     settings_current_password_input: String,
     settings_new_password_input: String,
     settings_confirm_password_input: String,
-    settings_password_status: Option<String>,
+    settings_password_status: Option<(String, bool)>,
     settings_input_devices: Vec<String>,
     settings_output_devices: Vec<String>,
     settings_input_device: Option<String>,
@@ -302,12 +516,14 @@ struct SettingsRaw {
     my_bots: Vec<BotSummary>,
     new_bot_name_input: String,
     bot_invite_username_input: String,
-    bot_status: Option<String>,
+    bot_status: Option<(String, bool)>,
     bot_token_reveal: Option<String>,
     noise_gate: f32,
     update_check_status: Option<String>,
     update_ready: bool,
     ping_status: Option<String>,
+    plus_busy_status: Option<String>,
+    plus_checkout_busy: bool,
 }
 
 struct ProfileRaw {
@@ -413,6 +629,11 @@ struct ChatRaw {
     members_panel_width: f32,
     channel_list_width: f32,
     typing_names: Vec<String>,
+    /// Header "pinned" panel: open flag + the live listPinned rows.
+    pins_panel_open: bool,
+    pinned_messages: Vec<ChatMessage>,
+    /// Image URLs whose fetch failed (drives "[image unavailable]" rows).
+    image_load_failed: std::collections::HashSet<String>,
 }
 
 impl UiSnapshot {
@@ -491,6 +712,8 @@ impl UiSnapshot {
             update_check_status: app.update_check_status.clone(),
             update_ready: app.pending_update_path.is_some(),
             ping_status: app.ping_status.clone(),
+            plus_busy_status: app.plus_busy_status.clone(),
+            plus_checkout_busy: app.plus_checkout_busy,
         });
         let profile = app.session.as_ref().map(|session| ProfileRaw {
             avatar_url: app
@@ -607,19 +830,29 @@ impl UiSnapshot {
             members_panel_width: app.members_panel_width,
             channel_list_width: app.channel_list_width,
             typing_names: app.typing_names.clone(),
+            pins_panel_open: app.pins_panel_open,
+            pinned_messages: app.pinned_messages.clone(),
+            image_load_failed: app.avatar_image_failed.clone(),
         });
         Self {
             screen,
             auth_mode: match app.auth_mode {
                 crate::state::types::AuthMode::Login => slint_ui::AuthMode::Login,
                 crate::state::types::AuthMode::Register => slint_ui::AuthMode::Register,
+                crate::state::types::AuthMode::ForgotPassword => slint_ui::AuthMode::ForgotPassword,
             },
             username_input: app.username_input.clone(),
             image_cache: app.avatar_image_cache.clone(),
             password_input: app.password_input.clone(),
             display_name_input: app.display_name_input.clone(),
             email_input: app.email_input.clone(),
+            password_confirm_input: app.password_confirm_input.clone(),
+            password_reset_code_input: app.password_reset_code_input.clone(),
+            password_reset_code_sent: app.password_reset_code_sent,
             auth_error: app.auth_error.clone().unwrap_or_default(),
+            auth_username_error: app.auth_username_error.clone().unwrap_or_default(),
+            auth_password_error: app.auth_password_error.clone().unwrap_or_default(),
+            auth_email_error: app.auth_email_error.clone().unwrap_or_default(),
             auth_busy: app.auth_busy,
             email_verify_input: app.email_verify_input.clone(),
             email_verify_code_input: app.email_verify_code_input.clone(),
@@ -639,6 +872,13 @@ impl UiSnapshot {
                 .iter()
                 .map(|(_, line, _)| line.clone())
                 .collect(),
+            toast: app.toast.as_ref().map(|(message, _)| message.clone()),
+            attachment_preview_url: app.attachment_preview_url.clone(),
+            chat_scroll_pulse: 0,
+            join_dialog_open: app.show_join_dialog,
+            join_dialog_server_name: app.pending_join_server_name.clone(),
+            join_dialog_server_icon_url: app.pending_join_server_icon.clone(),
+            join_dialog_invites_paused: app.pending_join_invites_paused,
         }
     }
 
@@ -649,7 +889,13 @@ impl UiSnapshot {
         ui.set_password_input(self.password_input.clone().into());
         ui.set_display_name_input(self.display_name_input.clone().into());
         ui.set_email_input(self.email_input.clone().into());
+        ui.set_password_confirm_input(self.password_confirm_input.clone().into());
+        ui.set_password_reset_code_input(self.password_reset_code_input.clone().into());
+        ui.set_password_reset_code_sent(self.password_reset_code_sent);
         ui.set_auth_error(self.auth_error.clone().into());
+        ui.set_auth_username_error(self.auth_username_error.clone().into());
+        ui.set_auth_password_error(self.auth_password_error.clone().into());
+        ui.set_auth_email_error(self.auth_email_error.clone().into());
         ui.set_auth_busy(self.auth_busy);
         ui.set_email_verify_input(self.email_verify_input.clone().into());
         ui.set_email_verify_code_input(self.email_verify_code_input.clone().into());
@@ -668,6 +914,30 @@ impl UiSnapshot {
                 .as_slice()
                 .into(),
         );
+        ui.set_toast_text(self.toast.clone().unwrap_or_default().into());
+        ui.set_attachment_preview_open(self.attachment_preview_url.is_some());
+        ui.set_attachment_preview(
+            self.attachment_preview_url
+                .as_deref()
+                .and_then(|url| img_cache::image_for(&self.image_cache, url))
+                .unwrap_or_default(),
+        );
+        ui.set_chat_scroll_pulse(self.chat_scroll_pulse);
+        ui.set_join_dialog_open(self.join_dialog_open);
+        ui.set_join_dialog_server_name(self.join_dialog_server_name.clone().into());
+        ui.set_join_dialog_server_initial(
+            self.join_dialog_server_name
+                .chars()
+                .next()
+                .map(|c| c.to_uppercase().to_string())
+                .unwrap_or_else(|| "#".to_string())
+                .into(),
+        );
+        ui.set_join_dialog_server_icon(
+            img_cache::image_for(&self.image_cache, &self.join_dialog_server_icon_url)
+                .unwrap_or_default(),
+        );
+        ui.set_join_dialog_invites_paused(self.join_dialog_invites_paused);
         if let Some(chat) = &self.chat {
             apply_chat(chat, &self.image_cache, ui);
         }
@@ -955,6 +1225,7 @@ fn apply_settings(
     ui.set_settings_category(match s.category {
         SettingsCategory::Account => slint_ui::SettingsCategory::Account,
         SettingsCategory::Privacy => slint_ui::SettingsCategory::Privacy,
+        SettingsCategory::Plus => slint_ui::SettingsCategory::Plus,
         SettingsCategory::Bots => slint_ui::SettingsCategory::Bots,
         SettingsCategory::Voice => slint_ui::SettingsCategory::Voice,
         SettingsCategory::About => slint_ui::SettingsCategory::About,
@@ -974,22 +1245,33 @@ fn apply_settings(
             .map(|i| i as i32)
             .unwrap_or(-1),
     );
-    ui.set_settings_profile_status(s.settings_profile_status.clone().unwrap_or_default().into());
+    let (profile_status, profile_status_is_error) = s
+        .settings_profile_status
+        .clone()
+        .unwrap_or_else(|| (String::new(), false));
+    ui.set_settings_profile_status(profile_status.into());
+    ui.set_settings_profile_status_is_error(profile_status_is_error);
     ui.set_settings_current_password_input(s.settings_current_password_input.clone().into());
     ui.set_settings_new_password_input(s.settings_new_password_input.clone().into());
     ui.set_settings_confirm_password_input(s.settings_confirm_password_input.clone().into());
-    ui.set_settings_password_status(
-        s.settings_password_status
-            .clone()
-            .unwrap_or_default()
-            .into(),
-    );
+    let (password_status, password_status_is_error) = s
+        .settings_password_status
+        .clone()
+        .unwrap_or_else(|| (String::new(), false));
+    ui.set_settings_password_status(password_status.into());
+    ui.set_settings_password_status_is_error(password_status_is_error);
     let (badge_text, badge_bg, badge_fg) = if session.platform_role == "owner" {
         viewmodel::badge_for_platform_role("owner")
     } else if session.is_admin {
         viewmodel::badge_for_platform_role("admin")
     } else if session.is_moderator {
         viewmodel::badge_for_platform_role("moderator")
+    } else if session.plus_active {
+        (
+            "PLUS".into(),
+            slint::Color::from_rgb_u8(201, 162, 39),
+            slint::Color::from_rgb_u8(26, 20, 0),
+        )
     } else {
         viewmodel::badge_for_platform_role("user")
     };
@@ -1020,7 +1302,12 @@ fn apply_settings(
             .into(),
     );
     ui.set_settings_bot_invite_username_input(s.bot_invite_username_input.clone().into());
-    ui.set_settings_bot_status(s.bot_status.clone().unwrap_or_default().into());
+    let (bot_status, bot_status_is_error) = s
+        .bot_status
+        .clone()
+        .unwrap_or_else(|| (String::new(), false));
+    ui.set_settings_bot_status(bot_status.into());
+    ui.set_settings_bot_status_is_error(bot_status_is_error);
     let mut input_devices = vec![slint_ui::DeviceRow {
         name: "System default".into(),
         selected: s.settings_input_device.is_none(),
@@ -1061,6 +1348,24 @@ fn apply_settings(
     ui.set_settings_update_check_status(s.update_check_status.clone().unwrap_or_default().into());
     ui.set_settings_update_ready(s.update_ready);
     ui.set_settings_ping_status(s.ping_status.clone().unwrap_or_default().into());
+    ui.set_settings_plus_active(session.plus_active);
+    ui.set_settings_plus_status_line(
+        if session.plus_active {
+            if session.plus_expires_at > 0 {
+                let dt = chrono::DateTime::from_timestamp_millis(session.plus_expires_at)
+                    .map(|d| d.format("%Y-%m-%d").to_string())
+                    .unwrap_or_else(|| "active".into());
+                format!("Active — renews / ends around {dt}")
+            } else {
+                "Active".into()
+            }
+        } else {
+            "Not subscribed — unlock cosmetic perks".into()
+        }
+        .into(),
+    );
+    ui.set_settings_plus_busy_status(s.plus_busy_status.clone().unwrap_or_default().into());
+    ui.set_settings_plus_checkout_busy(s.plus_checkout_busy);
 }
 
 fn apply_profile(
@@ -1083,6 +1388,13 @@ fn apply_profile(
     ui.set_profile_status_message(profile.status_message.clone().into());
     ui.set_profile_bio(profile.bio.clone().into());
     ui.set_profile_is_staff(profile.is_staff);
+    ui.set_profile_is_plus(profile.plus_active);
+    ui.set_profile_has_banner(
+        profile.plus_active && !profile.profile_banner_url.is_empty(),
+    );
+    ui.set_profile_banner_photo(
+        img_cache::image_for(cache, &profile.profile_banner_url).unwrap_or_default(),
+    );
     let viewing_self = p.my_user_id.as_deref() == Some(profile.user_id.as_str());
     ui.set_profile_show_support_dm(profile.can_support_dm && !viewing_self);
     ui.set_profile_is_friend(profile.is_friend);
@@ -1142,6 +1454,14 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
     static GROUP_CANDIDATE_ROWS_CACHE: std::cell::RefCell<Vec<slint_ui::GroupCandidateRow>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    static FRIEND_ROWS_CACHE: std::cell::RefCell<Vec<slint_ui::FriendRow>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    static MEMBER_ONLINE_ROWS_CACHE: std::cell::RefCell<Vec<slint_ui::MemberRow>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    static MEMBER_OFFLINE_ROWS_CACHE: std::cell::RefCell<Vec<slint_ui::MemberRow>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    static MEMBER_BOT_ROWS_CACHE: std::cell::RefCell<Vec<slint_ui::MemberRow>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 fn rows_eq<T>(a: &[T], b: &[T], eq: impl Fn(&T, &T) -> bool) -> bool {
@@ -1168,10 +1488,54 @@ fn group_candidate_row_eq(
 }
 
 fn channel_row_eq(a: &slint_ui::ChannelRow, b: &slint_ui::ChannelRow) -> bool {
+    // Compare every field: `muted`/`is_announcement` are folded into `label`,
+    // but `can_send` and `category_id` are not -- a permission or category
+    // change must still push fresh rows to the model.
     a.conversation_id == b.conversation_id
         && a.label == b.label
         && a.is_voice == b.is_voice
         && a.active == b.active
+        && a.is_announcement == b.is_announcement
+        && a.muted == b.muted
+        && a.can_send == b.can_send
+        && a.category_id == b.category_id
+}
+
+fn friend_row_eq(a: &slint_ui::FriendRow, b: &slint_ui::FriendRow) -> bool {
+    // `photo` is patched into the live model after the rows are set (see
+    // fill_model_photos) and stays empty in both the fresh rows and the
+    // cache, so it's deliberately excluded -- same convention as the other
+    // row comparisons.
+    a.user_id == b.user_id
+        && a.label == b.label
+        && a.subtitle == b.subtitle
+        && a.meta == b.meta
+        && a.initial == b.initial
+        && a.avatar_color == b.avatar_color
+        && a.photo_url == b.photo_url
+        && a.online == b.online
+        && a.favorite == b.favorite
+}
+
+fn member_row_eq(a: &slint_ui::MemberRow, b: &slint_ui::MemberRow) -> bool {
+    let roles_same = a.roles.row_count() == b.roles.row_count()
+        && a
+            .roles
+            .iter()
+            .zip(b.roles.iter())
+            .all(|(x, y)| x.name == y.name && x.color == y.color);
+    a.user_id == b.user_id
+        && a.display_name == b.display_name
+        && a.initial == b.initial
+        && a.avatar_color == b.avatar_color
+        && a.photo_url == b.photo_url
+        && a.online == b.online
+        && a.is_bot == b.is_bot
+        && a.is_plus == b.is_plus
+        && a.badge_text == b.badge_text
+        && a.badge_bg == b.badge_bg
+        && a.badge_fg == b.badge_fg
+        && roles_same
 }
 
 fn msg_row_eq(a: &slint_ui::ChatMessageRow, b: &slint_ui::ChatMessageRow) -> bool {
@@ -1190,6 +1554,7 @@ fn msg_row_eq(a: &slint_ui::ChatMessageRow, b: &slint_ui::ChatMessageRow) -> boo
         && a.author_avatar_color == b.author_avatar_color
         && a.author_photo_url == b.author_photo_url
         && a.is_bot == b.is_bot
+        && a.is_plus == b.is_plus
         && a.mine == b.mine
         && a.encrypted == b.encrypted
         && a.is_call_log == b.is_call_log
@@ -1215,25 +1580,71 @@ fn msg_row_eq(a: &slint_ui::ChatMessageRow, b: &slint_ui::ChatMessageRow) -> boo
         && reactions_same
 }
 
-/// Pushes `rows` to `set` only when they differ from the cached copy.
-fn set_rows_if_changed<T: Clone>(
+/// Pushes `rows` to `set` only when they differ from the cached copy. The
+/// cache takes ownership of the fresh rows and the model is fed straight
+/// from the cache, so a changed list is cloned exactly zero extra times.
+fn set_rows_if_changed<T>(
     cache: &'static std::thread::LocalKey<std::cell::RefCell<Vec<T>>>,
     rows: Vec<T>,
     eq: impl Fn(&T, &T) -> bool,
-    set: impl FnOnce(Vec<T>),
+    set: impl FnOnce(&[T]),
 ) {
     let changed = cache.with(|c| {
         let mut c = c.borrow_mut();
         if rows_eq(&c, &rows, &eq) {
             false
         } else {
-            *c = rows.clone();
+            *c = rows;
             true
         }
     });
     if changed {
-        set(rows);
+        cache.with(|c| set(&c.borrow()));
     }
+}
+
+/// Message-list variant of `set_rows_if_changed`: when the row count is
+/// unchanged (reaction toggles, edits, delete flags, reporting highlight),
+/// patch only the rows that actually differ via `set_row_data` instead of
+/// replacing the whole model. A full replace recreates every delegate,
+/// which resets hover state on all rows and flickers; row-level patches
+/// keep untouched delegates alive.
+fn set_msg_rows(ui: &slint_ui::AppWindow, rows: Vec<slint_ui::ChatMessageRow>) {
+    MSG_ROWS_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if rows_eq(&c, &rows, msg_row_eq) {
+            return;
+        }
+        let model = ui.get_chat_messages();
+        if c.len() == rows.len() && model.row_count() == rows.len() {
+            for (i, row) in rows.iter().enumerate() {
+                if !msg_row_eq(&c[i], row) {
+                    // Fresh rows are built off-thread with empty images.
+                    // Keep already-decoded avatars/attachments on the live
+                    // model so a reaction/edit patch doesn't flash the
+                    // colored-initial fallback and reset hover.
+                    let mut row = row.clone();
+                    if let Some(old) = model.row_data(i) {
+                        if row.author_photo_url == old.author_photo_url
+                            && old.author_photo.size().width > 0
+                        {
+                            row.author_photo = old.author_photo;
+                        }
+                        if row.attachment_url == old.attachment_url
+                            && old.attachment.size().width > 0
+                        {
+                            row.attachment = old.attachment;
+                            row.attachment_loading = false;
+                        }
+                    }
+                    model.set_row_data(i, row);
+                }
+            }
+        } else {
+            ui.set_chat_messages(rows.as_slice().into());
+        }
+        *c = rows;
+    });
 }
 
 /// Decodes the latest remote screenshare JPEG into a `slint::Image`,
@@ -1312,7 +1723,7 @@ fn apply_chat(
             c.selected_server.as_ref().map(|s| s.server_id.as_str()),
         ),
         server_row_eq,
-        |rows| ui.set_chat_servers(rows.as_slice().into()),
+        |rows| ui.set_chat_servers(rows.into()),
     );
     ui.set_chat_add_menu_open(c.server_add_menu_open);
     ui.set_chat_friends_online(c.social_stats.friends_online as i32);
@@ -1336,14 +1747,14 @@ fn apply_chat(
         &GROUP_CANDIDATE_ROWS_CACHE,
         viewmodel::group_candidate_rows(&c.friends, &c.new_group_selected),
         group_candidate_row_eq,
-        |rows| ui.set_chat_group_candidates(rows.as_slice().into()),
+        |rows| ui.set_chat_group_candidates(rows.into()),
     );
     ui.set_chat_group_create_status(c.group_create_status.clone().unwrap_or_default().into());
     set_rows_if_changed(
         &CONVO_ROWS_CACHE,
         viewmodel::conversation_rows(&c.conversations, c.active_conversation.as_deref()),
         convo_row_eq,
-        |rows| ui.set_chat_conversations(rows.as_slice().into()),
+        |rows| ui.set_chat_conversations(rows.into()),
     );
     ui.set_chat_friends_summary(
         format!(
@@ -1424,13 +1835,13 @@ fn apply_chat(
         &TEXT_CHANNEL_ROWS_CACHE,
         viewmodel::channel_rows(&c.channels, c.active_conversation.as_deref(), false),
         channel_row_eq,
-        |rows| ui.set_chat_text_channels(rows.as_slice().into()),
+        |rows| ui.set_chat_text_channels(rows.into()),
     );
     set_rows_if_changed(
         &VOICE_CHANNEL_ROWS_CACHE,
         viewmodel::channel_rows(&c.channels, c.active_conversation.as_deref(), true),
         channel_row_eq,
-        |rows| ui.set_chat_voice_channels(rows.as_slice().into()),
+        |rows| ui.set_chat_voice_channels(rows.into()),
     );
     ui.set_chat_admin_search(c.admin_search_input.clone().into());
     ui.set_chat_admin_status(c.admin_status.clone().unwrap_or_default().into());
@@ -1459,6 +1870,12 @@ fn apply_chat(
         viewmodel::badge_for_platform_role("admin")
     } else if session.is_moderator {
         viewmodel::badge_for_platform_role("moderator")
+    } else if session.plus_active {
+        (
+            "PLUS".into(),
+            slint::Color::from_rgb_u8(201, 162, 39),
+            slint::Color::from_rgb_u8(26, 20, 0),
+        )
     } else {
         viewmodel::badge_for_platform_role("user")
     };
@@ -1499,7 +1916,9 @@ fn apply_chat(
     if let Some(friend) = peer_friend {
         ui.set_chat_peer_initial(viewmodel::initial(friend.label()));
         ui.set_chat_peer_avatar_color(viewmodel::hex_color(&friend.avatar_color));
-        ui.set_chat_peer_online(is_online(friend.last_seen_at));
+        // Prefer server-computed presence (online/idle/dnd) when available;
+        // fall back to last_seen window for stale subscription payloads.
+        ui.set_chat_peer_online(friend.is_online_like());
         ui.set_chat_peer_photo(img_cache::image_for(cache, &c.peer_avatar_url).unwrap_or_default());
     } else {
         ui.set_chat_peer_initial("#".into());
@@ -1603,8 +2022,11 @@ fn apply_chat(
         c.active_conversation_kind.as_deref(),
         Some("channel") | Some("group")
     );
-    set_rows_if_changed(
-        &MSG_ROWS_CACHE,
+    // Patch-in-place when possible: a full model replace rebuilds every
+    // MessageRow delegate and resets TouchArea hover — that made the
+    // floating action bar flash off on every mouse move / image decode.
+    set_msg_rows(
+        ui,
         viewmodel::chat_message_rows(
             &c.messages,
             c.active_conversation_peer_id
@@ -1617,8 +2039,6 @@ fn apply_chat(
             everyone_allowed,
             c.reporting_message_id.as_deref(),
         ),
-        msg_row_eq,
-        |rows| ui.set_chat_messages(rows.as_slice().into()),
     );
     ui.set_chat_quick_emojis(
         QUICK_REACT_EMOJIS
@@ -1718,6 +2138,16 @@ fn apply_chat(
     ui.set_chat_members_online_list(viewmodel::member_rows(&online_members).as_slice().into());
     ui.set_chat_members_offline_list(viewmodel::member_rows(&offline_members).as_slice().into());
     ui.set_chat_members_bot_list(viewmodel::member_rows(&bot_members).as_slice().into());
+
+    // ---- Pinned-messages panel (header pin icon) ----
+    ui.set_chat_pins_open(c.pins_panel_open);
+    ui.set_chat_pinned_messages(viewmodel::pinned_rows(&c.pinned_messages).as_slice().into());
+
+    // ---- User panel voice state (sidebar mic/deafen buttons) ----
+    // Same Arc<AtomicBool>s the call/room-voice audio pipelines read, so
+    // these reflect (and drive) the real capture/playback mute state.
+    ui.set_chat_mic_muted(c.call_muted);
+    ui.set_chat_deafened(c.call_output_muted);
 
     // ---- Call banner ----
     ui.set_banner_peer_volume(
@@ -1844,13 +2274,35 @@ fn apply_chat(
         let n = model.row_count();
         for i in 0..n {
             if let Some(mut row) = model.row_data(i) {
+                let mut dirty = false;
                 if let Some(img) = img_cache::image_for(cache, &row.author_photo_url) {
-                    row.author_photo = img;
+                    // Only push when decode size changed -- set_row_data on
+                    // every resync rebuilt the delegate and killed hover.
+                    if row.author_photo.size() != img.size() {
+                        row.author_photo = img;
+                        dirty = true;
+                    }
                 }
-                if let Some(img) = img_cache::image_for(cache, &row.attachment_url) {
-                    row.attachment = img;
+                if !row.attachment_url.is_empty() {
+                    if let Some(img) = img_cache::image_for(cache, &row.attachment_url) {
+                        if row.attachment.size() != img.size() || row.attachment_loading {
+                            row.attachment = img;
+                            row.attachment_loading = false;
+                            dirty = true;
+                        }
+                    } else if c.image_load_failed.contains(row.attachment_url.as_str())
+                        && row.attachment_loading
+                    {
+                        // Fetch failed (see AvatarImageLoaded Err) -- stop
+                        // showing "[loading image...]", the row falls back
+                        // to "[image unavailable]".
+                        row.attachment_loading = false;
+                        dirty = true;
+                    }
                 }
-                model.set_row_data(i, row);
+                if dirty {
+                    model.set_row_data(i, row);
+                }
             }
         }
     }
@@ -1910,7 +2362,13 @@ fn apply_window_icon(ui: &slint_ui::AppWindow, has_alerts: bool) {
 }
 
 fn sync_ui(app: &App, ui_weak: &slint::Weak<slint_ui::AppWindow>) {
-    let snapshot = UiSnapshot::from_app(app);
+    let mut snapshot = UiSnapshot::from_app(app);
+    // Consume a pending scroll-to-bottom request: bump the pulse counter so
+    // the Slint `changed chat_scroll_pulse` handler fires even for two
+    // scrolls in a row.
+    if CHAT_SCROLL_PENDING.swap(false, Ordering::Relaxed) {
+        snapshot.chat_scroll_pulse = CHAT_SCROLL_PULSE.fetch_add(1, Ordering::Relaxed) as i32 + 1;
+    }
     let has_unread_alerts = app.has_unread_alerts();
     tray::set_unread_alerts(has_unread_alerts);
     let ui_weak = ui_weak.clone();
@@ -1954,6 +2412,7 @@ fn wire_callbacks(ui: &slint_ui::AppWindow, tx: UnboundedSender<Message>) {
         let mode = match mode {
             slint_ui::AuthMode::Login => crate::state::types::AuthMode::Login,
             slint_ui::AuthMode::Register => crate::state::types::AuthMode::Register,
+            slint_ui::AuthMode::ForgotPassword => crate::state::types::AuthMode::ForgotPassword,
         };
         let _ = t.send(Message::SwitchAuthMode(mode));
     });
@@ -1974,6 +2433,16 @@ fn wire_callbacks(ui: &slint_ui::AppWindow, tx: UnboundedSender<Message>) {
     });
 
     let t = tx.clone();
+    ui.on_auth_password_confirm_changed(move |text| {
+        let _ = t.send(Message::PasswordConfirmInputChanged(text.to_string()));
+    });
+
+    let t = tx.clone();
+    ui.on_auth_password_reset_code_changed(move |text| {
+        let _ = t.send(Message::PasswordResetCodeInputChanged(text.to_string()));
+    });
+
+    let t = tx.clone();
     ui.on_auth_email_changed(move |text| {
         let _ = t.send(Message::EmailInputChanged(text.to_string()));
     });
@@ -1981,6 +2450,21 @@ fn wire_callbacks(ui: &slint_ui::AppWindow, tx: UnboundedSender<Message>) {
     let t = tx.clone();
     ui.on_auth_submit(move || {
         let _ = t.send(Message::SubmitAuth);
+    });
+
+    let t = tx.clone();
+    ui.on_auth_retry(move || {
+        let _ = t.send(Message::RetryConnect);
+    });
+
+    let t = tx.clone();
+    ui.on_toast_dismissed(move || {
+        let _ = t.send(Message::ClearToast);
+    });
+
+    let t = tx.clone();
+    ui.on_attachment_preview_close(move || {
+        let _ = t.send(Message::CloseAttachmentPreview);
     });
 
     let t = tx.clone();
@@ -2027,6 +2511,15 @@ fn wire_callbacks(ui: &slint_ui::AppWindow, tx: UnboundedSender<Message>) {
     let t = tx.clone();
     ui.on_command_palette_pick(move |i| {
         let _ = t.send(Message::CommandPalettePick(i as usize));
+    });
+
+    let t = tx.clone();
+    ui.on_join_dialog_confirm(move || {
+        let _ = t.send(Message::ConfirmJoinDeepLink);
+    });
+    let t = tx.clone();
+    ui.on_join_dialog_dismiss(move || {
+        let _ = t.send(Message::DismissJoinDialog);
     });
 
     wire_chat_callbacks(ui, &tx);
@@ -2246,6 +2739,9 @@ fn wire_chat_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Message>) 
     on0!(on_chat_confirm_clear, Message::ConfirmClearChat);
     on0!(on_chat_join_voice, Message::JoinVoiceChannel);
     on0!(on_chat_leave_voice, Message::LeaveVoiceChannel);
+    on0!(on_chat_toggle_pins, Message::TogglePinsPanel);
+    on0!(on_chat_toggle_mute, Message::ToggleMute);
+    on0!(on_chat_toggle_deafen, Message::ToggleDeafen);
     on1!(on_chat_message_input_edited, |t: slint::SharedString| {
         Message::MessageInputChanged(t.to_string())
     });
@@ -2408,6 +2904,7 @@ fn wire_settings_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Messag
             let cat = match cat {
                 slint_ui::SettingsCategory::Account => SettingsCategory::Account,
                 slint_ui::SettingsCategory::Privacy => SettingsCategory::Privacy,
+                slint_ui::SettingsCategory::Plus => SettingsCategory::Plus,
                 slint_ui::SettingsCategory::Bots => SettingsCategory::Bots,
                 slint_ui::SettingsCategory::Voice => SettingsCategory::Voice,
                 slint_ui::SettingsCategory::About => SettingsCategory::About,
@@ -2498,6 +2995,9 @@ fn wire_settings_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Messag
     on0!(on_settings_check_for_update, Message::CheckForUpdate);
     on0!(on_settings_restart_update, Message::RestartAndUpdate);
     on0!(on_settings_measure_ping, Message::MeasurePing);
+    on0!(on_settings_plus_subscribe, Message::PlusSubscribe);
+    on0!(on_settings_plus_manage_billing, Message::PlusManageBilling);
+    on0!(on_settings_plus_refresh, Message::PlusRefreshStatus);
 }
 
 /// Wires the `ss_*` (server settings) Slint callbacks -- port of

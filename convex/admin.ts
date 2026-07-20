@@ -34,7 +34,7 @@ export const listUsers = query({
 /**
  * Set platform role. Only admin/owner can promote/demote.
  * - Cannot demote yourself
- * - Pinned owner (v3nn7) rank is permanent — cannot be changed
+ * - Pinned owner (OWNER_USERNAMES in session.ts) rank is permanent — cannot be changed
  * - Cannot assign "owner" via panel (only pinned list / code)
  * - Granting/revoking "admin" is owner-only; admins manage users/moderators
  * - Moderators cannot set roles at all

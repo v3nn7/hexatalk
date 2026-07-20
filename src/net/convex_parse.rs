@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 
 use convex::{FunctionResult, Value};
 
-use crate::state::types::{AdminStats, AdminUserDetail, ProfileView, ServerStats, Session};
+use crate::state::types::{
+    AdminStats, AdminUserDetail, DeepLinkJoinInfo, ProfileView, ServerStats, Session,
+};
 
 // ---------- Convex parsing helpers ----------
 
@@ -30,7 +32,7 @@ pub(crate) fn obj_f64(obj: &BTreeMap<String, Value>, key: &str) -> f64 {
 /// Millisecond timestamps arrive from Convex as JSON numbers; convert to
 /// integer ms-since-epoch once, here at the parse boundary, so the rest of
 /// the app only ever threads `i64` timestamps around.
-pub(super) fn obj_ms(obj: &BTreeMap<String, Value>, key: &str) -> i64 {
+pub(crate) fn obj_ms(obj: &BTreeMap<String, Value>, key: &str) -> i64 {
     match obj.get(key) {
         Some(Value::Float64(f)) => *f as i64,
         Some(Value::Int64(i)) => *i,
@@ -49,28 +51,23 @@ pub(super) fn obj_opt_str(obj: &BTreeMap<String, Value>, key: &str) -> Option<St
     }
 }
 
-pub(super) fn obj_object_array(
-    obj: &BTreeMap<String, Value>,
-    key: &str,
-) -> Vec<BTreeMap<String, Value>> {
+/// Borrowing array accessor: no per-element `BTreeMap` clone. Prefer it in
+/// hot parsers (messages, members) that only read scalar fields out of
+/// each row.
+pub(super) fn obj_array_ref<'a>(obj: &'a BTreeMap<String, Value>, key: &str) -> &'a [Value] {
     match obj.get(key) {
-        Some(Value::Array(items)) => items
-            .iter()
-            .filter_map(|item| match item {
-                Value::Object(o) => Some(o.clone()),
-                _ => None,
-            })
-            .collect(),
-        _ => Vec::new(),
+        Some(Value::Array(items)) => items,
+        _ => &[],
     }
 }
 
-pub(super) fn obj_object(
-    obj: &BTreeMap<String, Value>,
+/// Borrowing object accessor (nested object without cloning the map).
+pub(super) fn obj_object_ref<'a>(
+    obj: &'a BTreeMap<String, Value>,
     key: &str,
-) -> Option<BTreeMap<String, Value>> {
+) -> Option<&'a BTreeMap<String, Value>> {
     match obj.get(key) {
-        Some(Value::Object(o)) => Some(o.clone()),
+        Some(Value::Object(o)) => Some(o),
         _ => None,
     }
 }
@@ -160,6 +157,9 @@ pub(crate) fn parse_session(result: FunctionResult) -> Result<Session, String> {
                 },
                 email: obj_str(&obj, "email"),
                 email_verified: obj.get("emailVerified").map(value_as_bool).unwrap_or(false),
+                plus_active: obj.get("plusActive").map(value_as_bool).unwrap_or(false),
+                plus_expires_at: obj_ms(&obj, "plusExpiresAt"),
+                profile_banner_url: obj_str(&obj, "profileBannerUrl"),
             })
         }
         FunctionResult::Value(_) => Err("Unexpected server response".to_string()),
@@ -215,6 +215,9 @@ pub(crate) fn parse_me(result: FunctionResult, token: String) -> Result<Session,
                 },
                 email: obj_str(&obj, "email"),
                 email_verified: obj.get("emailVerified").map(value_as_bool).unwrap_or(false),
+                plus_active: obj.get("plusActive").map(value_as_bool).unwrap_or(false),
+                plus_expires_at: obj_ms(&obj, "plusExpiresAt"),
+                profile_banner_url: obj_str(&obj, "profileBannerUrl"),
             })
         }
         FunctionResult::Value(_) => Err("Unexpected server response".to_string()),
@@ -310,6 +313,8 @@ pub(crate) fn parse_profile_view(result: FunctionResult) -> Result<ProfileView, 
             favorite: obj.get("favorite").map(value_as_bool).unwrap_or(false),
             nickname: obj_str(&obj, "nickname"),
             private_note: obj_str(&obj, "privateNote"),
+            plus_active: obj.get("plusActive").map(value_as_bool).unwrap_or(false),
+            profile_banner_url: obj_str(&obj, "profileBannerUrl"),
         }),
         FunctionResult::Value(_) => Err("Unexpected server response".to_string()),
         FunctionResult::ErrorMessage(err) => Err(err),
@@ -319,6 +324,26 @@ pub(crate) fn parse_profile_view(result: FunctionResult) -> Result<ProfileView, 
 
 /// `servers:serverStats` → typed counts. `None` on any error (the caller
 /// just leaves the stats card in its "loading" state).
+/// `servers:resolveCustomSlug` -> `None` for a slug with no server (missing
+/// vs. malformed is a separate `Err` case, handled by the caller).
+pub(crate) fn parse_deep_link_info(
+    result: FunctionResult,
+) -> Result<Option<DeepLinkJoinInfo>, String> {
+    match result {
+        FunctionResult::Value(Value::Null) => Ok(None),
+        FunctionResult::Value(Value::Object(obj)) => Ok(Some(DeepLinkJoinInfo {
+            server_id: obj_str(&obj, "serverId"),
+            name: obj_str(&obj, "name"),
+            icon_url: obj_str(&obj, "iconUrl"),
+            invites_paused: obj_bool(&obj, "invitesPaused"),
+            invite_code: obj_str(&obj, "inviteCode"),
+        })),
+        FunctionResult::Value(_) => Err("Unexpected server response".to_string()),
+        FunctionResult::ErrorMessage(err) => Err(err),
+        FunctionResult::ConvexError(err) => Err(format!("{err:?}")),
+    }
+}
+
 pub(crate) fn parse_server_stats(result: FunctionResult) -> Option<ServerStats> {
     match result {
         FunctionResult::Value(Value::Object(obj)) => Some(ServerStats {

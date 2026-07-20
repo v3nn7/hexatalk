@@ -2,6 +2,9 @@ import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { currentUser } from "./session";
 
+/** Invites may live at most this long — no effectively-permanent invites. */
+const MAX_INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
 /**
  * Host publishes a peerseal invite (`ps1:…`) for a direct conversation.
  * Replaces any previous invite for that chat.
@@ -36,6 +39,9 @@ export const publishInvite = mutation({
     }
     if (args.expiresAt < Date.now()) {
       throw new Error("Invite already expired");
+    }
+    if (args.expiresAt > Date.now() + MAX_INVITE_TTL_MS) {
+      throw new Error("Invite expiry is too far in the future");
     }
 
     const existing = await ctx.db

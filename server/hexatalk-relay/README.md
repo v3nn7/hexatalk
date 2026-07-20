@@ -17,9 +17,11 @@ Serwer przypisuje peer-id i wysyła **tekstowe linie statusu**, których klient 
 | `⏳ waiting for peer (1/16 slots)` | pierwszy peer w pokoju — czekaj |
 | `✅ peer joined (N peers in room)` | peer gotowy — klient zaczyna wysyłać dane |
 | `⏳ peer left (N peers remaining)` | peer się rozłączył (informacyjne) |
-| `❌ invalid token` / `❌ room full (max N)` / `❌ invalid room id` | błąd krytyczny — klient przerywa bez retry |
+| `❌ invalid token` / `❌ room full (max N)` / `❌ invalid room id` / `❌ server room limit reached, try again later` / `❌ too many rooms from your address` | błąd krytyczny — klient przerywa bez retry |
 
 Po handshake'u każda **binarna ramka WebSocket** od jednego peera jest przekazywana bez zmian do pozostałych członków pokoju. Obsługiwanych jest wiele pokoi naraz i wielu peerów w pokoju (np. grupowy voice). Pokój żyje tak długo, jak długo ma peerów.
+
+**Ramki tekstowe od klientów są odrzucane** (liczone w logu `peer left` jako `text_dropped`). Legalny klient wysyła ciphertext wyłącznie jako ramki binarne, a forwardowanie tekstu pozwalałoby złośliwemu peerowi podrzucać innym sesjom sfałszowane linie `❌`/`✅`/`⏳` — jedyny tekst na kablu to linie statusowe generowane przez serwer.
 
 Dodatkowe endpointy HTTP:
 
@@ -71,17 +73,24 @@ scp target/x86_64-unknown-linux-gnu/release/hexatalk-relay user@IP_VPS:/tmp/
 ## Uruchomienie
 
 ```bash
-hexatalk-relay --bind 0.0.0.0:9000 --token TWOJ_SEKRET
+RELAY_TOKEN=TWOJ_SEKRET hexatalk-relay --bind 0.0.0.0:9000
 ```
+
+**Produkcyjnie token jest WYMAGANY** — bez niego relay jest otwarty dla każdego (serwer loguje wtedy ostrzeżenie przy starcie). Sekret przekazuj zmienną środowiskową **`RELAY_TOKEN`** (niewidoczna w `ps aux` ani w pliku unitu systemd, w przeciwieństwie do `--token`). Flaga `--token` istnieje dla wygody lokalnej i **nadpisuje** `RELAY_TOKEN`. Porównanie tokenu jest constant-time (bez wczesnego wyjścia na pierwszym różnym bajcie).
 
 Opcje:
 
 | Opcja | Domyślnie | Opis |
 |---|---|---|
 | `--bind <ADDR>` | `0.0.0.0:9000` | adres nasłuchu |
-| `--token <TOKEN>` | *(brak)* | wspólny sekret wymagany jako `?token=` |
+| `--token <TOKEN>` | *(brak)* | wspólny sekret wymagany jako `?token=`; nadpisuje `RELAY_TOKEN` |
 | `--max-peers <N>` | `16` | maks. peerów w pokoju |
 | `--max-frame <BYTES>` | `1048576` | maks. rozmiar ramki WS (klient chunkuje do ~60 KiB) |
+| `--max-conn-per-ip <N>` | `32` | maks. aktywnych połączeń z jednego IP (nadmiar → HTTP `429`) |
+| `--max-rooms <N>` | `10000` | maks. pokoi ogółem (nadmiar → `❌ server room limit reached, try again later`) |
+| `--max-rooms-per-ip <N>` | `64` | maks. pokoi tworzonych z jednego IP (nadmiar → `❌ too many rooms from your address`) |
+
+Zmienna środowiskowa: **`RELAY_TOKEN`** — wspólny sekret, używany gdy nie podano `--token`.
 
 Logi na stdout (systemd zbiera je przez journald); poziom przez `RUST_LOG=debug`.
 
@@ -99,7 +108,8 @@ Wants=network-online.target
 Type=simple
 User=hexatalk
 Group=hexatalk
-ExecStart=/usr/local/bin/hexatalk-relay --bind 0.0.0.0:9000 --token ZMNIEN_TEN_SEKRET
+EnvironmentFile=/etc/hexatalk-relay.env
+ExecStart=/usr/local/bin/hexatalk-relay --bind 0.0.0.0:9000
 Restart=always
 RestartSec=2
 Environment=RUST_LOG=info
@@ -109,6 +119,19 @@ PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
+```
+
+Sekret trzymaj w `/etc/hexatalk-relay.env` (nie w `ExecStart` — tam byłby widoczny w `ps aux` i w samym pliku unitu):
+
+```bash
+# /etc/hexatalk-relay.env
+RELAY_TOKEN=ZMNIEN_TEN_SEKRET
+```
+
+```bash
+echo 'RELAY_TOKEN=ZMNIEN_TEN_SEKRET' | sudo tee /etc/hexatalk-relay.env
+sudo chown root:hexatalk /etc/hexatalk-relay.env
+sudo chmod 0640 /etc/hexatalk-relay.env
 ```
 
 Aktywacja:
@@ -150,11 +173,11 @@ $env:PEERSEAL_RELAY = "ws://1.2.3.4:9000"
 setx PEERSEAL_RELAY "ws://1.2.3.4:9000"
 ```
 
-Klient dołoży sam ścieżkę: `ws://1.2.3.4:9000/v1/room/{room_id}?token={token}` (token pokoju pochodzi z invite — to **nie** jest `--token` serwera; sekret serwera weryfikuj po swojej stronie tylko jeśli chcesz dodatkową warstwę, pamiętając że klient wysyła w `?token=` token pokoju, więc `--token` serwera musi mu odpowiadać — najprościej nie ustawiać `--token`, chyba że kontrolujesz obie strony).
+Klient dołoży sam ścieżkę: `ws://1.2.3.4:9000/v1/room/{room_id}?token={token}`. Uwaga: klient wysyła w `?token=` **token pokoju z invite**, więc serwerowy `--token`/`RELAY_TOKEN` musi mu odpowiadać — sensowne tylko wtedy, gdy kontrolujesz obie strony (własny serwer + rozdawane invite). Na produkcji: **token WYMAGANY + `wss://` przez reverse proxy** (patrz niżej).
 
-### TLS / wss przez reverse proxy (opcjonalnie, zalecane dla domeny)
+### TLS / wss przez reverse proxy (WYMAGANE na produkcji)
 
-Jeśli chcesz `wss://` (i wtedy możesz użyć gołej domeny w `PEERSEAL_RELAY`), postaw przed relayem np. **Caddy**, który sam ogarnie certyfikat Let's Encrypt:
+Serwer celowo nie mówi TLS — terminuj go na reverse proxy (wtedy możesz też użyć gołej domeny w `PEERSEAL_RELAY`). Postaw przed relayem np. **Caddy**, który sam ogarnie certyfikat Let's Encrypt:
 
 ```
 # /etc/caddy/Caddyfile
@@ -168,6 +191,8 @@ Wtedy relay bindować lokalnie: `--bind 127.0.0.1:9000`, a w aplikacji:
 ```powershell
 setx PEERSEAL_RELAY "wss://relay.twojadomena.pl"
 ```
+
+⚠️ **Limity per-IP za proxy:** gdy relay stoi za reverse proxy, wszystkie połączenia przychodzą z adresu proxy (np. `127.0.0.1`), więc `--max-conn-per-ip` / `--max-rooms-per-ip` dotyczą wtedy proxy jako całości. Za proxy albo podnieś te limity (`--max-conn-per-ip` odpowiednio do ruchu), albo tnij flood na samym proxy.
 
 (Uwaga: `is_transient_relay_error` w aplikacji traktuje m.in. `close_notify` / `unexpected EOF` jako retryable — częste przy proxy zrywających idle WSS; nasz serwer wysyła ping co 25 s, co temu zapobiega.)
 

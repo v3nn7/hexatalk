@@ -4,6 +4,11 @@
 *.pdb
 *.bk
 
+# Per-version release archives kept locally as delta bases (scripts/release.ps1,
+# how_to_gen_delta.md) -- large binaries, never committed.
+/releases
+/deltas
+
 # ---------- Node / Convex ----------
 node_modules/
 .env

@@ -52,10 +52,14 @@ use super::screenshare::{self, ShareTarget};
 /// set up alongside this handle direct P2P, which works for most network
 /// pairs, but two peers both behind symmetric NAT (or a similarly
 /// restrictive firewall) can only be bridged by a relay. When no relay is
-/// configured, this falls back to the free public Open Relay (by Metered)
-/// so those pairs can still connect; setting the three env values (e.g.
-/// pointing at a self-hosted coturn instance) overrides the fallback --
-/// no other code changes required.
+/// configured, this returns `None` and calls run STUN-only: hard-NAT pairs
+/// then fail ICE and hit the connect-timeout watchdog, instead of silently
+/// routing media through a third party. There is deliberately no built-in
+/// plaintext fallback -- the previous one shipped the free public Open
+/// Relay (by Metered) credentials in the binary, and since those are
+/// published for everyone, anyone could ride that relay (and observe
+/// relayed traffic metadata) on our dime; a real relay belongs in
+/// `.env.local` (baked in, XOR-obfuscated) or the runtime env vars.
 pub(super) fn turn_ice_server() -> Option<RTCIceServer> {
     fn resolve(runtime_key: &str, baked: &str) -> String {
         std::env::var(runtime_key)
@@ -66,19 +70,8 @@ pub(super) fn turn_ice_server() -> Option<RTCIceServer> {
 
     let url = resolve("TURN_URL", crate::obf::turn_url());
     if url.is_empty() {
-        // No relay configured anywhere: use the free public Open Relay
-        // (by Metered) so peers behind hard NATs still have a way to
-        // bridge. Any relay set via the env vars above takes precedence
-        // over this built-in default.
-        return Some(RTCIceServer {
-            urls: vec![
-                "turn:openrelay.metered.ca:80".to_string(),
-                "turn:openrelay.metered.ca:443".to_string(),
-                "turn:openrelay.metered.ca:443?transport=tcp".to_string(),
-            ],
-            username: "openrelayproject".to_string(),
-            credential: "openrelayproject".to_string(),
-        });
+        // No relay configured anywhere: STUN-only (see the doc comment).
+        return None;
     }
     let username = resolve("TURN_USERNAME", crate::obf::turn_username());
     let credential = resolve("TURN_CREDENTIAL", crate::obf::turn_credential());

@@ -56,6 +56,16 @@ fn main() {
 /// encryption: the point is that `strings.exe` / a hex viewer no longer
 /// shows the deployment URL, TURN credentials, relay host or update
 /// endpoints in plaintext, not to withstand a determined reverser.
+///
+/// Hard limits, because the key sits right here in the repo: anyone with
+/// the source (or ~15 minutes with a disassembler) can recover every baked
+/// value, so this is an anti-`strings` measure only — it does NOT make a
+/// value secret. Rule of thumb: never bake anything here whose leak would
+/// cost money or access — no paid-API keys, no TURN credentials with
+/// billing attached, no signing keys. Baked values should be things that
+/// are acceptable to treat as public-but-not-greppable (deployment URLs,
+/// hosts, the update public key). Real secrets belong in runtime env vars
+/// or a server-side component, never in this list.
 const OBF_KEY: [u8; 32] = [
     0xA7, 0x3C, 0x59, 0xE1, 0x06, 0x8B, 0xD4, 0x2F, 0x71, 0x9E, 0x42, 0xB8, 0x1D, 0xF3, 0x65, 0xC0,
     0x38, 0xAA, 0x0B, 0x97, 0x54, 0xDC, 0x21, 0x7F, 0xE8, 0x4A, 0x13, 0xB5, 0x6E, 0x90, 0x27, 0xFB,
@@ -88,7 +98,7 @@ fn emit_obfuscated_secrets() {
 
     // Update-host endpoints + the ed25519 release public key (moved here
     // from src/update_check.rs so they go through the same obfuscation).
-    let values: [(&str, String); 9] = [
+    let values: [(&str, String); 11] = [
         ("CONVEX_URL", env_value("CONVEX_URL")),
         ("TURN_URL", env_value("TURN_URL")),
         ("TURN_USERNAME", env_value("TURN_USERNAME")),
@@ -103,6 +113,30 @@ fn emit_obfuscated_secrets() {
         (
             "UPDATE_PUBLIC_KEY_B64",
             "0cJIouMNtQV708XWpDinnsSjevzQm8bQ2mxpe6/s9eg=".to_string(),
+        ),
+        // Directory (trailing slash) that bsdiff-compatible incremental
+        // update patches are uploaded to, named `HexaTalk-<from>-<to>.delta`
+        // (see src/update_check.rs). Missing/mismatched deltas just fall
+        // back to the full-exe download above, so this doesn't need to be
+        // kept as tightly in sync as the other update endpoints.
+        (
+            "UPDATE_DELTA_BASE_URL",
+            "https://astrakit.pro/deltas/".to_string(),
+        ),
+        // AES-256 key (base64 of 32 raw bytes) used to decrypt HTD1-framed
+        // delta files on download. Must match RELEASE_DELTA_KEY_HEX used by
+        // scripts/encrypt_delta.py / release.ps1. Override via env for
+        // local builds that ship against a different key.
+        (
+            "UPDATE_DELTA_KEY_B64",
+            {
+                let from_env = env_value("UPDATE_DELTA_KEY_B64");
+                if from_env.is_empty() {
+                    "wU4ytiPCMY7mv2fMhdiLpUaiILJp4a9SSH7sICdKVU8=".to_string()
+                } else {
+                    from_env
+                }
+            },
         ),
     ];
 

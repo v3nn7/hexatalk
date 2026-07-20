@@ -1,9 +1,9 @@
 import { v } from "convex/values";
 import { mutation, internalMutation, query, MutationCtx, QueryCtx } from "./_generated/server";
-import { currentUser } from "./session";
+import { currentUser, isBlockedEitherWay, platformRank } from "./session";
 import { Doc, Id } from "./_generated/dataModel";
 import { conversationAllowsStorage } from "./prefs";
-import { Perm, channelPermissions, requirePerm } from "./roles";
+import { Perm, channelPermissions, requireChannelAccess, requirePerm } from "./roles";
 
 async function requireMembership(
   ctx: QueryCtx | MutationCtx,
@@ -19,6 +19,40 @@ async function requireMembership(
   if (!membership) {
     throw new Error("You're not a member of this chat");
   }
+  return membership;
+}
+
+/** Remove ALL reaction rows of a message (loops past the 200-row page
+ * size so a message with more reactions doesn't leak orphan rows). */
+async function deleteReactionsForMessage(
+  ctx: MutationCtx,
+  messageId: Id<"messages">,
+) {
+  for (;;) {
+    const rows = await ctx.db
+      .query("reactions")
+      .withIndex("by_message", (q) => q.eq("messageId", messageId))
+      .take(200);
+    if (rows.length === 0) break;
+    for (const row of rows) {
+      await ctx.db.delete("reactions", row._id);
+    }
+    if (rows.length < 200) break;
+  }
+}
+
+/** Remove the edit-history snapshots of a message (purge / clear / wipe). */
+async function deleteEditHistoryForMessage(
+  ctx: MutationCtx,
+  messageId: Id<"messages">,
+) {
+  const rows = await ctx.db
+    .query("messageEditHistory")
+    .withIndex("by_message", (q) => q.eq("messageId", messageId))
+    .take(50);
+  for (const row of rows) {
+    await ctx.db.delete("messageEditHistory", row._id);
+  }
 }
 
 export const REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🔥", "🎉", "👀"];
@@ -27,25 +61,43 @@ export const list = query({
   args: {
     sessionToken: v.string(),
     conversationId: v.id("conversations"),
+    // Optional "load older" pagination: only messages created BEFORE this
+    // ms-epoch timestamp are returned. Omit for the latest page (the Rust
+    // client subscribes without it).
+    before: v.optional(v.number()),
+    // Page size, 1-100, default 100.
+    limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const me = await currentUser(ctx, args.sessionToken);
-    await requireMembership(ctx, args.conversationId, me._id);
+    await requireChannelAccess(
+      ctx,
+      args.conversationId,
+      me._id,
+      Perm.VIEW_CHANNELS,
+    );
 
-    const isAdmin = me.role === "admin";
+    const isAdmin = platformRank(me) >= 100;
+    const limit = Math.min(Math.max(Math.floor(args.limit ?? 100), 1), 100);
     const messages = await ctx.db
       .query("messages")
-      .withIndex("by_conversation", (q) =>
-        q.eq("conversationId", args.conversationId),
-      )
+      .withIndex("by_conversation", (q) => {
+        const base = q.eq("conversationId", args.conversationId);
+        return args.before !== undefined
+          ? base.lt("_creationTime", args.before)
+          : base;
+      })
       .order("desc")
-      .take(100);
+      .take(limit);
 
     // Avatar images are looked up live (not denormalized onto the message)
     // so a profile photo change shows up on the sender's older messages too.
     // Cache per-author within this page since one author usually sent
     // several of the messages being returned.
-    const authorMeta = new Map<string, { url: string; isBot: boolean }>();
+    const authorMeta = new Map<
+      string,
+      { url: string; isBot: boolean; plusActive: boolean }
+    >();
     async function resolveAuthor(authorId: Id<"users">) {
       const cached = authorMeta.get(authorId);
       if (cached !== undefined) return cached;
@@ -53,7 +105,15 @@ export const list = query({
       const url = author?.avatarStorageId
         ? ((await ctx.storage.getUrl(author.avatarStorageId)) ?? "")
         : "";
-      const meta = { url, isBot: author?.isBot === true };
+      const plusActive =
+        !!author &&
+        typeof author.plusExpiresAt === "number" &&
+        author.plusExpiresAt > Date.now();
+      const meta = {
+        url,
+        isBot: author?.isBot === true,
+        plusActive,
+      };
       authorMeta.set(authorId, meta);
       return meta;
     }
@@ -127,6 +187,7 @@ export const list = query({
           authorAvatarColor: message.authorAvatarColor ?? "",
           authorAvatarImageUrl: author.url,
           authorIsBot: author.isBot,
+          authorPlusActive: author.plusActive,
           body: canSeeReal ? message.body : "Message deleted",
           kind: message.kind ?? "text",
           encrypted: canSeeReal && (message.encrypted ?? false),
@@ -238,12 +299,11 @@ export const pinMessage = mutation({
 
     const existingPins = await ctx.db
       .query("messages")
-      .withIndex("by_conversation", (q) =>
-        q.eq("conversationId", message.conversationId),
+      .withIndex("by_conversation_and_pinned", (q) =>
+        q.eq("conversationId", message.conversationId).eq("pinned", true),
       )
-      .take(500);
-    const pinCount = existingPins.filter((m) => m.pinned === true).length;
-    if (pinCount >= MAX_PINS_PER_CONVERSATION) {
+      .take(MAX_PINS_PER_CONVERSATION);
+    if (existingPins.length >= MAX_PINS_PER_CONVERSATION) {
       throw new Error(
         `This chat already has ${MAX_PINS_PER_CONVERSATION} pinned messages`,
       );
@@ -299,17 +359,22 @@ export const listPinned = query({
   },
   handler: async (ctx, args) => {
     const me = await currentUser(ctx, args.sessionToken);
-    await requireMembership(ctx, args.conversationId, me._id);
+    await requireChannelAccess(
+      ctx,
+      args.conversationId,
+      me._id,
+      Perm.VIEW_CHANNELS,
+    );
 
     const messages = await ctx.db
       .query("messages")
-      .withIndex("by_conversation", (q) =>
-        q.eq("conversationId", args.conversationId),
+      .withIndex("by_conversation_and_pinned", (q) =>
+        q.eq("conversationId", args.conversationId).eq("pinned", true),
       )
-      .take(500);
+      .take(MAX_PINS_PER_CONVERSATION);
 
     return messages
-      .filter((m) => m.pinned === true && !m.deleted && m.kind !== "call")
+      .filter((m) => !m.deleted && m.kind !== "call")
       .sort((a, b) => (b.pinnedAt ?? 0) - (a.pinnedAt ?? 0))
       .slice(0, MAX_PINS_PER_CONVERSATION)
       .map((m) => {
@@ -362,7 +427,11 @@ export const send = mutation({
   },
   handler: async (ctx, args) => {
     const me = await currentUser(ctx, args.sessionToken);
-    await requireMembership(ctx, args.conversationId, me._id);
+    const myMembership = await requireMembership(
+      ctx,
+      args.conversationId,
+      me._id,
+    );
 
     const conversation = await ctx.db.get("conversations", args.conversationId);
     if (!conversation) {
@@ -370,14 +439,32 @@ export const send = mutation({
     }
 
     // Server channels: respect overwrites + announcement staff-only write.
+    let channelPerms = 0;
     if (conversation.kind === "channel") {
-      const perms = await channelPermissions(ctx, args.conversationId, me._id);
-      if ((perms & Perm.SEND_MESSAGES) !== Perm.SEND_MESSAGES) {
+      channelPerms = await channelPermissions(ctx, args.conversationId, me._id);
+      if ((channelPerms & Perm.SEND_MESSAGES) !== Perm.SEND_MESSAGES) {
         throw new Error(
           conversation.isAnnouncement
             ? "Only staff can post in announcements"
             : "You don't have permission to send messages here",
         );
+      }
+    }
+
+    // DMs: honor blocks either way. Support DMs need no special case here —
+    // they ride on the same exemption openSupportDm relies on, since
+    // isBlockedEitherWay ignores blocks involving protected staff (platform
+    // admins/owners).
+    if (conversation.kind === "direct") {
+      const members = await ctx.db
+        .query("conversationMembers")
+        .withIndex("by_conversation", (q) =>
+          q.eq("conversationId", args.conversationId),
+        )
+        .take(10);
+      const otherId = members.find((m) => m.userId !== me._id)?.userId;
+      if (otherId && (await isBlockedEitherWay(ctx, me._id, otherId))) {
+        throw new Error("You can't message this user");
       }
     }
 
@@ -440,27 +527,44 @@ export const send = mutation({
     // Sanitize mention metadata: only real members of this conversation can
     // be recorded as mentioned (the client computes these, but never trust
     // it blindly), and @everyone only pings in channels/groups -- in 1:1
-    // DMs the token is just text.
+    // DMs the token is just text. Point-lookup per mentioned id instead of
+    // scanning the member list (bounded: max 50 mention ids).
     let mentionUserIds: Id<"users">[] | undefined;
     if (args.mentionUserIds && args.mentionUserIds.length > 0) {
-      const members = await ctx.db
-        .query("conversationMembers")
-        .withIndex("by_conversation", (q) =>
-          q.eq("conversationId", args.conversationId),
-        )
-        .take(500);
-      const memberIds = new Set(members.map((m) => m.userId));
-      const filtered = [...new Set(args.mentionUserIds)].filter((id) =>
-        memberIds.has(id),
+      const candidates = [...new Set(args.mentionUserIds)].slice(0, 50);
+      const checks = await Promise.all(
+        candidates.map((id) =>
+          ctx.db
+            .query("conversationMembers")
+            .withIndex("by_conversation_and_user", (q) =>
+              q.eq("conversationId", args.conversationId).eq("userId", id),
+            )
+            .unique(),
+        ),
       );
+      const filtered = candidates.filter((_, i) => checks[i] !== null);
       if (filtered.length > 0) {
         mentionUserIds = filtered;
       }
     }
-    const mentionEveryone =
-      args.mentionEveryone === true && (kind === "channel" || kind === "group")
-        ? true
-        : undefined;
+    // @everyone pings the whole chat, so it takes more than plain
+    // membership. roles.ts has no MENTION_EVERYONE bit, so channels fall
+    // back to MANAGE_CHANNELS (the server owner passes via ALL_PERMS) and
+    // groups allow only their creator.
+    let mentionEveryone: true | undefined;
+    if (
+      args.mentionEveryone === true &&
+      (kind === "channel" || kind === "group")
+    ) {
+      const mayPingEveryone =
+        kind === "channel"
+          ? (channelPerms & Perm.MANAGE_CHANNELS) === Perm.MANAGE_CHANNELS
+          : conversation.createdBy === me._id;
+      if (!mayPingEveryone) {
+        throw new Error("You don't have permission to mention everyone");
+      }
+      mentionEveryone = true;
+    }
 
     await ctx.db.insert("messages", {
       conversationId: args.conversationId,
@@ -474,8 +578,15 @@ export const send = mutation({
       mentionUserIds,
       mentionEveryone,
     });
+    const now = Date.now();
     await ctx.db.patch("conversations", args.conversationId, {
-      lastMessageAt: Date.now(),
+      lastMessageAt: now,
+    });
+    // Discord behavior: your own send is read by definition. Without this
+    // the conversation flips to "unread" for the sender (lastMessageAt
+    // just moved past their lastReadAt) until the client calls markRead.
+    await ctx.db.patch("conversationMembers", myMembership._id, {
+      lastReadAt: now,
     });
     return { stored: true };
   },
@@ -502,6 +613,9 @@ export const edit = mutation({
     if (message.deleted) {
       throw new Error("You can't edit a deleted message");
     }
+    // Same membership gate as remove: a user who left the conversation can
+    // no longer mutate its messages (or probe message ids).
+    await requireMembership(ctx, message.conversationId, me._id);
 
     // Whether this message is encrypted is fixed at send time and never
     // changes; the client is responsible for re-encrypting an edit to a
@@ -518,11 +632,65 @@ export const edit = mutation({
       throw new Error("Message is too long");
     }
 
+    // Snapshot the previous body for the edit-history audit trail BEFORE
+    // overwriting it (capped at 10 entries per message).
+    const historyRows = await ctx.db
+      .query("messageEditHistory")
+      .withIndex("by_message", (q) => q.eq("messageId", message._id))
+      .take(50);
+    if (historyRows.length >= 10) {
+      const oldestFirst = [...historyRows].sort(
+        (a, b) => a.editedAt - b.editedAt,
+      );
+      for (const row of oldestFirst.slice(0, historyRows.length - 9)) {
+        await ctx.db.delete("messageEditHistory", row._id);
+      }
+    }
+    await ctx.db.insert("messageEditHistory", {
+      messageId: message._id,
+      editorId: me._id,
+      previousBody: message.body,
+      editedAt: Date.now(),
+    });
+
     await ctx.db.patch("messages", message._id, {
       body,
       editedAt: Date.now(),
     });
     return null;
+  },
+});
+
+/**
+ * Previous bodies of one message, newest edit first. Only the message
+ * author or a platform admin may read the trail (for encrypted messages
+ * the snapshots are ciphertext -- the client decrypts them like bodies).
+ */
+export const listEditHistory = query({
+  args: {
+    sessionToken: v.string(),
+    messageId: v.id("messages"),
+  },
+  handler: async (ctx, args) => {
+    const me = await currentUser(ctx, args.sessionToken);
+    const message = await ctx.db.get("messages", args.messageId);
+    if (!message) {
+      throw new Error("Message not found");
+    }
+    if (message.authorId !== me._id && me.role !== "admin") {
+      throw new Error("You can only view the edit history of your own messages");
+    }
+    const rows = await ctx.db
+      .query("messageEditHistory")
+      .withIndex("by_message", (q) => q.eq("messageId", args.messageId))
+      .take(20);
+    return rows
+      .sort((a, b) => b.editedAt - a.editedAt)
+      .map((row) => ({
+        previousBody: row.previousBody,
+        editedAt: row.editedAt,
+        encrypted: message.encrypted ?? false,
+      }));
   },
 });
 
@@ -537,7 +705,13 @@ export const remove = mutation({
     if (!message) {
       throw new Error("Message not found");
     }
-    const isAdmin = me.role === "admin";
+    const isAdmin = platformRank(me) >= 100;
+    // Non-admins must actually belong to the conversation to mutate its
+    // messages (previously any authenticated user with a message id could
+    // tombstone their own old messages after leaving -- and probe ids).
+    if (!isAdmin) {
+      await requireMembership(ctx, message.conversationId, me._id);
+    }
     if (message.kind === "call") {
       if (!isAdmin) {
         throw new Error("Only an admin can remove call history");
@@ -562,7 +736,7 @@ export const purge = mutation({
   },
   handler: async (ctx, args) => {
     const me = await currentUser(ctx, args.sessionToken);
-    if (me.role !== "admin") {
+    if (platformRank(me) < 100) {
       throw new Error("Only an admin can permanently delete a message");
     }
     const message = await ctx.db.get("messages", args.messageId);
@@ -572,13 +746,8 @@ export const purge = mutation({
     if (message.attachmentStorageId) {
       await ctx.storage.delete(message.attachmentStorageId);
     }
-    const reactionRows = await ctx.db
-      .query("reactions")
-      .withIndex("by_message", (q) => q.eq("messageId", message._id))
-      .take(200);
-    for (const row of reactionRows) {
-      await ctx.db.delete("reactions", row._id);
-    }
+    await deleteReactionsForMessage(ctx, message._id);
+    await deleteEditHistoryForMessage(ctx, message._id);
     await ctx.db.delete("messages", message._id);
     return null;
   },
@@ -622,13 +791,8 @@ export const clearConversation = mutation({
           // Storage object may already be gone.
         }
       }
-      const reactionRows = await ctx.db
-        .query("reactions")
-        .withIndex("by_message", (q) => q.eq("messageId", message._id))
-        .take(200);
-      for (const row of reactionRows) {
-        await ctx.db.delete("reactions", row._id);
-      }
+      await deleteReactionsForMessage(ctx, message._id);
+      await deleteEditHistoryForMessage(ctx, message._id);
       await ctx.db.delete("messages", message._id);
       purged += 1;
     }
@@ -654,13 +818,8 @@ async function purgeMessageBatch(ctx: MutationCtx) {
         // Storage object may already be gone; still drop the message row.
       }
     }
-    const reactionRows = await ctx.db
-      .query("reactions")
-      .withIndex("by_message", (q) => q.eq("messageId", message._id))
-      .take(200);
-    for (const row of reactionRows) {
-      await ctx.db.delete("reactions", row._id);
-    }
+    await deleteReactionsForMessage(ctx, message._id);
+    await deleteEditHistoryForMessage(ctx, message._id);
     await ctx.db.delete("messages", message._id);
     purged += 1;
   }
@@ -692,7 +851,7 @@ export const purgeAllHistory = mutation({
   },
   handler: async (ctx, args) => {
     const me = await currentUser(ctx, args.sessionToken);
-    if (me.role !== "admin") {
+    if (platformRank(me) < 100) {
       throw new Error("Only an admin can wipe chat history");
     }
     return await purgeMessageBatch(ctx);

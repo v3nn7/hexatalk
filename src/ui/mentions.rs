@@ -106,9 +106,19 @@ pub(crate) fn parse_mentions(text: &str, names: &[String]) -> Vec<Mention> {
 /// `@everyone` is deliberately NOT included -- use `has_everyone`.
 pub(crate) fn mentions_any(text: &str, my_names: &[String]) -> bool {
     let mine: Vec<String> = my_names.iter().map(|n| n.to_lowercase()).collect();
-    parse_mentions(text, my_names)
+    mentions_any_lower(text, &mine)
+}
+
+/// Pre-lowercased variant of `mentions_any` for hot loops where the candidate
+/// set is constant across calls (e.g. rendering a whole message list): the
+/// caller lowercases `my_names` once instead of paying for it per message.
+pub(crate) fn mentions_any_lower(text: &str, my_names_lower: &[String]) -> bool {
+    if my_names_lower.is_empty() {
+        return false;
+    }
+    parse_mentions(text, my_names_lower)
         .iter()
-        .any(|m| !m.everyone && mine.contains(&m.name.to_lowercase()))
+        .any(|m| !m.everyone && my_names_lower.contains(&m.name.to_lowercase()))
 }
 
 /// True when `text` contains the literal `@everyone` token.
@@ -195,6 +205,12 @@ pub(crate) fn complete(input: &str, name: &str) -> String {
 /// Name matching is case-insensitive; when two members share a display
 /// name the first candidate wins (same ambiguity the highlight parser has).
 /// Unknown @names are ignored -- they never become ids.
+// Wired through `App::outgoing_mentions` (src/state/app.rs); currently dead
+// only because the `messages:send` call sites in src/state/update.rs (owned
+// by another agent) don't pass `mentionUserIds`/`mentionEveryone` yet --
+// the Convex backend already accepts both. Kept as the ready send-time half
+// of the mention pipeline; see the team report for the integration patch.
+#[allow(dead_code)]
 pub(crate) fn resolve_mentions(text: &str, candidates: &[(String, String)]) -> (Vec<String>, bool) {
     let names: Vec<String> = candidates.iter().map(|(name, _)| name.clone()).collect();
     let found = parse_mentions(text, &names);
@@ -301,6 +317,11 @@ mod tests {
         assert!(!mentions_any("@bob!", &names(&["Alice"])));
         // mentions_any must not fire on @everyone alone.
         assert!(!mentions_any("@everyone", &names(&["Alice"])));
+        // Pre-lowercased variant agrees with the mixed-case entry point.
+        let lower = names(&["bob"]);
+        assert!(mentions_any_lower("@bob!", &lower));
+        assert!(!mentions_any_lower("@everyone", &lower));
+        assert!(!mentions_any_lower("@bob!", &[]));
     }
 
     #[test]

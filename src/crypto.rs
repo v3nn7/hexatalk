@@ -774,7 +774,7 @@ pub(crate) fn looks_like_ratchet_blob(s: &str) -> bool {
 }
 
 /// Build AAD for a DM: conversation id + both user ids (sorted).
-fn dm_aad(conversation_id: &str, user_a: &str, user_b: &str) -> Vec<u8> {
+pub(crate) fn dm_aad(conversation_id: &str, user_a: &str, user_b: &str) -> Vec<u8> {
     let (a, b) = if user_a < user_b {
         (user_a, user_b)
     } else {
@@ -1146,5 +1146,95 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir_a);
         let _ = std::fs::remove_dir_all(&dir_b);
+    }
+
+    #[test]
+    fn dm_payload_with_attachment_roundtrip() {
+        let dir_a = tmp_dir();
+        let dir_b = tmp_dir();
+        let alice = IdentityKeyPair::generate();
+        let bob = IdentityKeyPair::generate();
+        let alice_id = "user_a";
+        let bob_id = "user_b";
+        let conv = "conv_dm_1";
+        let aad = dm_aad(conv, alice_id, bob_id);
+
+        let mut sa = RatchetSession::load_or_create(
+            &dir_a,
+            alice_id,
+            bob_id,
+            &alice,
+            &bob.public_key_base64(),
+        )
+        .expect("alice session");
+        let mut sb = RatchetSession::load_or_create(
+            &dir_b,
+            bob_id,
+            alice_id,
+            &bob,
+            &alice.public_key_base64(),
+        )
+        .expect("bob session");
+
+        // Envelope carrying an encrypted-attachment key, like the send path
+        // builds for durable DM history.
+        let (att_ct, att_key, att_nonce) = encrypt_attachment(b"fake image bytes");
+        let mut payload = MessagePayload::text_only("caption text");
+        payload.att_key = Some(att_key.clone());
+        payload.att_nonce = Some(att_nonce.clone());
+        let ct = sa.encrypt(&payload.encode(), &aad).unwrap();
+        assert!(looks_like_ratchet_blob(&ct));
+
+        let plain = sb.decrypt(&ct, &aad).unwrap();
+        let decoded = MessagePayload::decode(&plain).unwrap();
+        assert_eq!(decoded.text, "caption text");
+        assert_eq!(decoded.att_key.as_deref(), Some(att_key.as_str()));
+        assert_eq!(decoded.att_nonce.as_deref(), Some(att_nonce.as_str()));
+        let att_plain =
+            decrypt_attachment(&decoded.att_key.unwrap(), &decoded.att_nonce.unwrap(), &att_ct)
+                .unwrap();
+        assert_eq!(att_plain, b"fake image bytes");
+
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
+    }
+
+    #[test]
+    fn plaintext_history_is_not_a_blob() {
+        // Pre-E2EE durable DM rows are plain text and must stay readable:
+        // they neither look like ratchet blobs nor parse as an envelope.
+        assert!(!looks_like_ratchet_blob("hello world"));
+        assert!(!looks_like_ratchet_blob("zażółć gęślą jaźń 🐍"));
+        assert!(MessagePayload::decode("hello world").is_none());
+    }
+
+    #[test]
+    fn own_echo_resolves_via_decrypt_cache() {
+        let dir_a = tmp_dir();
+        let alice = IdentityKeyPair::generate();
+        let bob = IdentityKeyPair::generate();
+        let aad = dm_aad("conv_dm_2", "user_a", "user_b");
+
+        let mut sa = RatchetSession::load_or_create(
+            &dir_a,
+            "user_a",
+            "user_b",
+            &alice,
+            &bob.public_key_base64(),
+        )
+        .expect("alice session");
+
+        let plain = MessagePayload::text_only("my own message").encode();
+        let ct = sa.encrypt(&plain, &aad).unwrap();
+        // The ratchet refuses its own sending chain...
+        assert!(sa.decrypt(&ct, &aad).is_none());
+        // ...so the sender's copy resolves through the decrypt cache,
+        // keyed by ciphertext (the Convex message id is unknown at send).
+        let mut cache = DecryptCache::default();
+        cache.put("", &ct, plain.clone());
+        assert_eq!(cache.get("any-msg-id", &ct), Some(plain.clone()));
+        assert_eq!(cache.get_by_ciphertext(&ct), Some(plain));
+
+        let _ = std::fs::remove_dir_all(&dir_a);
     }
 }

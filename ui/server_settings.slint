@@ -1,5 +1,8 @@
 // Per-server Settings screen (Overview / Channels / Members / Roles /
 // Invites / Danger Zone) -- port of src/view/server_settings.rs.
+// Rounded nav items and cards, role color dots as circles, permissions as
+// animated pill switches, overwrites as an Inherit / Allow / Deny
+// segmented control (still cycles on click).
 import { Theme } from "theme.slint";
 import { Avatar, SecondaryButton, PrimaryButton, DangerButton, TextInputField, FieldLabel, SectionTitle, Badge } from "widgets.slint";
 import {
@@ -13,6 +16,8 @@ component Card inherits Rectangle {
     background: Theme.bg-secondary;
     border-width: 1px;
     border-color: Theme.border;
+    border-radius: Theme.radius-md;
+    clip: true;
     VerticalLayout { padding: 24px; spacing: 14px; @children }
 }
 
@@ -23,6 +28,7 @@ component StatusBanner inherits Rectangle {
     background: root.danger ? Theme.danger-soft : Theme.accent-soft;
     border-width: 1px;
     border-color: root.danger ? Theme.danger : Theme.border-strong;
+    border-radius: Theme.radius-sm;
     label := Text { x: 12px; y: 10px; width: parent.width - 24px; text: root.text; font-size: 12px; color: root.danger ? Theme.danger : Theme.text-primary; wrap: word-wrap; }
 }
 
@@ -33,22 +39,49 @@ component NavItem inherits Rectangle {
     in property <bool> danger: false;
     callback clicked;
     height: content.preferred-height + 16px;
-    background: root.active ? Theme.accent-soft : (touch.has-hover ? Theme.bg-hover : transparent);
+    border-radius: Theme.radius-sm;
+    background: root.active ? Theme.bg-active : (touch.has-hover ? Theme.bg-hover : transparent);
     animate background { duration: 120ms; }
-    touch := TouchArea { clicked => { root.clicked(); } }
-    if root.active: Rectangle {
-        x: 0;
-        y: 0;
-        width: 3px;
-        height: parent.height;
-        background: root.danger ? Theme.danger : Theme.accent;
-    }
+    touch := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.clicked(); } }
     content := VerticalLayout {
-        padding: 8px;
+        padding-left: 10px;
+        padding-right: 10px;
+        padding-top: 6px;
+        padding-bottom: 6px;
         spacing: 2px;
-        Text { text: root.label; font-size: 13px; color: root.danger ? Theme.danger : Theme.text-primary; }
+        Text {
+            text: root.label;
+            font-size: 13px;
+            font-family: root.active ? Theme.font-medium : Theme.font-body;
+            color: root.danger ? Theme.danger : (root.active || touch.has-hover ? Theme.text-primary : Theme.text-muted);
+            animate color { duration: 120ms; }
+        }
         Text { text: root.hint; font-size: 10px; color: Theme.text-muted; }
     }
+}
+
+// Discord-style pill switch for a single role permission bit.
+component PermToggle inherits Rectangle {
+    in property <bool> value;
+    callback toggled;
+    width: 40px;
+    height: 22px;
+    border-radius: 11px;
+    background: root.value ? Theme.accent : Theme.bg-tertiary;
+    border-width: 1px;
+    border-color: root.value ? Theme.accent : Theme.border-strong;
+    animate background { duration: 150ms; }
+    animate border-color { duration: 150ms; }
+    Rectangle {
+        x: root.value ? parent.width - self.width - 3px : 3px;
+        y: (parent.height - self.height) / 2;
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: white;
+        animate x { duration: 150ms; easing: ease-in-out; }
+    }
+    TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.toggled(); } }
 }
 
 export component ServerSettingsScreen inherits Rectangle {
@@ -215,6 +248,7 @@ export component ServerSettingsScreen inherits Rectangle {
                                 background: root.server_icon.width > 0 ? transparent : Theme.accent-soft;
                                 border-width: 1px;
                                 border-color: Theme.border-strong;
+                                border-radius: Theme.radius-md;
                                 clip: true;
                                 if root.server_icon.width > 0: Image { source: root.server_icon; width: 80px; height: 80px; image-fit: ImageFit.cover; }
                                 if root.server_icon.width <= 0: Text { text: root.server_initial; font-size: 26px; color: Theme.accent; horizontal-alignment: center; vertical-alignment: center; }
@@ -223,7 +257,7 @@ export component ServerSettingsScreen inherits Rectangle {
                                 spacing: 6px;
                                 alignment: start;
                                 if root.is_owner: SecondaryButton { text: root.server_icon_busy ? "Uploading…" : "Upload icon"; enabled: !root.server_icon_busy; clicked => { root.pick_icon(); } }
-                                if root.is_owner && root.server_icon.width > 0: Text { text: "Remove icon"; font-size: 12px; color: rm_icon_touch.has-hover ? Theme.accent-dim : Theme.accent; animate color { duration: 120ms; } rm_icon_touch := TouchArea { clicked => { root.remove_icon(); } } }
+                                if root.is_owner && root.server_icon.width > 0: Text { text: "Remove icon"; font-size: 12px; color: rm_icon_touch.has-hover ? Theme.accent-hover : Theme.text-link; animate color { duration: 120ms; } rm_icon_touch := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.remove_icon(); } } }
                                 if root.is_owner: Text { text: "PNG or JPG · under 2MB · square looks best"; font-size: 10px; color: Theme.text-muted; }
                                 if !root.is_owner: Text { text: "Only the server owner can change the icon."; font-size: 11px; color: Theme.text-muted; }
                             }
@@ -244,7 +278,7 @@ export component ServerSettingsScreen inherits Rectangle {
                         Text { text: "Platform admin only. Vanity path for this server."; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
                         HorizontalLayout {
                             spacing: 6px;
-                            Text { text: "hexatalk.app/"; font-size: 13px; color: Theme.text-muted; vertical-alignment: center; }
+                            Text { text: "vyrapp.pro/"; font-size: 13px; color: Theme.text-muted; vertical-alignment: center; }
                             TextInputField { placeholder: "slug"; value <=> root.custom_slug_input; edited(t) => { root.custom_slug_changed(t); } submitted => { root.save_custom_slug(); } }
                         }
                         HorizontalLayout {
@@ -255,7 +289,7 @@ export component ServerSettingsScreen inherits Rectangle {
                     }
                     if root.category == ServerSettingsCategory.Overview && !root.is_platform_admin && root.custom_slug_display != "": Card {
                         SectionTitle { text: "Custom URL"; }
-                        Text { text: "/" + root.custom_slug_display; font-size: 16px; color: Theme.accent; }
+                        Text { text: "/" + root.custom_slug_display; font-size: 16px; color: Theme.text-link; }
                         Text { text: "Set by HexaTalk administration."; font-size: 11px; color: Theme.text-muted; }
                     }
 
@@ -284,6 +318,7 @@ export component ServerSettingsScreen inherits Rectangle {
                             background: ch.is_editing_perms ? Theme.accent-soft : Theme.bg-tertiary;
                             border-width: 1px;
                             border-color: ch.is_editing_perms ? Theme.accent : Theme.border;
+                            border-radius: Theme.radius-md;
                             height: row.preferred-height;
                             row := VerticalLayout {
                             if !ch.is_renaming: HorizontalLayout {
@@ -335,19 +370,21 @@ export component ServerSettingsScreen inherits Rectangle {
                                 HorizontalLayout {
                                     spacing: 6px;
                                     for r in root.channel_perm_roles: Rectangle {
-                                        height: 28px;
-                                        width: role-lbl.preferred-width + 16px;
+                                        height: 26px;
+                                        width: role-lbl.preferred-width + 20px;
+                                        border-radius: 13px;
                                         background: r.selected ? Theme.accent : (rt.has-hover ? Theme.bg-hover : Theme.bg-primary);
                                         border-width: 1px;
                                         border-color: r.selected ? Theme.accent : Theme.border;
+                                        animate background { duration: 120ms; }
                                         role-lbl := Text {
                                             text: r.has_overwrite ? (r.name + " *") : r.name;
                                             font-size: 11px;
-                                            color: r.selected ? white : Theme.text-primary;
+                                            color: r.selected ? Theme.text-on-accent : Theme.text-primary;
                                             horizontal-alignment: center;
                                             vertical-alignment: center;
                                         }
-                                        rt := TouchArea { clicked => { root.select_channel_perm_role(r.role_id); } }
+                                        rt := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.select_channel_perm_role(r.role_id); } }
                                     }
                                 }
                                 if root.channel_perm_roles.length == 0: Text {
@@ -359,25 +396,37 @@ export component ServerSettingsScreen inherits Rectangle {
                                 VerticalLayout {
                                     spacing: 4px;
                                     for perm in root.channel_overwrite_perms: HorizontalLayout {
-                                        spacing: 8px;
+                                        spacing: 10px;
+                                        // Discord-style segmented Inherit / Allow / Deny
+                                        // indicator. The backend callback only cycles, so
+                                        // the whole segment group stays one click target.
                                         Rectangle {
-                                            width: 72px;
+                                            width: 132px;
                                             height: 22px;
-                                            background: perm.mode == 1
-                                                ? Theme.success
-                                                : (perm.mode == 2 ? Theme.danger : Theme.bg-primary);
+                                            border-radius: Theme.radius-sm;
+                                            clip: true;
                                             border-width: 1px;
                                             border-color: Theme.border-strong;
-                                            Text {
-                                                width: 100%;
-                                                height: 100%;
-                                                text: perm.mode == 1 ? "Allow" : (perm.mode == 2 ? "Deny" : "Inherit");
-                                                font-size: 10px;
-                                                color: white;
-                                                horizontal-alignment: center;
-                                                vertical-alignment: center;
+                                            HorizontalLayout {
+                                                spacing: 0;
+                                                for seg in [
+                                                    { label: "—", mode: 0, on: Theme.bg-active, fg: Theme.text-muted },
+                                                    { label: "✓", mode: 1, on: Theme.success, fg: Theme.text-on-accent },
+                                                    { label: "✕", mode: 2, on: Theme.danger, fg: Theme.text-on-accent },
+                                                ]: Rectangle {
+                                                    horizontal-stretch: 1;
+                                                    background: perm.mode == seg.mode ? seg.on : Theme.bg-primary;
+                                                    animate background { duration: 120ms; }
+                                                    Text {
+                                                        text: seg.label;
+                                                        font-size: 11px;
+                                                        color: perm.mode == seg.mode ? seg.fg : Theme.text-muted;
+                                                        horizontal-alignment: center;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
                                             }
-                                            TouchArea { clicked => { root.cycle_channel_overwrite_perm(perm.bit); } }
+                                            TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.cycle_channel_overwrite_perm(perm.bit); } }
                                         }
                                         Text {
                                             text: perm.label;
@@ -407,6 +456,7 @@ export component ServerSettingsScreen inherits Rectangle {
                             background: Theme.bg-tertiary;
                             border-width: 1px;
                             border-color: Theme.border;
+                            border-radius: Theme.radius-md;
                             VerticalLayout {
                                 padding: 12px;
                                 spacing: 8px;
@@ -419,7 +469,7 @@ export component ServerSettingsScreen inherits Rectangle {
                                         Text { text: m.display_name; font-size: 14px; color: Theme.text-primary; }
                                         Text { text: "@" + m.username + " · " + m.role_label; font-size: 11px; color: Theme.text-muted; }
                                     }
-                                    if m.is_owner: Badge { text: "OWNER"; bg: #e0b347; fg: #0d0a00; }
+                                    if m.is_owner: Badge { text: "OWNER"; bg: Theme.warning; fg: Theme.text-on-warning; }
                                 }
                                 if !m.is_owner && (root.can_manage_roles || root.can_kick): HorizontalLayout {
                                     spacing: 6px;
@@ -430,6 +480,7 @@ export component ServerSettingsScreen inherits Rectangle {
                                     background: Theme.bg-elevated;
                                     border-width: 1px;
                                     border-color: Theme.border;
+                                    border-radius: Theme.radius-md;
                                     VerticalLayout {
                                         padding: 10px;
                                         spacing: 6px;
@@ -470,16 +521,17 @@ export component ServerSettingsScreen inherits Rectangle {
                                 background: Theme.bg-tertiary;
                                 border-width: 1px;
                                 border-color: Theme.border;
+                                border-radius: Theme.radius-md;
                                 HorizontalLayout {
                                     padding: 10px;
                                     spacing: 10px;
                                     // Centered via a stretch VerticalLayout rather than
                                     // vertical-stretch:0 alone -- a bare fixed-size child
                                     // top-aligns instead of centering against the taller
-                                    // "Edit" button next to it.
+                                    // "Edit" button next to it. Discord-style color dot.
                                     VerticalLayout {
                                         alignment: center;
-                                        Rectangle { width: 12px; height: 12px; background: role.color; }
+                                        Rectangle { width: 12px; height: 12px; border-radius: 6px; background: role.color; }
                                     }
                                     Text { text: role.name; font-size: 13px; color: Theme.text-primary; vertical-alignment: center; horizontal-stretch: 1; }
                                     if root.can_manage_roles: SecondaryButton {
@@ -492,6 +544,7 @@ export component ServerSettingsScreen inherits Rectangle {
                                 background: Theme.bg-secondary;
                                 border-width: 1px;
                                 border-color: Theme.border;
+                                border-radius: Theme.radius-md;
                                 VerticalLayout {
                                     padding: 14px;
                                     spacing: 10px;
@@ -512,24 +565,21 @@ export component ServerSettingsScreen inherits Rectangle {
                                         ]: Rectangle {
                                             width: 24px;
                                             height: 24px;
+                                            border-radius: 12px;
                                             background: hex.c;
                                             border-width: root.role_edit_color == hex.h ? 2px : 1px;
                                             border-color: root.role_edit_color == hex.h ? Theme.accent : Theme.border;
-                                            TouchArea { clicked => { root.set_role_color(role.role_id, hex.h); } }
+                                            TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.set_role_color(role.role_id, hex.h); } }
                                         }
                                     }
                                     FieldLabel { text: "Permissions"; }
                                     VerticalLayout {
-                                        spacing: 4px;
+                                        spacing: 6px;
                                         for perm in root.role_permissions: HorizontalLayout {
-                                            spacing: 8px;
-                                            Rectangle {
-                                                width: 16px;
-                                                height: 16px;
-                                                background: perm.enabled ? Theme.accent : transparent;
-                                                border-width: 1px;
-                                                border-color: Theme.border-strong;
-                                                TouchArea { clicked => { root.toggle_role_permission(role.role_id, perm.bit); } }
+                                            spacing: 10px;
+                                            VerticalLayout {
+                                                alignment: center;
+                                                PermToggle { value: perm.enabled; toggled => { root.toggle_role_permission(role.role_id, perm.bit); } }
                                             }
                                             Text { text: perm.label; font-size: 12px; color: Theme.text-primary; vertical-alignment: center; }
                                         }
@@ -556,6 +606,7 @@ export component ServerSettingsScreen inherits Rectangle {
                             background: Theme.bg-tertiary;
                             border-width: 1px;
                             border-color: Theme.border;
+                            border-radius: Theme.radius-md;
                             VerticalLayout {
                                 padding: 24px;
                                 spacing: 12px;
@@ -578,6 +629,7 @@ export component ServerSettingsScreen inherits Rectangle {
                         background: Theme.danger-soft;
                         border-width: 1px;
                         border-color: Theme.danger;
+                        border-radius: Theme.radius-md;
                         VerticalLayout {
                             padding: 22px;
                             spacing: 12px;
@@ -586,9 +638,10 @@ export component ServerSettingsScreen inherits Rectangle {
                             if !root.is_owner: Text { text: "Only the server owner can delete this server."; font-size: 12px; color: Theme.text-muted; }
                             if root.is_owner && !root.confirm_delete_server: DangerButton { text: "Delete server"; width: 140px; clicked => { root.toggle_confirm_delete_server(); } }
                             if root.is_owner && root.confirm_delete_server: Rectangle {
-                                background: Theme.danger-soft;
+                                background: Theme.bg-tertiary;
                                 border-width: 1px;
                                 border-color: Theme.danger;
+                                border-radius: Theme.radius-md;
                                 VerticalLayout {
                                     padding: 16px;
                                     spacing: 12px;

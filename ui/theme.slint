@@ -1,48 +1,109 @@
-// Shared design tokens for the whole app: muted-emerald, low-neon dark
-// theme, ported from the previous iced `src/style.rs`. Everything stays
-// perfectly square -- `radius` is 0px everywhere on purpose ("kanciasto").
-// Depth comes from hairline borders + hard-offset shadows (no blur, no
-// glow) rather than rounding or soft gradients.
+// Shared design tokens for the whole app: "Violet Night" -- the HexaTalk
+// identity. Deep plum-tinted dark surfaces, a violet accent (#8B5CF6
+// family), rounded corners and soft shadows. Every pre-existing token name
+// is preserved -- other files reference them -- only values changed; new
+// tokens are purely additive (status idle/dnd, radius scale, soft-shadow
+// blur, control greys, warning washes).
 export global Theme {
     // ---------- Backgrounds ----------
-    out property <color> bg-primary: #0c0d0d;
-    out property <color> bg-secondary: #090a09;
-    out property <color> bg-tertiary: #050706;
-    out property <color> bg-elevated: #0f1211;
-    out property <color> bg-hover: #141816;
+    // Main chat surface.
+    out property <color> bg-primary: #221d2c;
+    // Channel/DM sidebar.
+    out property <color> bg-secondary: #1c1726;
+    // Deepest surface: server rail, text inputs.
+    out property <color> bg-tertiary: #141019;
+    // Raised panels one step above the surface they sit on.
+    out property <color> bg-elevated: #2c2538;
+    // Hover on interactive rows (channel rows, member rows).
+    out property <color> bg-hover: #332b44;
     // Half-strength hover wash, for large surfaces (message rows) where the
     // full bg-hover would read as a selection.
-    out property <color> bg-hover-soft: #14181680;
+    out property <color> bg-hover-soft: #332b4480;
+    // Floating surfaces (context menus, popovers, tooltips): near-black, one
+    // step below everything else, paired with a soft shadow.
+    out property <color> bg-floating: #0f0c14;
+    // Selected/active surface (current channel, active server, toggled row):
+    // clearly lighter than bg-hover so a hover pass is still visible on top.
+    out property <color> bg-active: #3d3452;
 
-    // ---------- Accent (muted emerald) ----------
-    out property <color> accent: #4db884;
-    out property <color> accent-dim: #3d946b;
+    // ---------- Accent (violet) ----------
+    // Canonical violet -- focus rings, links, highlights, hover state of
+    // accent-filled buttons.
+    out property <color> accent: #8b5cf6;
+    // Rest state of accent-filled buttons (one step dimmer than the hover).
+    out property <color> accent-dim: #7c4de8;
     // Pressed state for accent-filled buttons (one step below accent-dim).
-    out property <color> accent-pressed: #347a58;
-    out property <color> accent-soft: #4db88424;
-    out property <color> accent-soft-strong: #4db8843d;
+    out property <color> accent-pressed: #6939d1;
+    // Hover highlight one step above accent -- thin strokes/borders that
+    // need to brighten without a full fill change.
+    out property <color> accent-hover: #a78bfa;
+    out property <color> accent-soft: #8b5cf62e;
+    out property <color> accent-soft-strong: #8b5cf63d;
 
     // ---------- Text ----------
-    out property <color> text-primary: #bdd1c4;
-    out property <color> text-muted: #80948b;
-    out property <color> text-on-accent: #05100a;
+    out property <color> text-primary: #e3deee;
+    out property <color> text-muted: #9c94ad;
+    // Text on violet fills: white.
+    out property <color> text-on-accent: #ffffff;
+    // Text on amber/warning fills (OWNER badge and friends): near-black.
+    out property <color> text-on-warning: #241a04;
+    // Headlines / important bright text.
+    out property <color> text-bright: #ffffff;
+    // Inline links: light violet, readable on the dark plum surfaces.
+    out property <color> text-link: #c4b5fd;
+    // Mention highlight (@user): light violet text over a soft accent wash.
+    out property <color> mention-text: #d9cefc;
+    out property <color> mention-bg: #8b5cf64d;
 
     // ---------- Borders ----------
-    out property <color> border: #4db8842e;
-    out property <color> border-strong: #4db88459;
-    out property <color> border-hairline: #ffffff14;
+    // Neutral, low-contrast borders -- the design relies on surface contrast
+    // more than strokes, so these stay quiet.
+    out property <color> border: #383045;
+    out property <color> border-strong: #4a4258;
+    out property <color> border-hairline: #ffffff12;
+
+    // ---------- Secondary controls (grey buttons) ----------
+    out property <color> bg-control: #453d54;
+    out property <color> bg-control-hover: #584e6b;
+    out property <color> bg-control-pressed: #383045;
 
     // ---------- Status ----------
-    out property <color> online: #4db884;
-    out property <color> offline: #4d614d;
-    out property <color> danger: #d95257;
-    out property <color> danger-soft: #d9525724;
-    out property <color> warning: #d1bc4d;
-    out property <color> success: #3d946b;
+    out property <color> online: #23a55a;
+    out property <color> idle: #f0b232;
+    out property <color> dnd: #f23f43;
+    out property <color> offline: #80848e;
+    out property <color> danger: #da373c;
+    out property <color> danger-soft: #da373c24;
+    // Danger outline at rest (one notch quieter than full danger).
+    out property <color> danger-dim: #da373c99;
+    // Pressed fill for danger buttons (solid, one step below danger).
+    out property <color> danger-pressed: #a12828;
+    out property <color> warning: #f0b232;
+    out property <color> success: #23a55a;
+
+    // ---------- PLUS subscription badge (gold) ----------
+    // Gold fill for the PLUS chip; pair with `plus-foreground` for its text.
+    out property <color> plus: #c9a227;
+    out property <color> plus-foreground: #1a1400;
+
+    // ---------- Warning washes (pinned rows, ringing calls, announcement
+    // channels, warning boxes) -- alpha-stepped variants of `warning`, so
+    // call sites never hand-tune magic hex. ----------
+    out property <color> warning-softest: #f0b2320a;
+    out property <color> warning-softer: #f0b23214;
+    out property <color> warning-soft: #f0b2321a;
+    out property <color> warning-glow: #f0b2322e;
+    out property <color> warning-border: #f0b23259;
+    out property <color> warning-dim: #f0b232cc;
 
     // ---------- Shape ----------
-    // Sharp corners everywhere -- the whole point of the "kanciasto" pass.
-    out property <length> radius: 0px;
+    // Rounded, friendly geometry: small controls ~4-6px, cards/popovers
+    // ~12px. `radius` is the historical single token -- now the default
+    // control radius; prefer the scale below for new code.
+    out property <length> radius: 6px;
+    out property <length> radius-sm: 4px;
+    out property <length> radius-md: 8px;
+    out property <length> radius-lg: 12px;
 
     // ---------- Spacing scale ----------
     out property <length> space-1: 4px;
@@ -61,8 +122,11 @@ export global Theme {
     out property <length> text-lg: 18px;
     out property <length> text-xl: 24px;
 
-    // ---------- Shadows (hard offset, zero blur -- no "AI glow") ----------
-    out property <brush> shadow-color: #000000a6;
-    out property <length> shadow-offset: 3px;
-    out property <length> shadow-offset-light: 2px;
+    // ---------- Shadows (soft: low offset + blur) ----------
+    out property <brush> shadow-color: #00000059;
+    out property <length> shadow-offset: 2px;
+    out property <length> shadow-offset-light: 1px;
+    // Blur radii for the soft look -- pair with drop-shadow-blur-radius.
+    out property <length> shadow-blur: 8px;
+    out property <length> shadow-blur-lg: 16px;
 }

@@ -1,16 +1,46 @@
 // One chat message delegate -- port of the per-message rendering loop in
 // src/view/chat.rs. Hover-reveal action bar is native Slint (TouchArea
 // has-hover) instead of the iced round-trip through Message::MessageHovered.
+// Grouped continuation rows (avatar/name/timestamp only on the group's
+// first message, quiet gutter timestamp on hover for the rest), a full-row
+// hover wash, a floating action bar pinned to the row's top-right corner,
+// role-tinted author names, and date separators rendered
+// as a "line -- label -- line" divider.
 import { Theme } from "theme.slint";
-import { Avatar } from "widgets.slint";
+import { Avatar, BotTag } from "widgets.slint";
 import { ChatMessageRow } from "chat_types.slint";
 
-component ActionLink inherits Text {
+// Compact action-bar button: a quiet muted label that lights up on hover.
+// `danger` keeps it red-tinted at rest (delete / report style actions).
+// `hover_changed` feeds the parent sticky-open logic so moving between
+// buttons does not drop the bar (child TouchAreas steal has-hover from
+// the row / bar_bg otherwise).
+component ActionBtn inherits Rectangle {
+    in property <string> text;
+    in property <length> size: Theme.text-xs;
+    in property <bool> danger: false;
     callback clicked;
-    color: area.has-hover ? Theme.accent : Theme.text-muted;
-    font-size: Theme.text-xs;
-    animate color { duration: 120ms; }
-    area := TouchArea { clicked => { root.clicked(); } }
+    callback hover_changed(bool);
+    height: 24px;
+    width: label.preferred-width + 14px;
+    border-radius: Theme.radius-sm;
+    background: touch.has-hover ? (root.danger ? Theme.danger-soft : Theme.bg-hover) : transparent;
+    animate background { duration: 120ms; }
+    label := Text {
+        text: root.text;
+        font-size: root.size;
+        color: root.danger
+            ? (touch.has-hover ? Theme.danger : Theme.danger-dim)
+            : (touch.has-hover ? Theme.text-primary : Theme.text-muted);
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        animate color { duration: 120ms; }
+    }
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        changed has-hover => { root.hover_changed(self.has-hover); }
+        clicked => { root.clicked(); }
+    }
 }
 
 export component MessageRow inherits Rectangle {
@@ -28,13 +58,43 @@ export component MessageRow inherits Rectangle {
     callback report_reason(string, string, string);
     callback report_cancel(string);
 
+    // Sticky open state for the floating action bar. Child ActionBtn
+    // TouchAreas steal has-hover from the row / bar background, so a plain
+    // `hover.has-hover || bar_bg.has-hover` drops for a frame every time
+    // the cursor crosses a button — visible as constant bar flicker.
+    // Nested scopes cannot touch Timer ids on root, so arm/leave go through
+    // kick counters handled at component scope.
+    property <bool> show_actions: false;
+    property <bool> can_show_actions: msg.can_edit || msg.can_delete || msg.can_purge || msg.can_react || msg.can_report;
+    property <int> arm_seq: 0;
+    property <int> leave_seq: 0;
+    changed arm_seq => {
+        disarm_timer.running = false;
+        root.show_actions = true;
+    }
+    changed leave_seq => {
+        disarm_timer.running = false;
+        disarm_timer.running = true;
+    }
+    disarm_timer := Timer {
+        interval: 140ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            if (!hover.has-hover && !bar_bg.has-hover) {
+                root.show_actions = false;
+            }
+        }
+    }
+
     // Mention highlight: a warm (warning-tinted) wash + accent bar when the
     // message pings me; a much fainter wash without a bar for @everyone.
+    // Otherwise the whole row gets a soft full-width hover wash.
     background: msg.mentions_me
-        ? (hover.has-hover ? #d1bc4d2e : #d1bc4d1a)
+        ? (hover.has-hover || root.show_actions ? Theme.warning-glow : Theme.warning-soft)
         : (msg.mentions_everyone
-            ? (hover.has-hover ? #d1bc4d17 : #d1bc4d0a)
-            : (hover.has-hover ? Theme.bg-hover-soft : transparent));
+            ? (hover.has-hover || root.show_actions ? Theme.warning-softer : Theme.warning-softest)
+            : (hover.has-hover || root.show_actions ? Theme.bg-hover-soft : transparent));
     border-width: 1px;
     border-color: transparent;
     animate background { duration: 120ms; }
@@ -48,6 +108,15 @@ export component MessageRow inherits Rectangle {
     hover := TouchArea {
         // Rows don't need their own click behavior -- only hover detection
         // for the action bar -- but TouchArea must exist to read has-hover.
+        changed has-hover => {
+            if (self.has-hover) {
+                if (root.can_show_actions || msg.reporting) {
+                    root.arm_seq += 1;
+                }
+            } else {
+                root.leave_seq += 1;
+            }
+        }
     }
 
     // Pinged rows get a bright warning-colored accent bar (takes precedence
@@ -72,14 +141,41 @@ export component MessageRow inherits Rectangle {
 
     content := VerticalLayout {
 
-    if msg.is_call_log: VerticalLayout {
-        padding: 6px;
-        spacing: 4px;
+    // Date separators (and call-log system lines) render as a Discord-style
+    // divider: hairline -- centered small-caps label -- hairline. The
+    // hairlines are wrapped in stretched Rectangles so the layout can give
+    // them real width while the 1px line itself sits at vertical center.
+    if msg.is_call_log: HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        padding-top: 16px;
+        padding-bottom: 6px;
+        spacing: 12px;
+        Rectangle {
+            horizontal-stretch: 1;
+            Rectangle {
+                y: (parent.height - 1px) / 2;
+                width: parent.width;
+                height: 1px;
+                background: Theme.border-hairline;
+            }
+        }
         Text {
             text: msg.body;
             font-size: Theme.text-sm;
+            font-family: Theme.font-medium;
             color: msg.body_danger ? Theme.danger : Theme.text-muted;
-            horizontal-alignment: center;
+            horizontal-stretch: 0;
+            vertical-alignment: center;
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+            Rectangle {
+                y: (parent.height - 1px) / 2;
+                width: parent.width;
+                height: 1px;
+                background: Theme.border-hairline;
+            }
         }
     }
 
@@ -88,8 +184,8 @@ export component MessageRow inherits Rectangle {
         padding-right: 16px;
         // Grouped continuation rows sit tighter under their parent message;
         // a new author block gets more air above it.
-        padding-top: msg.grouped ? 3px : 10px;
-        padding-bottom: 3px;
+        padding-top: msg.grouped ? 2px : 10px;
+        padding-bottom: 2px;
         spacing: 12px;
         // No `alignment` here (default `stretch`): the avatar column is
         // pinned to 36px via `horizontal-stretch: 0` below, and the message
@@ -119,7 +215,7 @@ export component MessageRow inherits Rectangle {
                 horizontal-alignment: center;
                 vertical-alignment: center;
                 overflow: elide;
-                opacity: hover.has-hover ? 1 : 0;
+                opacity: hover.has-hover || root.show_actions ? 1 : 0;
                 animate opacity { duration: 120ms; }
             }
         }
@@ -135,22 +231,28 @@ export component MessageRow inherits Rectangle {
                     text: msg.author_name;
                     font-size: Theme.text-md;
                     font-family: Theme.font-medium;
-                    color: msg.mine ? Theme.accent : white;
+                    // Role-tinted name, Discord-style: the view-model has no
+                    // dedicated name color yet, so the per-author avatar
+                    // color doubles as the name color (own name stays accent).
+                    color: msg.mine ? Theme.accent : msg.author_avatar_color;
                     vertical-alignment: center;
                 }
-                if msg.is_bot: Rectangle {
-                    background: Theme.accent;
-                    width: bot-label.preferred-width + 8px;
+                if msg.is_bot: BotTag {}
+                if msg.is_plus: Rectangle {
+                    background: Theme.plus;
+                    border-radius: Theme.radius-sm;
+                    width: plus-label.preferred-width + 8px;
                     height: 14px;
-                    bot-label := Text {
-                        text: "*bot";
+                    plus-label := Text {
+                        text: "PLUS";
                         font-size: 9px;
                         font-family: Theme.font-medium;
-                        color: #050d05;
+                        color: Theme.plus-foreground;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
                 }
+                // Small, gray timestamp next to the author name.
                 Text {
                     text: msg.meta;
                     font-size: Theme.text-xs;
@@ -186,6 +288,7 @@ export component MessageRow inherits Rectangle {
                 height: 240px;
                 background: Theme.bg-tertiary;
                 border-width: 1px;
+                border-radius: Theme.radius-md;
                 border-color: att_touch.has-hover ? Theme.border-strong : Theme.border;
                 animate border-color { duration: 120ms; }
                 VerticalLayout {
@@ -201,14 +304,17 @@ export component MessageRow inherits Rectangle {
                     Text {
                         text: "click to enlarge";
                         font-size: Theme.text-xs;
-                        color: Theme.accent;
+                        color: Theme.text-link;
                         horizontal-alignment: center;
                     }
                 }
-                att_touch := TouchArea { clicked => { root.open_attachment(msg.id); } }
+                att_touch := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => { root.open_attachment(msg.attachment_url); }
+                }
             }
             if msg.has_attachment && msg.attachment.width <= 0: Text {
-                text: "[loading image...]";
+                text: msg.attachment_loading ? "[loading image...]" : "[image unavailable]";
                 font-size: Theme.text-sm;
                 color: Theme.text-muted;
             }
@@ -221,6 +327,7 @@ export component MessageRow inherits Rectangle {
                         ? (pill_touch.has-hover ? Theme.accent-soft-strong : Theme.accent-soft)
                         : (pill_touch.has-hover ? Theme.bg-hover : Theme.bg-tertiary);
                     border-width: 1px;
+                    border-radius: Theme.radius-md;
                     border-color: r.reacted_by_me ? Theme.accent : (pill_touch.has-hover ? Theme.border-strong : Theme.border);
                     animate background { duration: 120ms; }
                     animate border-color { duration: 120ms; }
@@ -233,7 +340,10 @@ export component MessageRow inherits Rectangle {
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
-                    pill_touch := TouchArea { clicked => { root.react(msg.id, r.emoji); } }
+                    pill_touch := TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => { root.react(msg.id, r.emoji); }
+                    }
                 }
             }
         }
@@ -244,44 +354,130 @@ export component MessageRow inherits Rectangle {
     // corner, so its appearance never changes the row height. The old
     // in-flow bar grew the row on hover, the layout shifted, the cursor
     // ended up outside the row, hover dropped, the bar vanished... a loop
-    // that made reactions/reply impossible to click.
+    // that made reactions/reply impossible to click. Styled as a Discord
+    // hover bar: dark rounded floating pill with a soft drop shadow.
     action_bar := Rectangle {
-        visible: msg.reporting || ((hover.has-hover || bar_bg.has-hover) && (msg.can_edit || msg.can_delete || msg.can_purge || msg.can_react || msg.can_report));
-        x: parent.width - self.width - 8px;
+        visible: msg.reporting || (root.show_actions && root.can_show_actions);
+        x: parent.width - self.width - 16px;
         y: 4px;
-        width: bar_col.preferred-width + 16px;
-        height: bar_col.preferred-height + 8px;
-        background: Theme.bg-elevated;
+        width: bar_col.preferred-width + 8px;
+        height: 30px;
+        border-radius: Theme.radius-md;
+        background: Theme.bg-floating;
         border-width: 1px;
         border-color: Theme.border-strong;
+        drop-shadow-offset-x: 0px;
+        drop-shadow-offset-y: Theme.shadow-offset-light;
+        drop-shadow-blur: Theme.shadow-blur;
+        drop-shadow-color: Theme.shadow-color;
         // Keeps has-hover alive while moving across the bar's padding; the
-        // ActionLinks sit above it in z-order and take their own clicks.
-        bar_bg := TouchArea {}
+        // ActionBtns sit above it in z-order and take their own clicks.
+        bar_bg := TouchArea {
+            changed has-hover => {
+                if (self.has-hover) {
+                    root.arm_seq += 1;
+                } else {
+                    root.leave_seq += 1;
+                }
+            }
+        }
         bar_col := HorizontalLayout {
-            x: 8px;
-            y: 4px;
-            spacing: 10px;
+            x: 4px;
+            y: 3px;
+            spacing: 2px;
             alignment: start;
             if msg.can_react: HorizontalLayout {
-                spacing: 4px;
-                for e in root.quick_emojis: ActionLink {
+                spacing: 2px;
+                for e in root.quick_emojis: ActionBtn {
                     text: e;
-                    font-size: 14px;
+                    size: 14px;
+                    hover_changed(h) => {
+                        if (h) { root.arm_seq += 1; } else { root.leave_seq += 1; }
+                    }
                     clicked => { root.react(msg.id, e); }
                 }
             }
-            if msg.can_react && !msg.is_call_log && !msg.reporting: ActionLink { text: "Reply"; clicked => { root.reply(msg.id, msg.author_name, msg.body); } }
-            if msg.can_react && !msg.is_call_log && !msg.reporting: ActionLink { text: "Copy"; clicked => { root.copy(msg.body); } }
-            if msg.can_edit && !msg.reporting: ActionLink { text: "Edit"; clicked => { root.edit(msg.id, msg.body, msg.encrypted); } }
-            if msg.can_delete && !msg.reporting: ActionLink { text: "Delete"; clicked => { root.delete(msg.id); } }
-            if msg.can_purge && !msg.reporting: ActionLink { text: "Delete forever"; clicked => { root.purge(msg.id); } }
-            if msg.can_report && !msg.reporting: ActionLink { text: "Report"; clicked => { root.report(msg.id); } }
+            if msg.can_react && !msg.is_call_log && !msg.reporting: ActionBtn {
+                text: "Reply";
+                hover_changed(h) => {
+                    if (h) { root.arm_seq += 1; } else { root.leave_seq += 1; }
+                }
+                clicked => { root.reply(msg.id, msg.author_name, msg.body); }
+            }
+            if msg.can_react && !msg.is_call_log && !msg.reporting: ActionBtn {
+                text: "Copy";
+                hover_changed(h) => {
+                    if (h) { root.arm_seq += 1; } else { root.leave_seq += 1; }
+                }
+                clicked => { root.copy(msg.body); }
+            }
+            if msg.can_edit && !msg.reporting: ActionBtn {
+                text: "Edit";
+                hover_changed(h) => {
+                    if (h) { root.arm_seq += 1; } else { root.leave_seq += 1; }
+                }
+                clicked => { root.edit(msg.id, msg.body, msg.encrypted); }
+            }
+            if msg.can_delete && !msg.reporting: ActionBtn {
+                text: "Delete";
+                danger: true;
+                hover_changed(h) => {
+                    if (h) { root.arm_seq += 1; } else { root.leave_seq += 1; }
+                }
+                clicked => { root.delete(msg.id); }
+            }
+            if msg.can_purge && !msg.reporting: ActionBtn {
+                text: "Delete forever";
+                danger: true;
+                hover_changed(h) => {
+                    if (h) { root.arm_seq += 1; } else { root.leave_seq += 1; }
+                }
+                clicked => { root.purge(msg.id); }
+            }
+            if msg.can_report && !msg.reporting: ActionBtn {
+                text: "Report";
+                danger: true;
+                hover_changed(h) => {
+                    if (h) { root.arm_seq += 1; } else { root.leave_seq += 1; }
+                }
+                clicked => { root.report(msg.id); }
+            }
             if msg.reporting: Text { text: "Report:"; font-size: Theme.text-xs; color: Theme.text-muted; vertical-alignment: center; }
-            if msg.reporting: ActionLink { text: "Spam"; clicked => { root.report_reason(msg.id, msg.body, "spam"); } }
-            if msg.reporting: ActionLink { text: "Harassment"; clicked => { root.report_reason(msg.id, msg.body, "harassment"); } }
-            if msg.reporting: ActionLink { text: "Illegal"; clicked => { root.report_reason(msg.id, msg.body, "illegal_content"); } }
-            if msg.reporting: ActionLink { text: "Other"; clicked => { root.report_reason(msg.id, msg.body, "other"); } }
-            if msg.reporting: ActionLink { text: "Cancel"; clicked => { root.report_cancel(msg.id); } }
+            if msg.reporting: ActionBtn {
+                text: "Spam";
+                hover_changed(h) => {
+                    if (h) { root.arm_seq += 1; } else { root.leave_seq += 1; }
+                }
+                clicked => { root.report_reason(msg.id, msg.body, "spam"); }
+            }
+            if msg.reporting: ActionBtn {
+                text: "Harassment";
+                hover_changed(h) => {
+                    if (h) { root.arm_seq += 1; } else { root.leave_seq += 1; }
+                }
+                clicked => { root.report_reason(msg.id, msg.body, "harassment"); }
+            }
+            if msg.reporting: ActionBtn {
+                text: "Illegal";
+                hover_changed(h) => {
+                    if (h) { root.arm_seq += 1; } else { root.leave_seq += 1; }
+                }
+                clicked => { root.report_reason(msg.id, msg.body, "illegal_content"); }
+            }
+            if msg.reporting: ActionBtn {
+                text: "Other";
+                hover_changed(h) => {
+                    if (h) { root.arm_seq += 1; } else { root.leave_seq += 1; }
+                }
+                clicked => { root.report_reason(msg.id, msg.body, "other"); }
+            }
+            if msg.reporting: ActionBtn {
+                text: "Cancel";
+                hover_changed(h) => {
+                    if (h) { root.arm_seq += 1; } else { root.leave_seq += 1; }
+                }
+                clicked => { root.report_cancel(msg.id); }
+            }
         }
     }
 }

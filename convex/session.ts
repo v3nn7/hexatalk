@@ -13,23 +13,45 @@ async function hashSessionToken(token: string): Promise<string> {
     .join("");
 }
 
+/** Type guard: MutationCtx carries a scheduler, QueryCtx does not. */
+export function isMutationCtx(ctx: QueryCtx | MutationCtx): ctx is MutationCtx {
+  return "scheduler" in ctx;
+}
+
 export async function currentUser(
   ctx: QueryCtx | MutationCtx,
   sessionToken: string,
 ): Promise<Doc<"users">> {
   const tokenHash = await hashSessionToken(sessionToken);
-  const session =
-    (await ctx.db
-      .query("sessions")
-      .withIndex("by_tokenHash", (q) => q.eq("tokenHash", tokenHash))
-      .unique()) ??
+  const hashed = await ctx.db
+    .query("sessions")
+    .withIndex("by_tokenHash", (q) => q.eq("tokenHash", tokenHash))
+    .unique();
+  let session = hashed;
+  if (!session) {
     // Legacy rows written before token hashing still carry the plaintext
     // token; match it directly.
-    (await ctx.db
+    const legacy = await ctx.db
       .query("sessions")
       .withIndex("by_token", (q) => q.eq("token", sessionToken))
-      .unique());
+      .unique();
+    if (legacy) {
+      session = legacy;
+      // Lazy migration: replace the plaintext token with its hash so the
+      // credential no longer sits in the DB in cleartext.
+      if (isMutationCtx(ctx) && legacy.expiresAt >= Date.now()) {
+        await ctx.db.patch("sessions", legacy._id, {
+          tokenHash,
+          token: undefined,
+        });
+      }
+    }
+  }
   if (!session || session.expiresAt < Date.now()) {
+    // Hygiene: drop the expired row on the way out when we can write.
+    if (session && isMutationCtx(ctx)) {
+      await ctx.db.delete("sessions", session._id);
+    }
     throw new Error("Session expired, please log in again");
   }
   const user = await ctx.db.get("users", session.userId);
@@ -120,25 +142,24 @@ export async function isBlockedEitherWay(
   a: Id<"users">,
   b: Id<"users">,
 ): Promise<boolean> {
-  const userA = await ctx.db.get("users", a);
-  const userB = await ctx.db.get("users", b);
+  const [userA, userB, aBlockedB, bBlockedA] = await Promise.all([
+    ctx.db.get("users", a),
+    ctx.db.get("users", b),
+    ctx.db
+      .query("blocks")
+      .withIndex("by_blocker_and_blocked", (q) =>
+        q.eq("blockerId", a).eq("blockedId", b),
+      )
+      .unique(),
+    ctx.db
+      .query("blocks")
+      .withIndex("by_blocker_and_blocked", (q) =>
+        q.eq("blockerId", b).eq("blockedId", a),
+      )
+      .unique(),
+  ]);
   // Platform admins ignore blocks both ways for support access.
   if (userA && isProtectedTarget(userA)) return false;
   if (userB && isProtectedTarget(userB)) return false;
-
-  const aBlockedB = await ctx.db
-    .query("blocks")
-    .withIndex("by_blocker_and_blocked", (q) =>
-      q.eq("blockerId", a).eq("blockedId", b),
-    )
-    .unique();
-  if (aBlockedB) return true;
-
-  const bBlockedA = await ctx.db
-    .query("blocks")
-    .withIndex("by_blocker_and_blocked", (q) =>
-      q.eq("blockerId", b).eq("blockedId", a),
-    )
-    .unique();
-  return bBlockedA !== null;
+  return aBlockedB !== null || bBlockedA !== null;
 }

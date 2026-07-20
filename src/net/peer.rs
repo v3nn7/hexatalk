@@ -18,6 +18,28 @@ use tokio::sync::mpsc;
 /// Default production relay from peerseal docs (overridable via PEERSEAL_RELAY).
 /// Baked into the binary obfuscated — see src/obf.rs and build.rs.
 
+/// How long the host waits for the UI to ack a Convex invite publish
+/// (`InvitePublished`/`InvitePublishFailed`) before treating it as a
+/// failed attempt and retrying. Previously the host blocked on
+/// `cmd_rx.recv()` forever here -- a wedged publish path left the DM
+/// "stuck" with no status and no retry.
+const PUBLISH_ACK_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// If nothing (not even a keepalive Pong) arrives from the peer for this
+/// long, the connection is declared half-open: TCP relays and NATs drop
+/// idle flows silently, and without a receive-side watchdog a dead peer
+/// looked "connected" forever. On expiry the session is torn down so the
+/// registry respawns a fresh one.
+const PEER_SILENCE_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Hard cap on a single drained photo transfer -- bounds memory against a
+/// malicious or buggy peer streaming frames forever.
+const MAX_PHOTO_BYTES: usize = 32 * 1024 * 1024;
+
+/// Timeout for draining one photo transfer; without it a peer that stops
+/// mid-transfer suspended the whole `connected_loop` select forever.
+const PHOTO_DRAIN_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Commands from the UI thread into the peerseal worker.
 #[derive(Debug)]
 pub(crate) enum PeerCmd {
@@ -54,6 +76,10 @@ pub(crate) enum PeerEvent {
     Text(String),
     Photo {
         bytes: Vec<u8>,
+        /// MIME type of the photo (sniffed from magic bytes when the peer
+        /// sent none). Carried for the UI; `state::app` currently caches
+        /// the bytes only, hence the allow.
+        #[allow(dead_code)]
         content_type: String,
     },
     Error(String),

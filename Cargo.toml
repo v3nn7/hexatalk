@@ -5,7 +5,7 @@ resolver = "2"
 
 [package]
 name = "HexaTalk"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2024"
 
 [dependencies]
@@ -37,6 +37,10 @@ x25519-dalek = { version = "3.0.0", features = ["static_secrets", "getrandom"] }
 # 2.x matches the rand_core 0.6 already in the tree; only signature
 # verification is needed here, so keygen/pkcs8 features stay off.
 ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
+# bsdiff-compatible binary delta patcher for incremental updates
+# (src/update_check.rs) — only the patch side (`Bspatch`) runs in the app;
+# `Bsdiff` is used offline at release time to produce the delta files.
+qbsdiff = "1.4"
 aes-gcm = "0.10"
 hkdf = "0.13.0"
 sha2 = "0.11.0"

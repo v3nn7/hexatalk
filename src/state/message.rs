@@ -32,10 +32,18 @@ pub(crate) enum Message {
     PasswordInputChanged(String),
     DisplayNameInputChanged(String),
     EmailInputChanged(String),
+    /// Confirm field on forgot-password (new password again).
+    PasswordConfirmInputChanged(String),
+    /// 6-digit code on forgot-password step 2.
+    PasswordResetCodeInputChanged(String),
     SubmitAuth,
     AuthFinished(Result<Session, String>),
     RestoreFinished(Result<Session, String>),
     PublicKeyUploaded,
+    /// Forgot-password: code email requested (always "ok" from server).
+    PasswordResetCodeSent(Result<(), String>),
+    /// Forgot-password: new password applied; client should return to login.
+    PasswordResetFinished(Result<(), String>),
 
     // ---- Email verification gate ----
     EmailVerifyInputChanged(String),
@@ -176,6 +184,15 @@ pub(crate) enum Message {
     SaveCustomSlug,
     ClearCustomSlug,
     CustomSlugFinished(Result<String, String>),
+
+    /// `vyrapp://join/<slug>` arrived, either as this process's own argv
+    /// (cold start) or forwarded over the single-instance loopback socket
+    /// from a second launch (see `main.rs`'s deep-link listener).
+    DeepLinkReceived(String),
+    DeepLinkResolved(Result<Option<crate::state::types::DeepLinkJoinInfo>, String>),
+    ConfirmJoinDeepLink,
+    JoinDeepLinkFinished(Result<(), String>),
+    DismissJoinDialog,
     CopyInviteCode(String),
     /// Same as `CopyInviteCode`, but copies the shareable `hexatalk://invite/<code>`
     /// link instead of the bare code.
@@ -365,6 +382,9 @@ pub(crate) enum Message {
     HangUp,
     ToggleMute,
     ToggleMuteAll,
+    /// Deafen = speaker/output mute only (mic is untouched); the sidebar
+    /// user-panel headphones button drives this.
+    ToggleDeafen,
     CallActionFinished(Result<(), String>),
     CallEngineEvent(call::CallEvent),
 
@@ -410,6 +430,13 @@ pub(crate) enum Message {
     SettingsInputDeviceSelected(String),
     SettingsOutputDeviceSelected(String),
     NoiseGateChanged(f32),
+
+    /// HexaTalk Plus — Stripe checkout / portal / refresh status.
+    PlusSubscribe,
+    PlusManageBilling,
+    PlusRefreshStatus,
+    PlusCheckoutUrl(Result<String, String>),
+    PlusStatusRefreshed(Result<(bool, i64), String>),
 
     AvatarImageLoaded(String, Result<Vec<u8>, String>),
     PickAvatarImage,

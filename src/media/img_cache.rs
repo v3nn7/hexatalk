@@ -10,13 +10,28 @@
 //! every UI resync.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 
+/// Cap on decoded-cache entries. Without a bound the cache grew for the
+/// whole session (every avatar + attachment ever shown, at 4 bytes/pixel
+/// decoded), which turned long sessions into hundreds of MB of resident
+/// decoded bitmaps. Eviction is simple FIFO: entries are looked up far more
+/// often right after they first appear than later, and a re-decode on the
+/// rare miss is cheap compared to the memory pressure.
+const MAX_CACHED_IMAGES: usize = 256;
+
+/// Decoded-image pixel cap (~200 MB RGBA worst case). Guards against a
+/// corrupt or hostile file claiming absurd dimensions -- the `image` crate
+/// allocates the full RGBA buffer on decode.
+const MAX_PIXELS: u64 = 50_000_000;
+
 thread_local! {
     static DECODED: RefCell<HashMap<String, Image>> = RefCell::new(HashMap::new());
+    /// Insertion order of `DECODED` keys for FIFO eviction.
+    static ORDER: RefCell<VecDeque<String>> = RefCell::new(VecDeque::new());
 }
 
 /// Decode raw image bytes into a Slint `Image`, or `None` if undecodable.
@@ -27,21 +42,13 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<Image> {
     let img = reader.decode().ok()?;
     let rgba = img.to_rgba8();
     let (w, h) = rgba.dimensions();
-    if w == 0 || h == 0 {
+    if w == 0 || h == 0 || w as u64 * h as u64 > MAX_PIXELS {
         return None;
     }
-    let raw = rgba.into_raw();
-    let pixels: Vec<Rgba8Pixel> = raw
-        .chunks_exact(4)
-        .map(|c| Rgba8Pixel {
-            r: c[0],
-            g: c[1],
-            b: c[2],
-            a: c[3],
-        })
-        .collect();
-    let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(w, h);
-    buf.make_mut_slice().copy_from_slice(&pixels);
+    // `clone_from_slice` uploads straight from the RGBA bytes -- the old
+    // path built a per-pixel `Vec<Rgba8Pixel>` copy first and then copied
+    // *that* into the buffer.
+    let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(rgba.as_raw(), w, h);
     Some(Image::from_rgba8(buf))
 }
 
@@ -58,6 +65,21 @@ pub(crate) fn image_for(byte_cache: &HashMap<String, Arc<[u8]>>, url: &str) -> O
     }
     let bytes = byte_cache.get(url)?;
     let img = decode(bytes)?;
-    DECODED.with(|d| d.borrow_mut().insert(url.to_string(), img.clone()));
+    DECODED.with(|d| {
+        let mut map = d.borrow_mut();
+        if map.contains_key(url) {
+            return;
+        }
+        map.insert(url.to_string(), img.clone());
+        ORDER.with(|o| {
+            let mut order = o.borrow_mut();
+            order.push_back(url.to_string());
+            while order.len() > MAX_CACHED_IMAGES {
+                if let Some(evicted) = order.pop_front() {
+                    map.remove(&evicted);
+                }
+            }
+        });
+    });
     Some(img)
 }

@@ -2,6 +2,8 @@
 // signed-in account's email isn't verified yet, whether that's a brand new
 // signup (code already sent, just needs the code) or a pre-existing account
 // that predates email verification (needs to enter an email first).
+// Rounded, elevated card centered on the dark backdrop with the HexaTalk
+// brand mark and small-caps field labels.
 import { Theme } from "theme.slint";
 import { TextInputField, FieldLabel, PrimaryButton, LinkButton } from "widgets.slint";
 
@@ -27,13 +29,15 @@ export component EmailVerifyScreen inherits Rectangle {
         alignment: center;
 
         card := Rectangle {
-            width: 360px;
+            width: 380px;
             background: Theme.bg-secondary;
             border-width: 1px;
             border-color: Theme.border;
+            border-radius: 8px;
             drop-shadow-offset-x: Theme.shadow-offset;
             drop-shadow-offset-y: Theme.shadow-offset;
             drop-shadow-color: Theme.shadow-color;
+            clip: true;
 
             Rectangle {
                 x: 0;
@@ -48,10 +52,23 @@ export component EmailVerifyScreen inherits Rectangle {
                 spacing: 12px;
                 alignment: start;
 
+                // Brand mark, centered like the Discord auth modal logo.
+                HorizontalLayout {
+                    alignment: center;
+                    Image {
+                        source: @image-url("../assets/textures/hexatalkicon.png");
+                        width: 40px;
+                        height: 40px;
+                        image-fit: ImageFit.contain;
+                    }
+                }
+
                 Text {
                     text: "Verify your email";
                     font-size: 20px;
+                    font-family: Theme.font-medium;
                     color: Theme.text-primary;
+                    horizontal-alignment: center;
                 }
                 Text {
                     text: root.code-sent
@@ -60,9 +77,10 @@ export component EmailVerifyScreen inherits Rectangle {
                     font-size: 13px;
                     color: Theme.text-muted;
                     wrap: word-wrap;
+                    horizontal-alignment: center;
                 }
 
-                if !root.code-sent: FieldLabel { text: "Email"; }
+                if !root.code-sent: FieldLabel { text: "EMAIL"; }
                 if !root.code-sent: TextInputField {
                     placeholder: "you@example.com";
                     value <=> root.email-input;
@@ -71,9 +89,10 @@ export component EmailVerifyScreen inherits Rectangle {
                     submitted => { root.send-code(); }
                 }
 
-                if root.code-sent: FieldLabel { text: "Verification code"; }
+                if root.code-sent: FieldLabel { text: "VERIFICATION CODE"; }
                 if root.code-sent: TextInputField {
                     placeholder: "123456";
+                    is-number: true;
                     value <=> root.code-input;
                     enabled: !root.verify-busy;
                     edited(text) => { root.code-edited(text); }
@@ -84,10 +103,20 @@ export component EmailVerifyScreen inherits Rectangle {
                     background: Theme.danger-soft;
                     border-width: 1px;
                     border-color: Theme.danger;
+                    border-radius: 4px;
                     height: error-text.preferred-height + 24px;
+                    // Danger bar on the alert's left edge.
+                    Rectangle {
+                        x: 0;
+                        y: 0;
+                        width: 3px;
+                        height: parent.height;
+                        border-radius: 2px;
+                        background: Theme.danger;
+                    }
                     error-text := Text {
-                        x: 12px;
-                        width: parent.width - 24px;
+                        x: 14px;
+                        width: parent.width - 26px;
                         y: 12px;
                         text: root.verify-error;
                         font-size: 13px;
@@ -105,7 +134,7 @@ export component EmailVerifyScreen inherits Rectangle {
                 }
                 if root.code-sent: PrimaryButton {
                     text: root.verify-busy ? "Verifying…" : "Verify";
-                    enabled: !root.verify-busy;
+                    enabled: !root.verify-busy && root.code-input != "";
                     busy: root.verify-busy;
                     clicked => { root.verify-code(); }
                 }

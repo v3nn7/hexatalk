@@ -62,7 +62,18 @@ pub(crate) struct App {
     pub(crate) password_input: String,
     pub(crate) display_name_input: String,
     pub(crate) email_input: String,
+    /// Confirm new password (ForgotPassword mode only).
+    pub(crate) password_confirm_input: String,
+    /// 6-digit email code (ForgotPassword step 2).
+    pub(crate) password_reset_code_input: String,
+    /// True after a reset code was successfully requested for this session.
+    pub(crate) password_reset_code_sent: bool,
     pub(crate) auth_error: Option<String>,
+    /// Per-field auth validation errors (set by SubmitAuth, cleared on
+    /// input); rendered under the matching field instead of the shared box.
+    pub(crate) auth_username_error: Option<String>,
+    pub(crate) auth_password_error: Option<String>,
+    pub(crate) auth_email_error: Option<String>,
     pub(crate) auth_busy: bool,
 
     // ---- Email verification gate (shown whenever session.email_verified
@@ -151,6 +162,15 @@ pub(crate) struct App {
     pub(crate) server_add_menu_open: bool,
     pub(crate) custom_slug_input: String,
     pub(crate) server_icon_busy: bool,
+    /// Slug from the `vyrapp://join/<slug>` link currently being resolved
+    /// or confirmed (cleared once the dialog closes, joined or not).
+    pub(crate) pending_join_slug: Option<String>,
+    pub(crate) pending_join_server_id: String,
+    pub(crate) pending_join_server_name: String,
+    pub(crate) pending_join_server_icon: String,
+    pub(crate) pending_join_invite_code: String,
+    pub(crate) pending_join_invites_paused: bool,
+    pub(crate) show_join_dialog: bool,
     pub(crate) new_channel_open: bool,
     pub(crate) new_channel_name_input: String,
     pub(crate) new_channel_is_voice: bool,
@@ -202,7 +222,9 @@ pub(crate) struct App {
     pub(crate) my_bots: Vec<BotSummary>,
     pub(crate) new_bot_name_input: String,
     pub(crate) bot_invite_username_input: String,
-    pub(crate) bot_status: Option<String>,
+    /// (text, is_error) -- the settings bot panel colors the line
+    /// danger/success from the flag instead of a single muted style.
+    pub(crate) bot_status: Option<(String, bool)>,
     /// Shown once after create/regenerate — user should copy.
     pub(crate) bot_token_reveal: Option<String>,
     pub(crate) renaming_channel_id: Option<String>,
@@ -218,6 +240,9 @@ pub(crate) struct App {
     pub(crate) active_conversation_kind: Option<String>,
     pub(crate) active_conversation_peer_id: Option<String>,
     pub(crate) active_peer_name: Option<String>,
+    /// True between opening a conversation and the first history payload
+    /// (MessagesUpdated) -- the chat pane shows "Loading…" meanwhile.
+    pub(crate) chat_history_loading: bool,
     pub(crate) messages: Vec<ChatMessage>,
     /// Pinned messages of the open conversation (live `messages:listPinned`
     /// watch; decrypted on arrival like history rows). Backs the header panel.
@@ -290,16 +315,23 @@ pub(crate) struct App {
     pub(crate) settings_status_input: String,
     pub(crate) settings_bio_input: String,
     pub(crate) settings_avatar_color: String,
-    pub(crate) settings_profile_status: Option<String>,
+    pub(crate) settings_profile_status: Option<(String, bool)>,
     pub(crate) settings_current_password_input: String,
     pub(crate) settings_new_password_input: String,
     pub(crate) settings_confirm_password_input: String,
-    pub(crate) settings_password_status: Option<String>,
+    pub(crate) settings_password_status: Option<(String, bool)>,
     pub(crate) settings_input_devices: Vec<String>,
     pub(crate) settings_output_devices: Vec<String>,
 
     pub(crate) avatar_image_cache: HashMap<String, Arc<[u8]>>,
+    /// Image URLs whose last fetch failed -- the UI stops showing these as
+    /// "loading" and renders the "[image unavailable]" fallback instead.
+    pub(crate) avatar_image_failed: std::collections::HashSet<String>,
     pub(crate) avatar_upload_busy: bool,
+
+    /// HexaTalk Plus checkout / status UI.
+    pub(crate) plus_busy_status: Option<String>,
+    pub(crate) plus_checkout_busy: bool,
 
     pub(crate) typing_names: Vec<String>,
     pub(crate) typing_active: bool,
@@ -344,12 +376,18 @@ impl App {
                 password_input: String::new(),
                 display_name_input: String::new(),
                 email_input: String::new(),
+                password_confirm_input: String::new(),
+                password_reset_code_input: String::new(),
+                password_reset_code_sent: false,
                 email_verify_input: String::new(),
                 email_verify_code_input: String::new(),
                 email_verify_code_sent: false,
                 email_verify_busy: false,
                 email_verify_error: None,
                 auth_error: None,
+                auth_username_error: None,
+                auth_password_error: None,
+                auth_email_error: None,
                 auth_busy: false,
                 session: None,
                 peerseal_public_key: None,
@@ -406,6 +444,13 @@ impl App {
                 server_add_menu_open: false,
                 custom_slug_input: String::new(),
                 server_icon_busy: false,
+                pending_join_slug: None,
+                pending_join_server_id: String::new(),
+                pending_join_server_name: String::new(),
+                pending_join_server_icon: String::new(),
+                pending_join_invite_code: String::new(),
+                pending_join_invites_paused: false,
+                show_join_dialog: false,
                 new_channel_open: false,
                 new_channel_name_input: String::new(),
                 new_channel_is_voice: false,
@@ -451,6 +496,7 @@ impl App {
                 active_conversation_kind: None,
                 active_conversation_peer_id: None,
                 active_peer_name: None,
+                chat_history_loading: false,
                 messages: Vec::new(),
                 pinned_messages: Vec::new(),
                 pins_panel_open: false,
@@ -515,7 +561,10 @@ impl App {
                 settings_input_devices: Vec::new(),
                 settings_output_devices: Vec::new(),
                 avatar_image_cache: HashMap::new(),
+                avatar_image_failed: std::collections::HashSet::new(),
                 avatar_upload_busy: false,
+                plus_busy_status: None,
+                plus_checkout_busy: false,
                 typing_names: Vec::new(),
                 typing_active: false,
                 last_typing_ping: None,
@@ -721,6 +770,8 @@ impl App {
         // Drop vault media handles for this chat from the image cache.
         self.avatar_image_cache
             .retain(|url, _| !history::is_media_url_tag(url));
+        self.avatar_image_failed
+            .retain(|url| !history::is_media_url_tag(url));
         self.messages.clear();
         self.peer_live_messages.clear();
         self.pending_attachment = None;
@@ -807,13 +858,20 @@ impl App {
         self.password_input.clear();
         self.display_name_input.clear();
         self.email_input.clear();
+        self.password_confirm_input.clear();
+        self.password_reset_code_input.clear();
+        self.password_reset_code_sent = false;
         self.email_verify_input.clear();
         self.email_verify_code_input.clear();
         self.email_verify_code_sent = false;
         self.email_verify_busy = false;
         self.email_verify_error = None;
         self.auth_error = None;
+        self.auth_username_error = None;
+        self.auth_password_error = None;
+        self.auth_email_error = None;
         self.auth_busy = false;
+        self.auth_mode = AuthMode::Login;
         self.typing_names.clear();
         self.typing_active = false;
         self.last_typing_ping = None;
@@ -851,7 +909,10 @@ impl App {
     ) -> Task<Message> {
         let mut tasks = Vec::new();
         for (url, att_key, att_nonce) in jobs {
-            if url.is_empty() || self.avatar_image_cache.contains_key(&url) {
+            if url.is_empty()
+                || self.avatar_image_cache.contains_key(&url)
+                || self.avatar_image_failed.contains(&url)
+            {
                 continue;
             }
             let url_for_result = url.clone();
@@ -1111,6 +1172,7 @@ impl App {
                     author_avatar_color: String::new(),
                     author_avatar_url: String::new(),
                     author_is_bot: false,
+                    author_plus_active: false,
                     body: text,
                     kind: "text".into(),
                     attachment_url: String::new(),
@@ -1172,6 +1234,7 @@ impl App {
                     author_avatar_color: String::new(),
                     author_avatar_url: String::new(),
                     author_is_bot: false,
+                    author_plus_active: false,
                     body: String::new(),
                     kind: "text".into(),
                     attachment_url: url,
@@ -1253,6 +1316,7 @@ impl App {
             author_avatar_color: session.avatar_color.clone(),
             author_avatar_url: session.avatar_image_url.clone(),
             author_is_bot: false,
+            author_plus_active: session.plus_active,
             body,
             kind: "text".into(),
             attachment_url,
@@ -1273,20 +1337,24 @@ impl App {
             .push(msg);
     }
 
-    /// Decrypt group/channel TGK1 bodies (and legacy TKR3 DM blobs if any).
-    /// Live DMs use peerseal and arrive via `peer_live_messages`.
+    /// Decrypt incoming bodies: TGK1 for groups/channels, TKR3 ratchet blobs
+    /// for the durable DM history copy. Live DMs use peerseal and arrive via
+    /// `peer_live_messages`.
     pub(super) fn decrypt_incoming_messages(
         &mut self,
         messages: Vec<ChatMessage>,
     ) -> Vec<ChatMessage> {
-        let Some(conversation_id) = self.active_conversation.clone() else {
-            return messages;
-        };
         let kind = self.active_conversation_kind.as_deref().unwrap_or("");
+        if kind == "direct" {
+            return self.decrypt_dm_messages(messages);
+        }
         let is_groupish = kind == "group" || kind == "channel" || kind == "voice";
         if !is_groupish {
             return messages;
         }
+        let Some(conversation_id) = self.active_conversation.clone() else {
+            return messages;
+        };
 
         let key_info = self
             .group_key_store
@@ -1343,6 +1411,159 @@ impl App {
                 msg
             })
             .collect()
+    }
+
+    /// Load (or bootstrap) the TKR3 ratchet session for a DM peer: identity
+    /// from the local key file, peer public key from the friends list
+    /// (published via `profile:setPublicKey`).
+    pub(super) fn dm_ratchet_session(&self, peer_id: &str) -> Option<crypto::RatchetSession> {
+        let session = self.session.as_ref()?;
+        let peer_public = self
+            .friends
+            .iter()
+            .find(|f| f.user_id == peer_id)?
+            .public_key
+            .clone();
+        if peer_public.len() != 44 {
+            return None;
+        }
+        let identity = match peer::load_peerseal_identity(&session.user_id) {
+            Ok((id, _)) => crypto::IdentityKeyPair::from_bytes(id.private),
+            Err(_) => return None,
+        };
+        crypto::RatchetSession::load_or_create(
+            &hexatalk_data_dir(),
+            &session.user_id,
+            peer_id,
+            &identity,
+            &peer_public,
+        )
+    }
+
+    /// Encrypt a DM payload (TKR3) for the durable Convex history copy and
+    /// remember the plaintext in the local decrypt cache: the ratchet can't
+    /// read its own sending chain, so our own echo resolves via the cache
+    /// (keyed by ciphertext -- the Convex message id isn't known at send).
+    pub(super) fn dm_encrypt_for_peer(
+        &self,
+        conversation_id: &str,
+        peer_id: &str,
+        payload: &crypto::MessagePayload,
+    ) -> Result<String, String> {
+        let session = self.session.as_ref().ok_or("Not signed in")?;
+        let mut ratchet = self.dm_ratchet_session(peer_id).ok_or_else(|| {
+            "Can't encrypt the history copy -- the peer hasn't published an encryption key yet \
+             (they need to open HexaTalk once). The message was delivered live only."
+                .to_string()
+        })?;
+        let aad = crypto::dm_aad(conversation_id, &session.user_id, peer_id);
+        let plain = payload.encode();
+        let ct = ratchet
+            .encrypt(&plain, &aad)
+            .ok_or_else(|| "Could not encrypt message".to_string())?;
+        let data_dir = hexatalk_data_dir();
+        let mut cache = crypto::DecryptCache::load(&data_dir, &session.user_id, peer_id);
+        cache.put("", &ct, plain);
+        cache.save(&data_dir, &session.user_id, peer_id);
+        Ok(ct)
+    }
+
+    /// Decrypt durable DM history blobs (TKR3). Plaintext rows written
+    /// before E2EE was enabled pass through untouched.
+    fn decrypt_dm_messages(&mut self, messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+        let Some(conversation_id) = self.active_conversation.clone() else {
+            return messages;
+        };
+        let Some(peer_id) = self.active_conversation_peer_id.clone() else {
+            return messages;
+        };
+        let Some(session) = self.session.clone() else {
+            return messages;
+        };
+
+        let data_dir = hexatalk_data_dir();
+        let aad = crypto::dm_aad(&conversation_id, &session.user_id, &peer_id);
+        let mut cache = crypto::DecryptCache::load(&data_dir, &session.user_id, &peer_id);
+        let mut cache_dirty = false;
+
+        // The ratchet is only needed for blobs the cache doesn't cover --
+        // avoid touching the identity/session files on every update.
+        let needs_ratchet = messages.iter().any(|m| {
+            (m.encrypted
+                && !m.deleted
+                && m.kind != "call"
+                && crypto::looks_like_ratchet_blob(&m.body)
+                && cache.get(&m.id, &m.body).is_none())
+                || m.reply_to.as_ref().is_some_and(|(_, snippet)| {
+                    crypto::looks_like_ratchet_blob(snippet)
+                        && cache.get_by_ciphertext(snippet).is_none()
+                })
+        });
+        let mut ratchet = if needs_ratchet {
+            self.dm_ratchet_session(&peer_id)
+        } else {
+            None
+        };
+
+        let messages: Vec<ChatMessage> = messages
+            .into_iter()
+            .map(|mut msg| {
+                // Reply snippets carry the parent's full ciphertext blob
+                // (server-side truncation would corrupt it); decrypt and
+                // truncate client-side. Note a snippet can reference a parent
+                // outside the loaded window, so cache the result -- the
+                // ratchet consumes each chain position only once.
+                if let Some((author, snippet)) = msg.reply_to.take() {
+                    if crypto::looks_like_ratchet_blob(&snippet) {
+                        let plain = cache.get_by_ciphertext(&snippet).or_else(|| {
+                            ratchet.as_mut().and_then(|r| r.decrypt(&snippet, &aad))
+                        });
+                        if let Some(plain) = plain {
+                            cache.put("", &snippet, plain.clone());
+                            cache_dirty = true;
+                            let text = crypto::MessagePayload::decode(&plain)
+                                .map(|p| p.text)
+                                .unwrap_or(plain);
+                            let short = if text.chars().count() > 80 {
+                                format!("{}…", text.chars().take(80).collect::<String>())
+                            } else {
+                                text
+                            };
+                            msg.reply_to = Some((author, short));
+                        } else {
+                            msg.reply_to =
+                                Some((author, DECRYPT_FAILED_PLACEHOLDER.to_string()));
+                        }
+                    } else {
+                        msg.reply_to = Some((author, snippet));
+                    }
+                }
+
+                if !msg.encrypted || msg.deleted || msg.kind == "call" {
+                    return msg;
+                }
+                if crypto::looks_like_ratchet_blob(&msg.body) {
+                    let plain = cache.get(&msg.id, &msg.body).or_else(|| {
+                        ratchet.as_mut().and_then(|r| r.decrypt(&msg.body, &aad))
+                    });
+                    if let Some(plain) = plain {
+                        cache.put(&msg.id, &msg.body, plain.clone());
+                        cache_dirty = true;
+                        apply_decrypted_payload(&mut msg, &plain);
+                    } else {
+                        msg.body = DECRYPT_FAILED_PLACEHOLDER.to_string();
+                        msg.attachment_key = None;
+                        msg.attachment_nonce = None;
+                    }
+                }
+                msg
+            })
+            .collect();
+
+        if cache_dirty {
+            cache.save(&data_dir, &session.user_id, &peer_id);
+        }
+        messages
     }
 
     /// Load or bootstrap the shared group key for the open group/channel.
@@ -1422,6 +1643,17 @@ async fn ensure_group_key_async(
         .await
         .map_err(|e| e.to_string())?;
 
+    // Set when a package exists for me but fails to unseal with my current
+    // identity -- e.g. this device's local peerseal identity was
+    // regenerated (reinstall, or the data dir got renamed without a full
+    // migration -- see main.rs's `migrate_legacy_data_dir`), so the row was
+    // sealed to a public key I no longer hold the private half of. Instead
+    // of hard-failing forever, this is treated like "no package yet": the
+    // flow below still won't get me a package on its own (I can't reseal
+    // for myself without the key), but `reshare_group_key` below runs on
+    // every *other* member's client too, so the next member who already
+    // holds the key and opens this chat re-seals a fresh package for me.
+    let mut mine_unseal_failed = false;
     if let FunctionResult::Value(Value::Object(obj)) = &pkg {
         let epoch = match obj.get("epoch") {
             Some(Value::Float64(n)) => *n as u32,
@@ -1437,9 +1669,14 @@ async fn ensure_group_key_async(
             _ => "",
         };
         if epoch > 0 && !sealed.is_empty() && !eph.is_empty() {
-            let key = crypto::unseal_group_key(&identity, eph, sealed)
-                .ok_or_else(|| "Could not unseal group key (wrong identity?)".to_string())?;
-            return Ok((epoch, key));
+            match crypto::unseal_group_key(&identity, eph, sealed) {
+                Some(key) => {
+                    reshare_group_key(client.clone(), token.clone(), conversation_id.clone(), key)
+                        .await;
+                    return Ok((epoch, key));
+                }
+                None => mine_unseal_failed = true,
+            }
         }
     }
 
@@ -1493,15 +1730,21 @@ async fn ensure_group_key_async(
                 _ => String::new(),
             };
             if epoch > 0 && !sealed.is_empty() {
-                let key = crypto::unseal_group_key(&identity, &eph, &sealed)
-                    .ok_or_else(|| "Could not unseal group key".to_string())?;
-                return Ok((epoch, key));
+                if let Some(key) = crypto::unseal_group_key(&identity, &eph, &sealed) {
+                    reshare_group_key(client.clone(), token.clone(), conversation_id.clone(), key)
+                        .await;
+                    return Ok((epoch, key));
+                }
+                mine_unseal_failed = true;
             }
         }
-        return Err(
+        return Err(if mine_unseal_failed {
+            "This device's key for this chat is out of date. Ask another member to open this chat once — it'll refresh automatically the next time you open it too."
+                .into()
+        } else {
             "Group key exists but this device has no package yet — ask a member to re-open the chat"
-                .into(),
-        );
+                .into()
+        });
     }
 
     let members = match root.get("members") {
@@ -1562,6 +1805,8 @@ async fn ensure_group_key_async(
                 _ => 1,
             };
             if created {
+                reshare_group_key(client.clone(), token.clone(), conversation_id.clone(), group_key)
+                    .await;
                 return Ok((epoch, group_key));
             }
             // Lost race — fetch package sealed by the winner.
@@ -1569,8 +1814,8 @@ async fn ensure_group_key_async(
                 .query(
                     "groupKeys:myPackage",
                     btreemap! {
-                        "sessionToken".to_string() => Value::String(token),
-                        "conversationId".to_string() => Value::String(conversation_id),
+                        "sessionToken".to_string() => Value::String(token.clone()),
+                        "conversationId".to_string() => Value::String(conversation_id.clone()),
                     },
                 )
                 .await
@@ -1586,6 +1831,7 @@ async fn ensure_group_key_async(
                 };
                 let key = crypto::unseal_group_key(&identity, &eph, &sealed)
                     .ok_or_else(|| "Could not unseal group key after race".to_string())?;
+                reshare_group_key(client, token, conversation_id, key).await;
                 return Ok((epoch, key));
             }
             Err("Group key bootstrap race failed".into())
@@ -1593,6 +1839,83 @@ async fn ensure_group_key_async(
         FunctionResult::ErrorMessage(msg) => Err(msg),
         _ => Err("Group key publish failed".into()),
     }
+}
+
+/// Best-effort: seals `key` for every conversation member whose currently
+/// published public key we can read, and asks the server to (re)patch their
+/// package for the current epoch (see convex/groupKeys.ts `shareWithMembers`,
+/// which always re-seals rather than skipping an already-present row). This
+/// is what lets a member recover after their local identity changed (e.g. a
+/// reinstall, or a data-dir rename like the Talkyss -> HexaTalk rebrand) or
+/// after joining the conversation post-bootstrap: every other client that
+/// already holds the key re-seals for them the next time it opens the chat.
+/// Errors are swallowed -- this never blocks the caller, who already has a
+/// valid key in hand regardless of whether this succeeds.
+async fn reshare_group_key(
+    mut client: ConvexClient,
+    token: String,
+    conversation_id: String,
+    key: [u8; 32],
+) {
+    use convex::{FunctionResult, Value};
+    use maplit::btreemap;
+
+    let Ok(members_result) = client
+        .query(
+            "groupKeys:listMemberPublicKeys",
+            btreemap! {
+                "sessionToken".to_string() => Value::String(token.clone()),
+                "conversationId".to_string() => Value::String(conversation_id.clone()),
+            },
+        )
+        .await
+    else {
+        return;
+    };
+    let FunctionResult::Value(Value::Object(root)) = members_result else {
+        return;
+    };
+    let Some(Value::Array(members)) = root.get("members") else {
+        return;
+    };
+
+    let mut packages = Vec::new();
+    for m in members {
+        let Value::Object(obj) = m else { continue };
+        let user_id = match obj.get("userId") {
+            Some(Value::String(s)) => s.clone(),
+            _ => continue,
+        };
+        let public_key = match obj.get("publicKey") {
+            Some(Value::String(s)) => s.clone(),
+            _ => String::new(),
+        };
+        if public_key.len() != 44 {
+            continue;
+        }
+        if let Some((eph, sealed)) = crypto::seal_group_key_for(&public_key, &key) {
+            packages.push(btreemap! {
+                "userId".to_string() => Value::String(user_id),
+                "sealedKey".to_string() => Value::String(sealed),
+                "ephPublicKey".to_string() => Value::String(eph),
+            });
+        }
+    }
+    if packages.is_empty() {
+        return;
+    }
+
+    let pkg_values: Vec<Value> = packages.into_iter().map(Value::Object).collect();
+    let _ = client
+        .mutation(
+            "groupKeys:shareWithMembers",
+            btreemap! {
+                "sessionToken".to_string() => Value::String(token),
+                "conversationId".to_string() => Value::String(conversation_id),
+                "packages".to_string() => Value::Array(pkg_values),
+            },
+        )
+        .await;
 }
 
 impl App {

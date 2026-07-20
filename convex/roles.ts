@@ -224,6 +224,39 @@ export async function requireChannelPerm(
   return perms;
 }
 
+/**
+ * Conversation access gate: membership is always required, and for server
+ * channels (kind === "channel") the caller must additionally hold `perm`
+ * after role/member overwrites — this is what keeps private channels
+ * (deny VIEW_CHANNELS / CONNECT_VOICE) closed outside servers.listChannels
+ * and messages.search. DMs/groups have no overwrites, so membership alone
+ * is enough. Platform admins get no bypass here, matching messages.send /
+ * messages.search (channelPermissions only special-cases the server owner).
+ */
+export async function requireChannelAccess(
+  ctx: QueryCtx | MutationCtx,
+  conversationId: Id<"conversations">,
+  userId: Id<"users">,
+  perm: number,
+) {
+  const membership = await ctx.db
+    .query("conversationMembers")
+    .withIndex("by_conversation_and_user", (q) =>
+      q.eq("conversationId", conversationId).eq("userId", userId),
+    )
+    .unique();
+  if (!membership) {
+    throw new Error("You're not a member of this chat");
+  }
+  const conversation = await ctx.db.get("conversations", conversationId);
+  if (conversation?.kind === "channel") {
+    const perms = await channelPermissions(ctx, conversationId, userId);
+    if ((perms & perm) !== perm) {
+      throw new Error("Missing permission");
+    }
+  }
+}
+
 /** Ensure a brand-new server has an @everyone-style default role. */
 export async function ensureDefaultRole(
   ctx: MutationCtx,
@@ -366,9 +399,24 @@ export const deleteRole = mutation({
     const me = await currentUser(ctx, args.sessionToken);
     const role = await ctx.db.get("serverRoles", args.roleId);
     if (!role) throw new Error("Role not found");
-    await requirePerm(ctx, role.serverId, me._id, Perm.MANAGE_ROLES);
-    if (role.name === "everyone" && role.position === 0) {
+    const { server, membership } = await requirePerm(
+      ctx,
+      role.serverId,
+      me._id,
+      Perm.MANAGE_ROLES,
+    );
+    // Position 0 is the implicit @everyone role — check the position, not
+    // the name, since the name is editable.
+    if (role.position === 0) {
       throw new Error("Can't delete the default role");
+    }
+    // Discord-style hierarchy, mirrors updateRole: non-owners can only
+    // delete roles strictly below their own highest role.
+    if (
+      server.ownerId !== me._id &&
+      role.position >= (await highestRolePosition(ctx, membership))
+    ) {
+      throw new Error("You can't delete a role at or above your highest role");
     }
 
     const members = await ctx.db
@@ -384,6 +432,18 @@ export const deleteRole = mutation({
         });
       }
     }
+
+    // Drop channel overwrites that targeted the deleted role.
+    const overwrites = await ctx.db
+      .query("channelOverwrites")
+      .withIndex("by_server", (q) => q.eq("serverId", role.serverId))
+      .take(500);
+    for (const ow of overwrites) {
+      if (ow.targetType === "role" && ow.targetId === String(role._id)) {
+        await ctx.db.delete("channelOverwrites", ow._id);
+      }
+    }
+
     await ctx.db.delete("serverRoles", role._id);
     return null;
   },
@@ -419,6 +479,11 @@ export const toggleRole = mutation({
     if (!role || role.serverId !== args.serverId) {
       throw new Error("Role not found on this server");
     }
+    // The @everyone role is implicit for every member — explicitly
+    // assigning/revoking it is meaningless and only clutters roleIds.
+    if (role.position === 0) {
+      throw new Error("The everyone role applies to all members implicitly");
+    }
     // Discord-style hierarchy: you can only hand out roles below your own
     // highest role; the server owner bypasses this.
     if (
@@ -448,5 +513,84 @@ export const myPermissions = query({
       permissions: await memberPermissions(ctx, server, membership),
       isOwner: server.ownerId === me._id,
     };
+  },
+});
+
+/**
+ * Move a role up/down the hierarchy. Higher position = more power, so
+ * "up" raises the position (mirrors listRoles, which sorts position desc).
+ * Runs inside one Convex mutation, so the position swap is atomic.
+ * The @everyone role (position 0) always stays at the bottom.
+ */
+export const moveRole = mutation({
+  args: {
+    sessionToken: v.string(),
+    roleId: v.id("serverRoles"),
+    direction: v.union(v.literal("up"), v.literal("down")),
+  },
+  handler: async (ctx, args) => {
+    const me = await currentUser(ctx, args.sessionToken);
+    const role = await ctx.db.get("serverRoles", args.roleId);
+    if (!role) throw new Error("Role not found");
+    if (role.position === 0) {
+      throw new Error("The everyone role stays at the bottom");
+    }
+    const { server, membership } = await requirePerm(
+      ctx,
+      role.serverId,
+      me._id,
+      Perm.MANAGE_ROLES,
+    );
+
+    const all = await ctx.db
+      .query("serverRoles")
+      .withIndex("by_server", (q) => q.eq("serverId", role.serverId))
+      .take(50);
+    const movable = all
+      .filter((r) => r.position !== 0)
+      .sort(
+        (a, b) => a.position - b.position || a.name.localeCompare(b.name),
+      );
+
+    // Normalize to dense positions 1..n so swaps work on older servers
+    // with gaps or duplicates.
+    for (let i = 0; i < movable.length; i++) {
+      const dense = i + 1;
+      if (movable[i].position !== dense) {
+        await ctx.db.patch("serverRoles", movable[i]._id, {
+          position: dense,
+        });
+        movable[i] = { ...movable[i], position: dense };
+      }
+    }
+
+    const idx = movable.findIndex((r) => r._id === args.roleId);
+    if (idx < 0) throw new Error("Role not found in list");
+    const swapWith = args.direction === "up" ? idx + 1 : idx - 1;
+    if (swapWith < 0 || swapWith >= movable.length) {
+      return null; // already at edge
+    }
+
+    // Hierarchy: non-owners may only reorder roles strictly below their
+    // own highest role — both the moved role and the one it swaps with.
+    if (server.ownerId !== me._id) {
+      const myHighest = await highestRolePosition(ctx, membership);
+      if (
+        movable[idx].position >= myHighest ||
+        movable[swapWith].position >= myHighest
+      ) {
+        throw new Error(
+          "You can't reorder roles at or above your highest role",
+        );
+      }
+    }
+
+    await ctx.db.patch("serverRoles", movable[idx]._id, {
+      position: movable[swapWith].position,
+    });
+    await ctx.db.patch("serverRoles", movable[swapWith]._id, {
+      position: movable[idx].position,
+    });
+    return null;
   },
 });

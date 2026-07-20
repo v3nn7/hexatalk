@@ -3,7 +3,8 @@
 // section of src/view/chat.rs.
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { Avatar, SecondaryButton, PrimaryButton, DangerButton, TextInputField, ResizeHandle, StatsChip } from "widgets.slint";
+import { Avatar, PrimaryButton, DangerButton, TextInputField, ResizeHandle, StatsChip } from "widgets.slint";
+import { MentionBadge } from "rail.slint";
 import {
     ConversationRow, FriendRow, IncomingRequestRow, OutgoingRequestRow,
     PeopleHitRow, SuggestionRow, BlockedRow, ServerRow, ChannelRow, AdminUserRow,
@@ -12,24 +13,32 @@ import {
 
 export enum SidebarTab { Chats, Friends, Requests, Servers, Admin }
 
-component SmallButton inherits Rectangle {
+export component SmallButton inherits Rectangle {
     in property <string> text;
     in property <color> fg: Theme.text-primary;
     in property <color> bg: Theme.bg-secondary;
     in property <color> border_c: Theme.border;
+    in property <bool> enabled: true;
     callback clicked;
     height: 26px;
     width: label.preferred-width + 16px;
+    opacity: root.enabled ? 1.0 : 0.5;
     background: root.bg;
     border-width: 1px;
+    border-radius: Theme.radius-sm;
     border-color: touch.has-hover ? Theme.border-strong : root.border_c;
     animate background { duration: 120ms; }
     animate border-color { duration: 120ms; }
-    touch := TouchArea { clicked => { root.clicked(); } }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
     label := Text { text: root.text; font-size: 11px; color: root.fg; horizontal-alignment: center; vertical-alignment: center; }
-    // Square tint overlay: works over any configured `bg` (accent, danger,
-    // success) without losing the base color on hover.
+    // Tint overlay: works over any configured `bg` (accent, danger,
+    // success) without losing the base color on hover. Rounded to match.
     Rectangle {
+        border-radius: Theme.radius-sm;
         background: touch.pressed ? #0000002e : (touch.has-hover ? #ffffff0d : transparent);
         animate background { duration: 120ms; }
     }
@@ -39,6 +48,7 @@ component PersonCard inherits Rectangle {
     background: Theme.bg-secondary;
     border-width: 1px;
     border-color: Theme.border;
+    border-radius: Theme.radius-md;
     VerticalLayout { padding: 10px; spacing: 8px; @children }
 }
 
@@ -61,6 +71,225 @@ component EmptyState inherits Rectangle {
     }
 }
 
+// ---- Discord-style channel list pieces ----
+
+// Collapsible category header ("TEXT CHANNELS" etc.) with a chevron that
+// flips between down (open) and right (collapsed), brightening on hover
+// like Discord. State lives in the bound `collapsed` property.
+component CategoryHeader inherits Rectangle {
+    in property <string> label;
+    in-out property <bool> collapsed: false;
+    height: 26px;
+
+    cat-touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.collapsed = !root.collapsed; }
+    }
+    Path {
+        x: 2px;
+        y: (parent.height - self.height) / 2;
+        width: 10px;
+        height: 10px;
+        viewbox-width: 10;
+        viewbox-height: 10;
+        stroke: cat-touch.has-hover ? Theme.text-primary : Theme.text-muted;
+        stroke-width: 1.5px;
+        commands: root.collapsed ? "M 3 1 L 7 5 L 3 9" : "M 1 3 L 5 7 L 9 3";
+    }
+    Text {
+        x: 14px;
+        text: root.label;
+        font-size: Theme.text-xs;
+        font-family: Theme.font-medium;
+        letter-spacing: 1px;
+        color: cat-touch.has-hover ? Theme.text-primary : Theme.text-muted;
+        vertical-alignment: center;
+        animate color { duration: 120ms; }
+    }
+}
+
+// Speaker glyph for voice channels, drawn from primitives (Roboto ships no
+// speaker glyph and there is no icon asset for it).
+component SpeakerGlyph inherits Rectangle {
+    in property <color> fg: Theme.text-muted;
+    width: 15px;
+    height: 14px;
+    Rectangle { x: 0px; y: 4px; width: 3.5px; height: 6px; background: root.fg; }
+    Path {
+        width: parent.width;
+        height: parent.height;
+        viewbox-width: 15;
+        viewbox-height: 14;
+        fill: root.fg;
+        commands: "M 3.5 4 L 8 1 L 8 13 L 3.5 10 Z";
+    }
+    Path {
+        width: parent.width;
+        height: parent.height;
+        viewbox-width: 15;
+        viewbox-height: 14;
+        stroke: root.fg;
+        stroke-width: 1.3px;
+        commands: "M 10 4.5 A 3 3 0 0 1 10 9.5 M 10.5 2 A 5.4 5.4 0 0 1 10.5 12";
+    }
+}
+
+// One channel row: Discord-style "#" / speaker glyph, bold + bright label
+// when unread, rounded red mention badge on the right, full-row
+// hover/active fill (active uses the clearly-lighter bg-active token).
+// NOTE: ChannelRow has no unread/mention fields yet, so `unread`/`mentions`
+// stay bound to their defaults at the call sites -- the visuals are ready;
+// the integrator only needs to extend the data model (see report).
+component ChannelItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> active: false;
+    in property <bool> muted: false;
+    in property <bool> is-announcement: false;
+    in property <bool> is-voice: false;
+    in property <bool> unread: false;
+    in property <int> mentions: 0;
+    callback clicked;
+
+    height: 34px;
+    // Muted channels dim like Discord; the active one always stays full
+    // strength.
+    opacity: root.muted && !root.active ? 0.55 : 1.0;
+    background: root.active ? Theme.bg-active
+        : (root.is-announcement ? Theme.warning-softer
+        : (row-touch.has-hover ? Theme.bg-hover : transparent));
+    animate background { duration: 120ms; }
+    animate opacity { duration: 120ms; }
+
+    row-touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+
+    if !root.is-voice: Text {
+        x: 10px;
+        text: "#";
+        font-size: 16px;
+        font-family: Theme.font-medium;
+        color: root.active || root.unread || row-touch.has-hover ? Theme.text-primary : Theme.text-muted;
+        vertical-alignment: center;
+        animate color { duration: 120ms; }
+    }
+    if root.is-voice: SpeakerGlyph {
+        x: 10px;
+        y: (parent.height - self.height) / 2;
+        fg: root.active || root.unread || row-touch.has-hover ? Theme.text-primary : Theme.text-muted;
+    }
+    Text {
+        x: 32px;
+        width: parent.width - 40px - (root.mentions > 0 ? 30px : 0px);
+        text: root.label;
+        font-size: 13px;
+        font-family: root.active || root.unread ? Theme.font-medium : Theme.font-body;
+        // Announcements stay visually pinned/highlightable for everyone.
+        color: root.is-announcement
+            ? (root.active ? Theme.warning : Theme.warning-dim)
+            : (root.active || root.unread || row-touch.has-hover ? Theme.text-primary : Theme.text-muted);
+        vertical-alignment: center;
+        overflow: elide;
+        animate color { duration: 120ms; }
+    }
+    if root.mentions > 0: MentionBadge {
+        ring-color: root.active ? Theme.bg-active : Theme.bg-secondary;
+        text: root.mentions > 9 ? "9+" : root.mentions;
+        x: parent.width - self.width - 6px;
+        y: (parent.height - self.height) / 2;
+    }
+}
+
+// ---- Discord-style user panel pieces ----
+
+// Mic glyph (16x16, drawn from primitives).
+component MicGlyph inherits Rectangle {
+    in property <color> fg: Theme.text-muted;
+    width: 16px;
+    height: 16px;
+    Rectangle { x: 5.5px; y: 1px; width: 5px; height: 8.5px; border-radius: 2.5px; background: root.fg; }
+    Path {
+        width: parent.width;
+        height: parent.height;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        stroke: root.fg;
+        stroke-width: 1.4px;
+        commands: "M 3 7.5 A 5 5.5 0 0 0 13 7.5";
+    }
+    Rectangle { x: 7.3px; y: 12.6px; width: 1.4px; height: 2px; background: root.fg; }
+    Rectangle { x: 4.6px; y: 14.6px; width: 6.8px; height: 1.3px; background: root.fg; }
+}
+
+// Headphones (deafen) glyph (16x16, drawn from primitives).
+component HeadphonesGlyph inherits Rectangle {
+    in property <color> fg: Theme.text-muted;
+    width: 16px;
+    height: 16px;
+    Path {
+        width: parent.width;
+        height: parent.height;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        stroke: root.fg;
+        stroke-width: 1.6px;
+        commands: "M 2.5 11 A 5.5 5.5 0 0 1 13.5 11";
+    }
+    Rectangle { x: 1px; y: 9px; width: 3.5px; height: 6.5px; border-radius: 1.5px; background: root.fg; }
+    Rectangle { x: 11.5px; y: 9px; width: 3.5px; height: 6.5px; border-radius: 1.5px; background: root.fg; }
+}
+
+// Settings gear glyph (16x16): a ring plus eight teeth. Teeth are plain
+// squares -- Slint elements can't rotate, and at this size square diagonal
+// teeth still read as a cog.
+component GearGlyph inherits Rectangle {
+    in property <color> fg: Theme.text-muted;
+    width: 16px;
+    height: 16px;
+    Rectangle { x: 4px; y: 4px; width: 8px; height: 8px; border-radius: 4px; border-width: 2px; border-color: root.fg; background: transparent; }
+    Rectangle { x: 7px; y: 0.4px; width: 2px; height: 2.6px; background: root.fg; }
+    Rectangle { x: 7px; y: 13px; width: 2px; height: 2.6px; background: root.fg; }
+    Rectangle { x: 0.4px; y: 7px; width: 2.6px; height: 2px; background: root.fg; }
+    Rectangle { x: 13px; y: 7px; width: 2.6px; height: 2px; background: root.fg; }
+    Rectangle { x: 3.2px; y: 3.2px; width: 2.2px; height: 2.2px; background: root.fg; }
+    Rectangle { x: 10.6px; y: 3.2px; width: 2.2px; height: 2.2px; background: root.fg; }
+    Rectangle { x: 3.2px; y: 10.6px; width: 2.2px; height: 2.2px; background: root.fg; }
+    Rectangle { x: 10.6px; y: 10.6px; width: 2.2px; height: 2.2px; background: root.fg; }
+}
+
+// Square 32px icon button for the user panel (mute/deafen/settings), like
+// Discord's icon-only controls: quiet muted glyph, brightens on hover, and
+// a danger slash + tint when toggled. Glyph children bind `parent.fg`.
+component PanelButton inherits Rectangle {
+    in property <bool> toggled: false;
+    out property <color> fg: root.toggled ? Theme.danger
+        : (panel-touch.has-hover ? Theme.text-primary : Theme.text-muted);
+    callback clicked;
+
+    width: 32px;
+    height: 32px;
+    background: panel-touch.has-hover ? Theme.bg-hover : transparent;
+    animate background { duration: 120ms; }
+
+    panel-touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+
+    @children
+
+    if root.toggled: Path {
+        width: parent.width;
+        height: parent.height;
+        viewbox-width: 32;
+        viewbox-height: 32;
+        stroke: Theme.danger;
+        stroke-width: 2px;
+        commands: "M 5 27 L 27 5";
+    }
+}
+
 export component Sidebar inherits Rectangle {
     in property <SidebarTab> tab: SidebarTab.Chats;
     in property <string> tab_title: "Direct";
@@ -68,10 +297,8 @@ export component Sidebar inherits Rectangle {
 
     in property <length> panel_width: 320px;
 
-    // Add-server mini menu
-    in property <bool> add_menu_open: false;
-    in-out property <string> new_server_name;
-    in-out property <string> join_server_code;
+    // Server status line, shared between the (now window-level popup)
+    // add-server flow and the in-panel new-channel flow below.
     in property <string> server_status;
 
     // Chats tab
@@ -135,12 +362,23 @@ export component Sidebar inherits Rectangle {
     in property <string> my_badge_text;
     in property <color> my_badge_bg;
     in property <color> my_badge_fg;
-
-    callback toggle_add_menu;
-    callback new_server_name_changed(string);
-    callback create_server;
-    callback join_server_code_changed(string);
-    callback join_server;
+    // Own presence for the account footer: raw status ("online" / "idle" /
+    // "dnd" / "invisible") drives the dot color, the label is the display
+    // string (Rust's presence_label).
+    in property <string> my_presence_status: "online";
+    in property <string> my_presence_label: "Online";
+    // User panel voice state (Discord-style mic/deafen). Driven from Rust
+    // (the real capture/playback mute flags shared with the audio
+    // pipelines); the buttons only fire the toggle callbacks, the next UI
+    // sync repaints the glyphs.
+    in property <bool> mic_muted: false;
+    in property <bool> deafened: false;
+    // Collapse state for the two channel category headers. UI-local with
+    // defaults, so neither main.slint nor Rust has to bind them.
+    in-out property <bool> text_channels_collapsed: false;
+    in-out property <bool> voice_channels_collapsed: false;
+    callback toggle_mute;
+    callback toggle_deafen;
 
     callback toggle_group_panel;
     callback group_name_changed(string);
@@ -201,7 +439,46 @@ export component Sidebar inherits Rectangle {
                 Rectangle {
                     height: 56px;
                     border-width: 0px;
-                    VerticalLayout {
+
+                    // Discord-style server header (Servers tab with a server
+                    // selected): server name + chevron, full-row hover fill,
+                    // click opens server settings (requires manage perms).
+                    if root.tab == SidebarTab.Servers && root.selected_server: Rectangle {
+                        background: server-head-touch.has-hover ? Theme.bg-hover : transparent;
+                        animate background { duration: 120ms; }
+                        server-head-touch := TouchArea {
+                            mouse-cursor: root.can_manage_server ? MouseCursor.pointer : MouseCursor.default;
+                            clicked => {
+                                if (root.can_manage_server) {
+                                    root.toggle_server_settings();
+                                }
+                            }
+                        }
+                        Text {
+                            x: 16px;
+                            width: parent.width - 48px;
+                            text: root.server_name;
+                            font-size: 15px;
+                            font-family: Theme.font-medium;
+                            color: Theme.text-primary;
+                            overflow: elide;
+                            vertical-alignment: center;
+                        }
+                        Path {
+                            x: parent.width - 26px;
+                            y: (parent.height - self.height) / 2;
+                            width: 12px;
+                            height: 12px;
+                            viewbox-width: 12;
+                            viewbox-height: 12;
+                            stroke: server-head-touch.has-hover ? Theme.text-primary : Theme.text-muted;
+                            stroke-width: 1.6px;
+                            commands: "M 2 4 L 6 8 L 10 4";
+                        }
+                    }
+
+                    // Generic tab header for the other tabs (unchanged).
+                    if !(root.tab == SidebarTab.Servers && root.selected_server): VerticalLayout {
                         padding: 16px;
                         spacing: 2px;
                         alignment: center;
@@ -209,17 +486,6 @@ export component Sidebar inherits Rectangle {
                         Text { text: root.tab_title; font-size: 16px; font-family: Theme.font-medium; color: Theme.text-primary; }
                     }
                     Rectangle { x: 0; y: parent.height - 1px; width: parent.width; height: 1px; background: Theme.border-hairline; }
-                }
-
-                if root.add_menu_open: PersonCard {
-                    Text { text: "ADD SERVER"; font-size: Theme.text-xs; font-family: Theme.font-medium; letter-spacing: 1px; color: Theme.accent; }
-                    TextInputField { placeholder: "Name"; value <=> root.new_server_name; edited(t) => { root.new_server_name_changed(t); } submitted => { root.create_server(); } }
-                    PrimaryButton { text: "Create"; clicked => { root.create_server(); } }
-                    Rectangle { height: 1px; background: Theme.border; }
-                    TextInputField { placeholder: "Invite code or link"; value <=> root.join_server_code; edited(t) => { root.join_server_code_changed(t); } submitted => { root.join_server(); } }
-                    SecondaryButton { text: "Join"; clicked => { root.join_server(); } }
-                    SmallButton { text: "Close"; clicked => { root.toggle_add_menu(); } }
-                    if root.server_status != "": Text { text: root.server_status; font-size: 11px; color: Theme.text-muted; }
                 }
 
                 // ---- Tab body ----
@@ -241,8 +507,12 @@ export component Sidebar inherits Rectangle {
                                     width: 16px; height: 16px;
                                     background: f.selected ? Theme.accent : transparent;
                                     border-width: 1px;
-                                    border-color: Theme.border-strong;
-                                    TouchArea { clicked => { root.toggle_group_member(f.user_id); } }
+                                    border-radius: Theme.radius-sm;
+                                    border-color: check-touch.has-hover ? Theme.accent : Theme.border-strong;
+                                    check-touch := TouchArea {
+                                        mouse-cursor: MouseCursor.pointer;
+                                        clicked => { root.toggle_group_member(f.user_id); }
+                                    }
                                 }
                                 Text { text: f.label; font-size: Theme.text-sm; color: Theme.text-primary; vertical-alignment: center; }
                             }
@@ -254,11 +524,10 @@ export component Sidebar inherits Rectangle {
                         list_convos := ListView {
                             for c in root.conversations: Rectangle {
                                 height: 40px;
-                                background: c.active ? Theme.accent-soft : (ct.has-hover ? Theme.bg-hover : transparent);
-                                border-width: 1px;
-                                border-color: c.active ? Theme.border-strong : (ct.has-hover ? Theme.border-hairline : transparent);
+                                // Same active style as ChannelItem: bg-active
+                                // fill, no border.
+                                background: c.active ? Theme.bg-active : (ct.has-hover ? Theme.bg-hover : transparent);
                                 animate background { duration: 120ms; }
-                                animate border-color { duration: 120ms; }
                                 ct := TouchArea {
                                     mouse-cursor: MouseCursor.pointer;
                                     clicked => { root.open_conversation(c.id); }
@@ -309,11 +578,12 @@ export component Sidebar inherits Rectangle {
                             padding: 12px;
                             spacing: 10px;
                             // Friends banner -- framed by the column padding,
-                            // hard-edged to match the rest of the UI.
+                            // rounded to match the rest of the UI.
                             Rectangle {
                                 height: 96px;
                                 border-width: 1px;
                                 border-color: Theme.border-strong;
+                                border-radius: Theme.radius-md;
                                 clip: true;
                                 Image {
                                     source: @image-url("../assets/textures/friendsbaner.png");
@@ -335,6 +605,9 @@ export component Sidebar inherits Rectangle {
                                 SmallButton { text: "Online"; bg: root.friends_filter == 1 ? Theme.accent-soft : Theme.bg-secondary; clicked => { root.set_friends_filter(1); } }
                                 SmallButton { text: "★ Fav"; bg: root.friends_filter == 2 ? Theme.accent-soft : Theme.bg-secondary; clicked => { root.set_friends_filter(2); } }
                             }
+                            // Name filter for the friends list below (Rust
+                            // filters `friends` by this substring).
+                            TextInputField { placeholder: "Filter friends"; value <=> root.friends_filter_input; edited(t) => { root.friends_filter_input_changed(t); } }
                             if root.add_friend_status != "": Text { text: root.add_friend_status; font-size: Theme.text-sm; color: Theme.text-muted; }
 
                             if root.people_hits.length > 0: Text { text: "Search results"; font-size: Theme.text-xs; font-family: Theme.font-medium; color: Theme.text-muted; }
@@ -351,14 +624,15 @@ export component Sidebar inherits Rectangle {
                                 HorizontalLayout {
                                     spacing: 6px;
                                     if hit.relation == "friends": PrimaryButton { text: "Message"; width: 80px; clicked => { root.message_friend(hit.user_id); } }
-                                    if hit.relation == "incoming": SmallButton { text: "Accept"; bg: Theme.success; fg: white; clicked => { root.respond_request(hit.incoming_request_id, hit.user_id, true); } }
+                                    if hit.relation == "incoming": SmallButton { text: "Accept"; bg: Theme.success; fg: Theme.text-on-accent; clicked => { root.respond_request(hit.incoming_request_id, hit.user_id, true); } }
                                     if hit.relation == "outgoing": Text { text: "Pending…"; font-size: 11px; color: Theme.text-muted; vertical-alignment: center; }
                                     if hit.relation != "friends" && hit.relation != "incoming" && hit.relation != "outgoing": SmallButton {
                                         text: root.friend_request_busy ? "Sending…" : "Add";
+                                        enabled: !root.friend_request_busy;
                                         clicked => { root.send_friend_request_to(hit.username); }
                                     }
                                     SmallButton { text: "Profile"; clicked => { root.open_profile(hit.user_id); } }
-                                    if root.confirm_block_user_id == hit.user_id: SmallButton { text: "Yes"; bg: Theme.danger; fg: white; clicked => { root.block_user(hit.user_id); } }
+                                    if root.confirm_block_user_id == hit.user_id: SmallButton { text: "Yes"; bg: Theme.danger; fg: Theme.text-on-accent; clicked => { root.block_user(hit.user_id); } }
                                     if root.confirm_block_user_id == hit.user_id: SmallButton { text: "Cancel"; clicked => { root.cancel_block(); } }
                                     if root.confirm_block_user_id != hit.user_id: SmallButton { text: "Block"; bg: Theme.danger-soft; fg: Theme.danger; clicked => { root.confirm_block(hit.user_id); } }
                                 }
@@ -395,10 +669,10 @@ export component Sidebar inherits Rectangle {
                                 HorizontalLayout {
                                     spacing: 6px;
                                     SmallButton { text: friend.favorite ? "★" : "☆"; clicked => { root.toggle_favorite(friend.user_id); } }
-                                    SmallButton { text: "Message"; bg: Theme.accent-dim; fg: white; clicked => { root.message_friend(friend.user_id); } }
+                                    SmallButton { text: "Message"; bg: Theme.accent-dim; fg: Theme.text-on-accent; clicked => { root.message_friend(friend.user_id); } }
                                     SmallButton { text: "Profile"; clicked => { root.open_profile(friend.user_id); } }
                                     SmallButton { text: "Remove"; clicked => { root.remove_friend(friend.user_id); } }
-                                    if root.confirm_block_user_id == friend.user_id: SmallButton { text: "Yes"; bg: Theme.danger; fg: white; clicked => { root.block_user(friend.user_id); } }
+                                    if root.confirm_block_user_id == friend.user_id: SmallButton { text: "Yes"; bg: Theme.danger; fg: Theme.text-on-accent; clicked => { root.block_user(friend.user_id); } }
                                     if root.confirm_block_user_id == friend.user_id: SmallButton { text: "Cancel"; clicked => { root.cancel_block(); } }
                                     if root.confirm_block_user_id != friend.user_id: SmallButton { text: "Block"; bg: Theme.danger-soft; fg: Theme.danger; clicked => { root.confirm_block(friend.user_id); } }
                                 }
@@ -425,7 +699,7 @@ export component Sidebar inherits Rectangle {
                             spacing: 10px;
                             HorizontalLayout {
                                 Text { text: "Incoming"; font-size: Theme.text-xs; font-family: Theme.font-medium; color: Theme.text-muted; vertical-alignment: center; horizontal-stretch: 1; }
-                                if root.incoming_requests.length > 0: SmallButton { text: "Accept all"; bg: Theme.success; fg: white; clicked => { root.accept_all(); } }
+                                if root.incoming_requests.length > 0: SmallButton { text: "Accept all"; bg: Theme.success; fg: Theme.text-on-accent; clicked => { root.accept_all(); } }
                                 if root.incoming_requests.length > 0: SmallButton { text: "Decline all"; clicked => { root.decline_all(); } }
                             }
                             if root.incoming_requests.length == 0: EmptyState { text: "No pending invites."; box-height: 56px; }
@@ -447,10 +721,10 @@ export component Sidebar inherits Rectangle {
                                 }
                                 HorizontalLayout {
                                     spacing: 8px;
-                                    SmallButton { text: "Accept"; bg: Theme.success; fg: white; clicked => { root.respond_request(req.request_id, req.from_user_id, true); } }
+                                    SmallButton { text: "Accept"; bg: Theme.success; fg: Theme.text-on-accent; clicked => { root.respond_request(req.request_id, req.from_user_id, true); } }
                                     SmallButton { text: "Decline"; clicked => { root.respond_request(req.request_id, req.from_user_id, false); } }
                                     SmallButton { text: "Profile"; clicked => { root.open_profile(req.from_user_id); } }
-                                    if root.confirm_block_user_id == req.from_user_id: SmallButton { text: "Yes"; bg: Theme.danger; fg: white; clicked => { root.block_user(req.from_user_id); } }
+                                    if root.confirm_block_user_id == req.from_user_id: SmallButton { text: "Yes"; bg: Theme.danger; fg: Theme.text-on-accent; clicked => { root.block_user(req.from_user_id); } }
                                     if root.confirm_block_user_id == req.from_user_id: SmallButton { text: "Cancel"; clicked => { root.cancel_block(); } }
                                     if root.confirm_block_user_id != req.from_user_id: SmallButton { text: "Block"; bg: Theme.danger-soft; fg: Theme.danger; clicked => { root.confirm_block(req.from_user_id); } }
                                 }
@@ -507,66 +781,42 @@ export component Sidebar inherits Rectangle {
                             viewport-height: channels_col.preferred-height;
                             channels_col := VerticalLayout {
                             width: parent.width;
-                            if root.text_channels.length > 0: Text { text: "TEXT CHANNELS"; font-size: Theme.text-xs; font-family: Theme.font-medium; letter-spacing: 1px; color: Theme.text-muted; }
-                            for ch in root.text_channels: Rectangle {
-                                height: 32px;
-                                // Muted channels dim like Discord; the active one
-                                // always stays full strength.
-                                opacity: ch.muted && !ch.active ? 0.55 : 1.0;
-                                // Announcements stay visually pinned/highlightable for everyone.
-                                background: ch.active ? Theme.accent-soft : (ch.is_announcement ? #d1bc4d14 : (cht.has-hover ? Theme.bg-hover : transparent));
-                                animate background { duration: 120ms; }
-                                animate opacity { duration: 120ms; }
-                                cht := TouchArea {
-                                    mouse-cursor: MouseCursor.pointer;
+                            // Discord-style inset rows: 8px side margins, rows
+                            // highlight as a block (no accent spine).
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            padding-top: 4px;
+                            padding-bottom: 4px;
+                            spacing: 1px;
+                            if root.text_channels.length > 0: CategoryHeader {
+                                label: "TEXT CHANNELS";
+                                collapsed <=> root.text_channels_collapsed;
+                            }
+                            if root.text_channels.length > 0 && !root.text_channels_collapsed: VerticalLayout {
+                                spacing: 1px;
+                                for ch in root.text_channels: ChannelItem {
+                                    label: ch.label;
+                                    active: ch.active;
+                                    muted: ch.muted;
+                                    is-announcement: ch.is_announcement;
+                                    // unread/mentions: no data in ChannelRow
+                                    // yet (see ChannelItem note).
                                     clicked => { root.open_channel(ch.conversation_id); }
-                                }
-                                if ch.active: Rectangle {
-                                    x: 0;
-                                    y: 0;
-                                    width: 3px;
-                                    height: parent.height;
-                                    background: ch.is_announcement ? Theme.warning : Theme.accent;
-                                }
-                                Text {
-                                    x: 12px;
-                                    text: ch.label;
-                                    font-size: 13px;
-                                    font-family: ch.active ? Theme.font-medium : Theme.font-body;
-                                    color: ch.is_announcement
-                                        ? (ch.active ? Theme.warning : #d1bc4dcc)
-                                        : (ch.active || cht.has-hover ? Theme.text-primary : Theme.text-muted);
-                                    vertical-alignment: center;
-                                    animate color { duration: 120ms; }
                                 }
                             }
-                            if root.voice_channels.length > 0: Rectangle { height: 8px; }
-                            if root.voice_channels.length > 0: Text { text: "VOICE CHANNELS"; font-size: Theme.text-xs; font-family: Theme.font-medium; letter-spacing: 1px; color: Theme.text-muted; }
-                            for ch in root.voice_channels: Rectangle {
-                                height: 32px;
-                                opacity: ch.muted && !ch.active ? 0.55 : 1.0;
-                                background: ch.active ? Theme.accent-soft : (chv.has-hover ? Theme.bg-hover : transparent);
-                                animate background { duration: 120ms; }
-                                animate opacity { duration: 120ms; }
-                                chv := TouchArea {
-                                    mouse-cursor: MouseCursor.pointer;
+                            if root.voice_channels.length > 0: Rectangle { height: 6px; }
+                            if root.voice_channels.length > 0: CategoryHeader {
+                                label: "VOICE CHANNELS";
+                                collapsed <=> root.voice_channels_collapsed;
+                            }
+                            if root.voice_channels.length > 0 && !root.voice_channels_collapsed: VerticalLayout {
+                                spacing: 1px;
+                                for ch in root.voice_channels: ChannelItem {
+                                    label: ch.label;
+                                    active: ch.active;
+                                    muted: ch.muted;
+                                    is-voice: true;
                                     clicked => { root.open_channel(ch.conversation_id); }
-                                }
-                                if ch.active: Rectangle {
-                                    x: 0;
-                                    y: 0;
-                                    width: 3px;
-                                    height: parent.height;
-                                    background: Theme.accent;
-                                }
-                                Text {
-                                    x: 12px;
-                                    text: ch.label;
-                                    font-size: 13px;
-                                    font-family: ch.active ? Theme.font-medium : Theme.font-body;
-                                    color: ch.active || chv.has-hover ? Theme.text-primary : Theme.text-muted;
-                                    vertical-alignment: center;
-                                    animate color { duration: 120ms; }
                                 }
                             }
                             }
@@ -642,6 +892,7 @@ export component Sidebar inherits Rectangle {
                                     if u.badge_text != "": Rectangle {
                                         background: u.badge_bg;
                                         height: 16px;
+                                        border-radius: Theme.radius-sm;
                                         width: admin-badge.preferred-width + 8px;
                                         admin-badge := Text { text: u.badge_text; font-size: 9px; color: u.badge_fg; horizontal-alignment: center; vertical-alignment: center; }
                                     }
@@ -660,32 +911,96 @@ export component Sidebar inherits Rectangle {
                     }
                 }
 
-                // ---- Account footer ----
+                // ---- Account footer: Discord-style user panel ----
+                // Avatar with a round status dot, display name (+ badge),
+                // status line, and icon-only mic / deafen / settings
+                // buttons on the right.
                 Rectangle {
-                    height: 64px;
+                    height: 56px;
                     background: Theme.bg-tertiary;
-                    border-width: 1px;
-                    border-color: Theme.border;
+                    // Top hairline instead of the old full border, so the
+                    // panel reads as a strip of the sidebar, not a card.
+                    Rectangle { x: 0; y: 0; width: parent.width; height: 1px; background: Theme.border-hairline; }
+
                     HorizontalLayout {
-                        padding: 12px;
-                        spacing: 10px;
-                        Avatar { initial: root.my_initial; avatar-color: root.my_avatar_color; photo-source: root.my_photo; show-presence: true; online: true; }
+                        padding-left: 10px;
+                        padding-right: 6px;
+                        spacing: 8px;
+
+                        // Avatar with a Discord-style round status dot
+                        // ringed by the panel background. The panel draws
+                        // its own oversized 14px dot here instead of
+                        // Avatar's built-in 10px PresenceDot (also round,
+                        // just smaller) for the chunkier Discord look.
+                        Rectangle {
+                            width: 34px;
+                            height: 34px;
+                            Avatar {
+                                size: 32px;
+                                initial: root.my_initial;
+                                avatar-color: root.my_avatar_color;
+                                photo-source: root.my_photo;
+                            }
+                            Rectangle {
+                                x: parent.width - 14px;
+                                y: parent.height - 14px;
+                                width: 14px;
+                                height: 14px;
+                                border-radius: 7px;
+                                background: Theme.bg-tertiary;
+                                Rectangle {
+                                    x: 3px;
+                                    y: 3px;
+                                    width: 8px;
+                                    height: 8px;
+                                    border-radius: 4px;
+                                    background: root.my_presence_status == "online" ? Theme.online
+                                        : (root.my_presence_status == "idle" ? Theme.idle
+                                        : (root.my_presence_status == "dnd" ? Theme.dnd : Theme.offline));
+                                }
+                            }
+                        }
+
                         VerticalLayout {
-                            spacing: 2px;
-                            horizontal-stretch: 1;
+                            spacing: 1px;
+                            // Fixed column width so a long name elides
+                            // instead of pushing the buttons off-panel.
+                            width: max(48px, root.panel_width - 196px);
                             HorizontalLayout {
                                 spacing: 6px;
-                                Text { text: root.my_display_name; font-size: 13px; font-family: Theme.font-medium; color: Theme.text-primary; vertical-alignment: center; }
+                                Text { text: root.my_display_name; font-size: 13px; font-family: Theme.font-medium; color: Theme.text-primary; overflow: elide; vertical-alignment: center; }
                                 if root.my_badge_text != "": Rectangle {
                                     background: root.my_badge_bg;
                                     height: 14px;
+                                    border-radius: Theme.radius-sm;
                                     width: my-badge-label.preferred-width + 8px;
                                     my-badge-label := Text { text: root.my_badge_text; font-size: 9px; color: root.my_badge_fg; horizontal-alignment: center; vertical-alignment: center; }
                                 }
                             }
-                            Text { text: "Online"; font-size: Theme.text-xs; color: Theme.online; }
+                            // NOTE: Discord shows "nick#tag" here; the data
+                            // model has no tag field yet (see report), so
+                            // this stays a presence status line.
+                            Text { text: root.my_presence_label; font-size: Theme.text-xs; color: Theme.text-muted; overflow: elide; }
                         }
-                        SmallButton { text: "Settings"; clicked => { root.open_settings(); } }
+
+                        // Spacer pushes the icon buttons to the right edge.
+                        Rectangle { horizontal-stretch: 1; }
+
+                        PanelButton {
+                            // Deafening also slashes the mic, like Discord.
+                            toggled: root.mic_muted || root.deafened;
+                            clicked => { root.toggle_mute(); }
+                            MicGlyph { x: 8px; y: 8px; fg: parent.fg; }
+                        }
+                        PanelButton {
+                            toggled: root.deafened;
+                            clicked => { root.toggle_deafen(); }
+                            HeadphonesGlyph { x: 8px; y: 8px; fg: parent.fg; }
+                        }
+                        PanelButton {
+                            clicked => { root.open_settings(); }
+                            GearGlyph { x: 8px; y: 8px; fg: parent.fg; }
+                        }
                     }
                 }
             }

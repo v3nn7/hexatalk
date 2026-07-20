@@ -69,7 +69,6 @@ struct PeerSlot {
     pc: Arc<RTCPeerConnection>,
     local_track: Arc<TrackLocalStaticRTP>,
     link_id: Option<String>,
-    is_offerer: bool,
     answer_applied: bool,
     /// Stop the ICE drain task when the slot is dropped.
     ice_alive: Arc<AtomicBool>,
@@ -317,7 +316,6 @@ pub(crate) async fn run_room_voice(
                     match create_peer_slot(
                         &api,
                         &config,
-                        is_offerer,
                         Arc::clone(&jitter),
                         Arc::clone(&any_connected),
                         output.clone(),
@@ -395,7 +393,6 @@ pub(crate) async fn run_room_voice(
                         match create_peer_slot(
                             &api,
                             &config,
-                            is_offerer,
                             Arc::clone(&jitter),
                             Arc::clone(&any_connected),
                             output.clone(),
@@ -547,7 +544,6 @@ impl Drop for StopOnDrop {
 async fn create_peer_slot(
     api: &webrtc::api::API,
     config: &RTCConfiguration,
-    is_offerer: bool,
     jitter: Arc<Mutex<VecDeque<i16>>>,
     any_connected: Arc<AtomicBool>,
     output: EventSender<RoomVoiceEvent>,
@@ -619,12 +615,10 @@ async fn create_peer_slot(
         })
     }));
 
-    let _ = is_offerer; // used by caller for SDP role
     Ok(PeerSlot {
         pc,
         local_track,
         link_id: None,
-        is_offerer,
         answer_applied: false,
         ice_alive: Arc::new(AtomicBool::new(true)),
     })

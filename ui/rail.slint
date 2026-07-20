@@ -1,50 +1,147 @@
-// Left-most icon rail: home (DMs), server list, add-server, friends,
-// requests, admin. Port of the rail section of src/view/chat.rs.
+// Left-most icon rail: home (DMs), server list, add-server, explore,
+// friends, requests, admin. Port of the rail section of src/view/chat.rs.
+// 72px wide, a violet selection pill flush against the rail's left edge
+// (grows on hover, full-height when active), soft-square 48px icons whose
+// corners sharpen on hover/active, and rounded red mention badges pinned
+// to the icon's bottom-right corner with a ring cut out of the rail
+// background.
+//
+// NOTE: corner radii here are local to the rail (the soft-square morph);
+// every colour still comes from theme.slint tokens.
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { Badge, Avatar } from "widgets.slint";
+import { Avatar } from "widgets.slint";
 import { ServerRow } from "chat_types.slint";
 
+// Mention badge: red, fully rounded, white text, and a ring in the rail's
+// background colour so it reads as "cut out" of the icon corner. Exported
+// so the sidebar can reuse it for channel mention badges.
+export component MentionBadge inherits Rectangle {
+    in property <string> text;
+    in property <color> ring-color: Theme.bg-tertiary;
+    height: 16px;
+    width: max(16px, badge-label.preferred-width + 10px);
+    border-radius: 8px;
+    background: Theme.danger;
+    border-width: 2px;
+    border-color: root.ring-color;
+    badge-label := Text {
+        text: root.text;
+        color: Theme.text-bright;
+        font-size: Theme.text-xs;
+        font-family: Theme.font-medium;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// One rail slot: a full-width 48px-tall row with the 48px icon circle
+// centered inside it, so the selection pill can hug the rail's left edge
+// (x=0) instead of the icon's edge. `filled` is for server icons whose
+// avatar covers the whole square -- the hover/active state is then drawn
+// as a frame overlay on top of the photo instead of a background swap.
+// `accent-hot` is for glyph buttons (+ / explore): on hover/active the
+// tile fills with the accent colour and the glyph flips to text-on-accent.
+// `hot` is exposed so glyph children can recolor themselves.
 component RailButton inherits Rectangle {
     in property <bool> active: false;
     in property <int> badge: 0;
+    in property <bool> filled: false;
+    in property <bool> accent-hot: false;
+    // Label shown in the window-level tooltip overlay (see main.slint) --
+    // the rail can't paint past its own 72px, so it only reports the hover.
+    in property <string> tooltip: "";
+    out property <bool> hot: root.active || touch.has-hover;
+    out property <bool> hovered: touch.has-hover;
     callback clicked;
 
-    width: 44px;
-    height: 44px;
-    clip: true;
-    background: root.active ? Theme.accent-soft-strong : (touch.pressed ? Theme.bg-tertiary : (touch.has-hover ? Theme.bg-hover : Theme.bg-secondary));
-    border-width: 1px;
-    border-color: root.active ? Theme.accent : (touch.has-hover ? Theme.border-strong : Theme.border);
-    animate background { duration: 120ms; }
-    animate border-color { duration: 120ms; }
+    height: 48px;
+    background: transparent;
 
-    touch := TouchArea { clicked => { root.clicked(); } }
-
-    HorizontalLayout {
-        alignment: center;
-        VerticalLayout {
-            alignment: center;
-            @children
-        }
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
     }
 
-    // Discord-style left pill: full-height spine when active, a shorter
-    // stub on hover, collapsed (invisible) otherwise.
+    // Left selection pill: full-height spine when active, a shorter stub on
+    // hover, collapsed (invisible) otherwise. Light violet -- the accent
+    // hover tint reads well on the dark rail.
     Rectangle {
         x: 0;
         y: (parent.height - self.height) / 2;
-        width: 3px;
-        height: root.active ? 32px : (touch.has-hover ? 18px : 0px);
-        background: Theme.accent;
-        animate height { duration: 120ms; }
+        width: 4px;
+        border-radius: 2px;
+        height: root.active ? 36px : (touch.has-hover ? 20px : 0px);
+        background: Theme.accent-hover;
+        animate height { duration: 120ms; easing: ease-out; }
     }
 
-    // Unread/mention badge pinned to the bottom-right corner like Discord.
-    if root.badge > 0: Badge {
+    icon := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 48px;
+        height: 48px;
+        clip: true;
+        // Soft-square morph: 14px rounded square at rest, tighter 8px when
+        // hovered or active, animated.
+        border-radius: root.hot ? 8px : 14px;
+        background: root.filled ? transparent
+            : (root.hot && root.accent-hot ? Theme.accent
+            : (touch.pressed ? Theme.bg-tertiary
+            : (touch.has-hover ? Theme.bg-hover : Theme.bg-secondary)));
+        border-width: root.filled ? 0px : 1px;
+        border-color: root.active ? Theme.accent : (touch.has-hover ? Theme.border-strong : Theme.border);
+        animate border-radius { duration: 140ms; easing: ease-out; }
+        animate background { duration: 140ms; }
+        animate border-color { duration: 140ms; }
+
+        HorizontalLayout {
+            alignment: center;
+            VerticalLayout {
+                alignment: center;
+                @children
+            }
+        }
+    }
+
+    // Frame overlay for `filled` buttons: hover/active feedback on top of
+    // a full-bleed server icon, including a soft lightening wash on hover.
+    // Tracks the same soft-square morph as the icon beneath it.
+    if root.filled: Rectangle {
+        x: icon.x;
+        y: icon.y;
+        width: icon.width;
+        height: icon.height;
+        border-radius: root.hot ? 8px : 14px;
+        background: touch.has-hover && !root.active ? #ffffff14 : transparent;
+        border-width: 1px;
+        border-color: root.active ? Theme.accent-hover : (touch.has-hover ? Theme.border-strong : transparent);
+        animate border-radius { duration: 140ms; easing: ease-out; }
+        animate background { duration: 140ms; }
+        animate border-color { duration: 140ms; }
+    }
+
+    // Rounded red mention badge pinned to the bottom-right corner of the
+    // icon, ringed with the rail bg colour.
+    if root.badge > 0: MentionBadge {
         text: root.badge > 9 ? "9+" : root.badge;
-        x: parent.width - self.width;
-        y: parent.height - self.height;
+        x: icon.x + icon.width - self.width + 4px;
+        y: icon.y + icon.height - self.height + 4px;
+    }
+}
+
+// Short centered divider, like Discord's separator between the home button
+// and the server list (and again below the list, before the +/explore
+// "folder" zone).
+component RailDivider inherits Rectangle {
+    height: 2px;
+    background: transparent;
+    Rectangle {
+        width: 32px;
+        height: 2px;
+        border-radius: 1px;
+        x: (parent.width - self.width) / 2;
+        background: Theme.border;
     }
 }
 
@@ -67,12 +164,30 @@ export component ServerRail inherits Rectangle {
     callback open_requests;
     callback open_admin;
 
-    width: 68px;
+    // Aggregated hover-tooltip state for main.slint's overlay -- the rail
+    // itself can't paint a tooltip past its own 72px width, so it just
+    // reports which button (if any) is hovered and where. Only buttons with
+    // a non-empty `tooltip` participate.
+    out property <string> hovered_tooltip: home_btn.hovered ? home_btn.tooltip
+        : (friends_btn.hovered ? friends_btn.tooltip
+        : (add_btn.hovered ? add_btn.tooltip
+        : (requests_btn.hovered ? requests_btn.tooltip
+        : (admin_btn.hovered ? admin_btn.tooltip : ""))));
+    out property <length> tooltip_y: home_btn.hovered ? home_btn.y
+        : (friends_btn.hovered ? friends_btn.y
+        : (add_btn.hovered ? add_btn.y
+        : (requests_btn.hovered ? requests_btn.y
+        : admin_btn.y)));
+
+    width: 72px;
     background: Theme.bg-tertiary;
 
     VerticalLayout {
-        padding: 12px;
+        padding-top: 12px;
+        padding-bottom: 12px;
         spacing: 8px;
+        // No horizontal padding: buttons stretch to the full rail width so
+        // their selection pills sit flush against the rail's left edge.
         // No `alignment: start` -- an alignment'd layout of fixed-height
         // children reports a bounded maximum height, and since a
         // HorizontalLayout row can only be as tall as its least-stretchable
@@ -82,9 +197,10 @@ export component ServerRail inherits Rectangle {
         // keeping the buttons top-aligned while the layout stays
         // height-unbounded.
 
-        RailButton {
+        home_btn := RailButton {
             active: root.home_active;
             badge: root.unread_count;
+            tooltip: "Home";
             clicked => { root.go_home(); }
             Image {
                 source: @image-url("../assets/textures/hexatalkicon.png");
@@ -94,46 +210,58 @@ export component ServerRail inherits Rectangle {
             }
         }
 
-        Rectangle { height: 1px; background: Theme.border; }
+        RailDivider {}
 
         ListView {
             // Size to the actual server count so the icon strip hugs the
-            // servers instead of reserving a fixed 300px of dead space
-            // when there are only 1-2 servers; caps at ~6 rows so a long
+            // servers instead of reserving a fixed block of dead space
+            // when there are only 1-2 servers; caps at 5 rows so a long
             // list still scrolls instead of pushing the bottom buttons
-            // (+/friends/requests/admin) off the rail.
-            height: min(264px, max(44px, root.servers.length * 44px));
-            for srv in root.servers: RailButton {
-                height: 44px;
-                active: srv.active;
-                clicked => { root.select_server(srv.server_id); }
-                Avatar {
-                    size: 44px;
-                    initial: srv.initial;
-                    avatar-color: Theme.accent;
-                    photo-source: srv.icon;
+            // (+/explore/friends/requests/admin) off the rail. Each row is
+            // 56px: the 48px button plus an 8px gap.
+            height: min(280px, max(56px, root.servers.length * 56px));
+            for srv in root.servers: Rectangle {
+                height: 56px;
+                background: transparent;
+                RailButton {
+                    width: parent.width;
+                    filled: true;
+                    active: srv.active;
+                    clicked => { root.select_server(srv.server_id); }
+                    Avatar {
+                        size: 48px;
+                        initial: srv.initial;
+                        avatar-color: Theme.accent;
+                        photo-source: srv.icon;
+                    }
                 }
             }
         }
 
-        Rectangle { height: 1px; background: Theme.border; }
+        // "Folder zone" separator -- Discord draws a divider between the
+        // server list and the add/explore buttons.
+        RailDivider {}
 
-        RailButton {
+        add_btn := RailButton {
             active: root.add_menu_open;
+            accent-hot: true;
+            tooltip: "Add a server";
             clicked => { root.toggle_add_menu(); }
             Text {
                 text: "+";
-                font-size: 22px;
+                font-size: 26px;
                 font-family: Theme.font-medium;
-                color: Theme.accent;
+                color: add_btn.hot ? Theme.text-on-accent : Theme.accent;
                 horizontal-alignment: center;
                 vertical-alignment: center;
+                animate color { duration: 140ms; }
             }
         }
 
-        RailButton {
+        friends_btn := RailButton {
             active: root.friends_active;
             badge: root.friends_online;
+            tooltip: "Friends";
             clicked => { root.open_friends(); }
             Image {
                 source: @image-url("../assets/textures/friendsicon.png");
@@ -143,9 +271,10 @@ export component ServerRail inherits Rectangle {
             }
         }
 
-        RailButton {
+        requests_btn := RailButton {
             active: root.requests_active;
             badge: root.incoming_count;
+            tooltip: "Requests";
             clicked => { root.open_requests(); }
             Image {
                 source: @image-url("../assets/textures/invitesicon.png");
@@ -155,8 +284,14 @@ export component ServerRail inherits Rectangle {
             }
         }
 
-        if root.show_admin: RailButton {
+        // Always instantiated (not `if root.show_admin:`) so the tooltip
+        // aggregation above can reach `admin_btn`; hidden admins collapse
+        // to zero height instead.
+        admin_btn := RailButton {
+            height: root.show_admin ? 48px : 0px;
+            visible: root.show_admin;
             active: root.admin_active;
+            tooltip: "Admin";
             clicked => { root.open_admin(); }
             Image {
                 source: @image-url("../assets/textures/admin.png");
@@ -168,5 +303,12 @@ export component ServerRail inherits Rectangle {
 
         // Stretchy spacer -- see the comment on this VerticalLayout.
         Rectangle {}
+    }
+
+    // Hairline separating the rail from the channel sidebar.
+    Rectangle {
+        x: parent.width - 1px;
+        width: 1px;
+        background: Theme.border-hairline;
     }
 }

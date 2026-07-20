@@ -77,6 +77,42 @@ async function findActiveCall(
   return null;
 }
 
+/** Ringing calls unanswered for this long are considered stale (crashed
+ * client, lost tab) and auto-ended so neither party is blocked forever. */
+const RING_TIMEOUT_MS = 2 * 60 * 1000;
+const SDP_MAX_LEN = 200_000;
+const ICE_CANDIDATE_MAX_LEN = 16_000;
+
+async function expireStaleRingingCalls(
+  ctx: MutationCtx,
+  userId: Id<"users">,
+): Promise<void> {
+  const cutoff = Date.now() - RING_TIMEOUT_MS;
+  const [asCaller, asCallee] = await Promise.all([
+    ctx.db
+      .query("calls")
+      .withIndex("by_caller_and_status", (q) =>
+        q.eq("callerId", userId).eq("status", "ringing"),
+      )
+      .take(10),
+    ctx.db
+      .query("calls")
+      .withIndex("by_callee_and_status", (q) =>
+        q.eq("calleeId", userId).eq("status", "ringing"),
+      )
+      .take(10),
+  ]);
+  for (const call of [...asCaller, ...asCallee]) {
+    if (call.startedAt >= cutoff) continue;
+    await ctx.db.patch("calls", call._id, {
+      status: "ended",
+      endedAt: Date.now(),
+    });
+    await purgeIceCandidates(ctx, call._id);
+    await logCallEvent(ctx, call.conversationId, call.callerId, "Missed call");
+  }
+}
+
 export const startCall = mutation({
   args: {
     sessionToken: v.string(),
@@ -86,6 +122,18 @@ export const startCall = mutation({
   },
   handler: async (ctx, args) => {
     const me = await currentUser(ctx, args.sessionToken);
+
+    if (args.calleeId === me._id) {
+      throw new Error("You can't call yourself");
+    }
+    if (args.offerSdp.length < 10 || args.offerSdp.length > SDP_MAX_LEN) {
+      throw new Error("Invalid offer");
+    }
+
+    // Clear zombie ringing calls first so a crashed client can't block
+    // either party from ever calling again.
+    await expireStaleRingingCalls(ctx, me._id);
+    await expireStaleRingingCalls(ctx, args.calleeId);
 
     const existing = await findActiveCall(ctx, me._id);
     if (existing) {
@@ -145,6 +193,9 @@ export const respond = mutation({
       if (!args.answerSdp) {
         throw new Error("Missing answer");
       }
+      if (args.answerSdp.length < 10 || args.answerSdp.length > SDP_MAX_LEN) {
+        throw new Error("Invalid answer");
+      }
       await ctx.db.patch("calls", call._id, {
         status: "active",
         answerSdp: args.answerSdp,
@@ -201,6 +252,13 @@ export const addIceCandidate = mutation({
     const call = await ctx.db.get("calls", args.callId);
     if (!call || (call.callerId !== me._id && call.calleeId !== me._id)) {
       throw new Error("Call not found");
+    }
+    // No ICE for finished calls — otherwise ended calls collect junk rows.
+    if (call.status === "ended" || call.status === "declined") {
+      return null;
+    }
+    if (args.candidate.length === 0 || args.candidate.length > ICE_CANDIDATE_MAX_LEN) {
+      throw new Error("Invalid ICE candidate");
     }
     await ctx.db.insert("callIceCandidates", {
       callId: args.callId,

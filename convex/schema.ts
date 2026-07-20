@@ -62,11 +62,22 @@ export default defineSchema({
     // users get gated to a "verify your email" screen on next login.
     email: v.optional(v.string()),
     emailVerified: v.optional(v.boolean()),
+
+    // ---------- HexaTalk Plus (cosmetic subscription; not pay-to-win) ----------
+    // Active when plusExpiresAt is set and in the future. Cleared / past =
+    // free tier cosmetics only. Source of truth after Stripe webhooks.
+    plusExpiresAt: v.optional(v.number()),
+    stripeCustomerId: v.optional(v.string()),
+    stripeSubscriptionId: v.optional(v.string()),
+    // Optional profile banner image (Plus-only upload).
+    profileBannerStorageId: v.optional(v.id("_storage")),
   })
     .index("by_username", ["username"])
     .index("by_botOwner", ["botOwnerId"])
     .index("by_clerkId", ["clerkId"])
-    .index("by_email", ["email"]),
+    .index("by_email", ["email"])
+    .index("by_stripeCustomerId", ["stripeCustomerId"])
+    .index("by_stripeSubscriptionId", ["stripeSubscriptionId"]),
 
   emailVerificationCodes: defineTable({
     userId: v.id("users"),
@@ -76,6 +87,18 @@ export default defineSchema({
     expiresAt: v.number(),
     attempts: v.number(),
   }).index("by_userId", ["userId"]),
+
+  // Password-reset codes (logged-out flow). Separate from email verification
+  // so a pending "verify email" code can't be reused to reset a password.
+  passwordResetCodes: defineTable({
+    userId: v.id("users"),
+    email: v.string(),
+    codeHash: v.string(),
+    expiresAt: v.number(),
+    attempts: v.number(),
+  })
+    .index("by_userId", ["userId"])
+    .index("by_email", ["email"]),
 
   sessions: defineTable({
     userId: v.id("users"),
@@ -291,7 +314,9 @@ export default defineSchema({
     expiresAt: v.number(),
   })
     .index("by_conversation", ["conversationId"])
-    .index("by_conversation_and_user", ["conversationId", "userId"]),
+    .index("by_conversation_and_user", ["conversationId", "userId"])
+    // Range-scanned by the cleanup cron (expired rows first).
+    .index("by_expiresAt", ["expiresAt"]),
 
   messages: defineTable({
     conversationId: v.id("conversations"),
@@ -316,7 +341,22 @@ export default defineSchema({
     pinned: v.optional(v.boolean()),
     pinnedAt: v.optional(v.number()),
     pinnedBy: v.optional(v.id("users")),
-  }).index("by_conversation", ["conversationId"]),
+  })
+    .index("by_conversation", ["conversationId"])
+    // Powers listPinned / the pin-count check without scanning a whole
+    // channel's history.
+    .index("by_conversation_and_pinned", ["conversationId", "pinned"]),
+
+  // Append-only audit of message edits (previous bodies). Written by
+  // messages:edit before the body is overwritten; removed together with the
+  // message by purge / clearConversation / purgeAllHistory. For encrypted
+  // messages the snapshots are ciphertext blobs, same as messages.body.
+  messageEditHistory: defineTable({
+    messageId: v.id("messages"),
+    editorId: v.id("users"),
+    previousBody: v.string(),
+    editedAt: v.number(),
+  }).index("by_message", ["messageId"]),
 
   reactions: defineTable({
     messageId: v.id("messages"),
@@ -466,5 +506,11 @@ export default defineSchema({
   })
     .index("by_user", ["userId"])
     .index("by_token", ["token"]),
+
+  // Stripe webhook idempotency (event.id already processed).
+  stripeEvents: defineTable({
+    eventId: v.string(),
+    processedAt: v.number(),
+  }).index("by_eventId", ["eventId"]),
 });
 

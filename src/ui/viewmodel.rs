@@ -78,9 +78,9 @@ pub(crate) fn conversation_rows(
         .collect()
 }
 
-pub(crate) fn friend_rows(friends: &[Friend]) -> Vec<ui::FriendRow> {
+pub(crate) fn friend_rows<'a>(friends: impl IntoIterator<Item = &'a Friend>) -> Vec<ui::FriendRow> {
     friends
-        .iter()
+        .into_iter()
         .map(|f| {
             let online = f.is_online_like();
             let mut subtitle = format!("@{}", f.username);
@@ -325,9 +325,11 @@ pub(crate) fn admin_user_rows(
         .collect()
 }
 
-pub(crate) fn member_rows(members: &[ServerMemberRow]) -> Vec<ui::MemberRow> {
+pub(crate) fn member_rows<'a>(
+    members: impl IntoIterator<Item = &'a ServerMemberRow>,
+) -> Vec<ui::MemberRow> {
     members
-        .iter()
+        .into_iter()
         .map(|m| {
             let (mut badge_text, mut badge_bg, mut badge_fg) = if m.is_owner {
                 (
@@ -352,6 +354,7 @@ pub(crate) fn member_rows(members: &[ServerMemberRow]) -> Vec<ui::MemberRow> {
                 photo_url: m.avatar_image_url.clone().into(),
                 online: is_online(m.last_seen_at),
                 is_bot: m.is_bot,
+                is_plus: m.plus_active,
                 badge_text,
                 badge_bg,
                 badge_fg,
@@ -371,16 +374,15 @@ pub(crate) fn member_rows(members: &[ServerMemberRow]) -> Vec<ui::MemberRow> {
 }
 
 /// Merges Convex history + live peerseal messages for the open DM, same
-/// source list `view_chat` built in src/view/chat.rs.
+/// source list `view_chat` built in src/view/chat.rs. Iterator-based: no
+/// intermediate `Vec` allocation per render pass.
 fn display_messages<'a>(
     messages: &'a [ChatMessage],
     live_messages: Option<&'a [ChatMessage]>,
-) -> Vec<&'a ChatMessage> {
-    let mut v: Vec<&ChatMessage> = messages.iter().collect();
-    if let Some(live) = live_messages {
-        v.extend(live.iter());
-    }
-    v
+) -> impl Iterator<Item = &'a ChatMessage> {
+    messages
+        .iter()
+        .chain(live_messages.unwrap_or(&[]).iter())
 }
 
 /// `my_names` are the current user's display name + username (used to flag
@@ -398,6 +400,9 @@ pub(crate) fn chat_message_rows(
     let mut rows = Vec::new();
     let mut last_author: Option<String> = None;
     let mut last_day: Option<String> = None;
+    // Lowercased once for the whole pass instead of per message (the render
+    // loop is the hot path for `mentions_any`; see mentions.rs).
+    let my_names_lower: Vec<String> = my_names.iter().map(|n| n.to_lowercase()).collect();
 
     for msg in display_messages(messages, live_messages) {
         let mine = msg.author_id == my_user_id;
@@ -430,6 +435,7 @@ pub(crate) fn chat_message_rows(
                 author_photo_url: Default::default(),
                 attachment_url: Default::default(),
                 is_bot: false,
+                is_plus: false,
                 mine: false,
                 encrypted: false,
                 is_call_log: true,
@@ -466,6 +472,7 @@ pub(crate) fn chat_message_rows(
                 author_photo_url: Default::default(),
                 attachment_url: Default::default(),
                 is_bot: false,
+                is_plus: false,
                 mine,
                 encrypted: msg.encrypted,
                 is_call_log: true,
@@ -496,7 +503,7 @@ pub(crate) fn chat_message_rows(
 
         let mut meta = format_time(msg.sent_at);
         if msg.edited {
-            meta = format!("{meta} (edited)");
+            meta.push_str(" (edited)");
         }
         let reply_line = msg
             .reply_to
@@ -517,7 +524,7 @@ pub(crate) fn chat_message_rows(
         // pings the current user (by display name or username) or, in
         // channels/groups, contains the literal @everyone. Mentions are
         // parsed from the raw body, never from the "(deleted)" decoration.
-        let mentions_me = !msg.deleted && mentions::mentions_any(&msg.body, my_names);
+        let mentions_me = !msg.deleted && mentions::mentions_any_lower(&msg.body, &my_names_lower);
         let mentions_everyone =
             !msg.deleted && everyone_allowed && mentions::has_everyone(&msg.body);
         let ping_label = if mentions_me || mentions_everyone {
@@ -539,6 +546,7 @@ pub(crate) fn chat_message_rows(
             author_photo_url: msg.author_avatar_url.clone().into(),
             attachment_url: msg.attachment_url.clone().into(),
             is_bot: msg.author_is_bot,
+            is_plus: msg.author_plus_active,
             mine,
             encrypted: msg.encrypted,
             is_call_log: false,
@@ -576,6 +584,25 @@ pub(crate) fn chat_message_rows(
         });
     }
     rows
+}
+
+/// `messages:listPinned` rows for the header pinned-messages panel -- a
+/// flat, lightweight projection (no grouping/reactions/permissions).
+pub(crate) fn pinned_rows(pinned: &[ChatMessage]) -> Vec<ui::PinnedMessageRow> {
+    pinned
+        .iter()
+        .map(|msg| ui::PinnedMessageRow {
+            id: msg.id.clone().into(),
+            author_name: msg.author_name.clone().into(),
+            author_avatar_color: hex_color(&msg.author_avatar_color),
+            meta: format_time(msg.sent_at).into(),
+            body: if msg.body.is_empty() && !msg.attachment_url.is_empty() {
+                "[image]".into()
+            } else {
+                msg.body.clone().into()
+            },
+        })
+        .collect()
 }
 
 /// `reports:adminListReports` rows for the admin panel's Reports section.

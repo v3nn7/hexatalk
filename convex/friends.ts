@@ -199,7 +199,7 @@ async function assertRateLimit(
     .withIndex("by_from_and_status", (q) =>
       q.eq("fromUserId", meId).eq("status", "pending"),
     )
-    .take(MAX_PENDING_OUTGOING + 1);
+    .take(50);
   if (pendingOut.length >= MAX_PENDING_OUTGOING) {
     throw new Error(
       `You already have ${MAX_PENDING_OUTGOING} pending requests — cancel some first`,
@@ -208,25 +208,21 @@ async function assertRateLimit(
 
   const hourAgo = Date.now() - 60 * 60 * 1000;
   // Scan recent outgoing of any status (pending/declined/accepted) by time.
-  const recentish = await ctx.db
-    .query("friendRequests")
-    .withIndex("by_from_and_status", (q) =>
-      q.eq("fromUserId", meId).eq("status", "pending"),
-    )
-    .take(50);
-  const declined = await ctx.db
-    .query("friendRequests")
-    .withIndex("by_from_and_status", (q) =>
-      q.eq("fromUserId", meId).eq("status", "declined"),
-    )
-    .take(50);
-  const accepted = await ctx.db
-    .query("friendRequests")
-    .withIndex("by_from_and_status", (q) =>
-      q.eq("fromUserId", meId).eq("status", "accepted"),
-    )
-    .take(50);
-  const recentCount = [...recentish, ...declined, ...accepted].filter(
+  const [declined, accepted] = await Promise.all([
+    ctx.db
+      .query("friendRequests")
+      .withIndex("by_from_and_status", (q) =>
+        q.eq("fromUserId", meId).eq("status", "declined"),
+      )
+      .take(50),
+    ctx.db
+      .query("friendRequests")
+      .withIndex("by_from_and_status", (q) =>
+        q.eq("fromUserId", meId).eq("status", "accepted"),
+      )
+      .take(50),
+  ]);
+  const recentCount = [...pendingOut, ...declined, ...accepted].filter(
     (r) => (r.sentAt ?? r._creationTime) >= hourAgo,
   ).length;
   if (recentCount >= MAX_REQUESTS_PER_HOUR) {
@@ -386,6 +382,15 @@ export const respondRequest = mutation({
 
     const now = Date.now();
     if (args.accept) {
+      // Either side may have blocked the other after the request was sent —
+      // never materialize a friendship across a block.
+      if (await isBlockedEitherWay(ctx, me._id, request.fromUserId)) {
+        await ctx.db.patch("friendRequests", request._id, {
+          status: "declined",
+          respondedAt: now,
+        });
+        throw new Error("You can't accept a request from this user");
+      }
       await ctx.db.patch("friendRequests", request._id, {
         status: "accepted",
         respondedAt: now,
@@ -417,7 +422,12 @@ export const respondAllIncoming = mutation({
     const now = Date.now();
     let count = 0;
     for (const request of requests) {
-      if (args.accept) {
+      // Bulk-accept must not create friendships across a block — those
+      // requests get declined instead of accepted.
+      const blocked = args.accept
+        ? await isBlockedEitherWay(ctx, me._id, request.fromUserId)
+        : false;
+      if (args.accept && !blocked) {
         await ctx.db.patch("friendRequests", request._id, {
           status: "accepted",
           respondedAt: now,
@@ -485,20 +495,7 @@ export const setFriendMeta = mutation({
 
     const existing = await getMeta(ctx, me._id, args.friendUserId);
     if (existing) {
-      const patch: {
-        nickname?: string;
-        favorite?: boolean;
-        privateNote?: string;
-      } = {};
-      if (args.nickname !== undefined) {
-        patch.nickname = nickname && nickname.length > 0 ? nickname : undefined;
-      }
-      if (args.favorite !== undefined) patch.favorite = args.favorite;
-      if (args.privateNote !== undefined) {
-        patch.privateNote =
-          privateNote && privateNote.length > 0 ? privateNote : undefined;
-      }
-      // Convex optional clear: set undefined via replace fields carefully.
+      // Convex optional clear: empty string clears the field client-side.
       await ctx.db.patch("friendMeta", existing._id, {
         ...(args.nickname !== undefined
           ? { nickname: nickname && nickname.length > 0 ? nickname : "" }
