@@ -468,9 +468,14 @@ pub(crate) fn stage_exe_swap(staged_path: &std::path::Path, relaunch: bool) {
     // `current_exe()` may return an extended-length path (`\\?\C:\...`) which
     // breaks `move`/`start` inside cmd (Windows reports it cannot find "\\").
     // Strip the prefix so the helper script sees plain DOS paths.
+    // Also handle `\\?\UNC\server\share` → `\\server\share`.
     fn dos_path(p: &std::path::Path) -> String {
         let s = p.display().to_string();
-        s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s)
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            format!("\\{}", rest)
+        } else {
+            s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s)
+        }
     }
     let staged = dos_path(staged_path);
     let exe = dos_path(&exe_path);

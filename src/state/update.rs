@@ -4190,9 +4190,11 @@ impl App {
                     return Task::none();
                 };
                 let mut client = client;
+                let mid = message_id.clone();
+                let em = emoji.clone();
                 Task::perform(
                     async move {
-                        client
+                        let result = client
                             .mutation(
                                 "messages:toggleReaction",
                                 btreemap! {
@@ -4203,16 +4205,39 @@ impl App {
                             )
                             .await
                             .map_err(|err| err.to_string())
-                            .and_then(expect_null)
+                            .and_then(expect_null);
+                        (mid, em, result)
                     },
-                    Message::ReactionToggled,
+                    |(id, emoji, result)| Message::ReactionToggled(id, emoji, result),
                 )
             }
-            Message::ReactionToggled(Err(err)) => {
+            Message::ReactionToggled(message_id, emoji, Err(err)) => {
                 self.chat_error = Some(err);
                 Task::none()
             }
-            Message::ReactionToggled(Ok(())) => Task::none(),
+            Message::ReactionToggled(message_id, emoji, Ok(())) => {
+                // Update the local message's reactions immediately so the UI
+                // reflects the toggle without waiting for the subscription poll.
+                if let Some(msg) = self.messages.iter_mut().find(|m| m.id == message_id) {
+                    if let Some(pos) = msg.reactions.iter().position(|(e, _, _)| e == &emoji) {
+                        let (_, count, reacted) = &mut msg.reactions[pos];
+                        if *reacted {
+                            *count = count.saturating_sub(1);
+                            if *count == 0 {
+                                msg.reactions.remove(pos);
+                            } else {
+                                *reacted = false;
+                            }
+                        } else {
+                            *count += 1;
+                            *reacted = true;
+                        }
+                    } else {
+                        msg.reactions.push((emoji, 1, true));
+                    }
+                }
+                Task::none()
+            }
             Message::ReplyToMessage(message_id, author_name, snippet) => {
                 self.pending_reply = Some((message_id, author_name, snippet));
                 Task::none()

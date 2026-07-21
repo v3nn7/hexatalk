@@ -272,7 +272,7 @@ pub(crate) enum Message {
     PurgeFinished(Result<(), String>),
     CopyMessage(String),
     ToggleReaction(String, String),
-    ReactionToggled(Result<(), String>),
+    ReactionToggled(String, String, Result<(), String>),
     ReplyToMessage(String, String, String),
     CancelReply,
 
