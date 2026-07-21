@@ -174,11 +174,14 @@ pub async fn dispatch(
         // Upload flow moved to client.upload_file + PATCH icon_storage_key;
         // the call sites no longer hit this path.
         ("servers", "generateIconUploadUrl") => Ok(FunctionResult::ErrorMessage(
-            "Not supported yet".to_string(),
+            "Icon upload is handled internally now".to_string(),
         )),
         ("servers", "setServerIcon") => {
             let server_id = arg_str(&args, "serverId");
-            let storage_id = arg_str(&args, "storageId");
+            // Call sites send `iconStorageId` (old Convex arg); accept the
+            // legacy `storageId` spelling too.
+            let storage_id = arg_opt_str(&args, "iconStorageId")
+                .unwrap_or_else(|| arg_str(&args, "storageId"));
             // Old mutation returned the public URL so the client can paint
             // the icon immediately — compute it before the body moves the id.
             let icon_url = c.file_url(&storage_id);
@@ -225,10 +228,50 @@ pub async fn dispatch(
                 Err(err) => human_or(err),
             }
         }
-        // Degradation: no public slug-resolution endpoint.
-        ("servers", "resolveCustomSlug") => Ok(FunctionResult::ErrorMessage(
-            "Not found".to_string(),
-        )),
+        // No dedicated slug endpoint — scan GET /servers for a matching custom_slug
+        // among the caller's memberships (deep-link join for servers you're in /
+        // can see via list). Unknown slug → null (parse_deep_link_info).
+        ("servers", "resolveCustomSlug") => {
+            let slug = arg_str(&args, "slug").trim().to_ascii_lowercase();
+            if slug.is_empty() {
+                return Ok(FunctionResult::Value(Value::Null));
+            }
+            let resp = match c.rest(Method::GET, "/servers", None).await {
+                Ok(resp) => resp,
+                Err(err) => return human_or(err),
+            };
+            let servers = json_array(resp, "servers");
+            for s in servers {
+                let custom = jstr(&s, "custom_slug").to_ascii_lowercase();
+                if custom == slug {
+                    let mut obj = BTreeMap::new();
+                    obj.insert(
+                        "serverId".to_string(),
+                        Value::String(jstr(&s, "id")),
+                    );
+                    obj.insert("name".to_string(), Value::String(jstr(&s, "name")));
+                    let icon_key = jstr(&s, "icon_storage_key");
+                    obj.insert(
+                        "iconUrl".to_string(),
+                        Value::String(if icon_key.is_empty() {
+                            String::new()
+                        } else {
+                            c.file_url(&icon_key)
+                        }),
+                    );
+                    obj.insert(
+                        "invitesPaused".to_string(),
+                        Value::Boolean(jbool(&s, "invites_paused", false)),
+                    );
+                    obj.insert(
+                        "inviteCode".to_string(),
+                        Value::String(jstr(&s, "invite_code")),
+                    );
+                    return Ok(FunctionResult::Value(Value::Object(obj)));
+                }
+            }
+            Ok(FunctionResult::Value(Value::Null))
+        }
         ("servers", "listChannels") => {
             let server_id = arg_str(&args, "serverId");
             let bundle = server_bundle(c, &server_id).await?;
@@ -326,10 +369,30 @@ pub async fn dispatch(
                 Err(err) => human_or(err),
             }
         }
-        // Degradation: no invite-regeneration endpoint.
-        ("servers", "regenerateInviteCode") => Ok(FunctionResult::ErrorMessage(
-            "Not supported yet".to_string(),
-        )),
+        // POST /servers/:id/invite/regenerate → { invite_code }
+        ("servers", "regenerateInviteCode") => {
+            let server_id = arg_str(&args, "serverId");
+            match c
+                .rest(
+                    Method::POST,
+                    &format!("/servers/{server_id}/invite/regenerate"),
+                    None,
+                )
+                .await
+            {
+                Ok(resp) => {
+                    let code = jstr(&resp, "invite_code");
+                    if code.is_empty() {
+                        Ok(FunctionResult::ErrorMessage(
+                            "Server did not return a new invite code".into(),
+                        ))
+                    } else {
+                        Ok(FunctionResult::Value(Value::String(code)))
+                    }
+                }
+                Err(err) => human_or(err),
+            }
+        }
         ("servers", "setServerDescription") => {
             let server_id = arg_str(&args, "serverId");
             let body = json!({ "description": arg_str(&args, "description") });
@@ -341,10 +404,22 @@ pub async fn dispatch(
                 Err(err) => human_or(err),
             }
         }
-        // Degradation: no ownership-transfer endpoint.
-        ("servers", "transferOwnership") => Ok(FunctionResult::ErrorMessage(
-            "Not supported yet".to_string(),
-        )),
+        // POST /servers/:id/transfer  { userId }
+        ("servers", "transferOwnership") => {
+            let server_id = arg_str(&args, "serverId");
+            let new_owner = arg_str(&args, "newOwnerId");
+            match c
+                .rest(
+                    Method::POST,
+                    &format!("/servers/{server_id}/transfer"),
+                    Some(json!({ "userId": new_owner })),
+                )
+                .await
+            {
+                Ok(_) => ok_null(),
+                Err(err) => human_or(err),
+            }
+        }
         ("servers", "setWelcomeChannel") => {
             let server_id = arg_str(&args, "serverId");
             let channel_id = arg_str(&args, "channelId");
@@ -372,22 +447,81 @@ pub async fn dispatch(
                 Err(err) => human_or(err),
             }
         }
-        // Degradation: no stats endpoint — zeros/nulls in the expected
-        // shape so the Overview card renders an empty state.
+        // GET /servers/:id/stats (+ channel type split from the server bundle).
         ("servers", "serverStats") => {
+            let server_id = arg_str(&args, "serverId");
+            let stats = match c
+                .rest(Method::GET, &format!("/servers/{server_id}/stats"), None)
+                .await
+            {
+                Ok(resp) => resp,
+                Err(err) => return human_or(err),
+            };
+            let bundle = server_bundle(c, &server_id).await.ok();
+            let (text_channels, voice_channels, created_at, oldest_name, oldest_joined) =
+                if let Some(bundle) = bundle.as_ref() {
+                    let channels = json_array(bundle.clone(), "channels");
+                    let mut text_n = 0.0;
+                    let mut voice_n = 0.0;
+                    for ch in &channels {
+                        let ty = jstr(ch, "channel_type");
+                        if ty == "voice" {
+                            voice_n += 1.0;
+                        } else {
+                            text_n += 1.0;
+                        }
+                    }
+                    let members = json_array(bundle.clone(), "members");
+                    let mut oldest_name = String::new();
+                    let mut oldest_joined = f64::MAX;
+                    for m in &members {
+                        let joined = jnum_any(m, &["joined_at", "joinedAt"]);
+                        if joined > 0.0 && joined < oldest_joined {
+                            oldest_joined = joined;
+                            oldest_name = jstr_any(
+                                m,
+                                &["display_name", "displayName", "username"],
+                            );
+                        }
+                    }
+                    if oldest_joined == f64::MAX {
+                        oldest_joined = 0.0;
+                    }
+                    let created = jnum_any(
+                        bundle.get("server").unwrap_or(&serde_json::Value::Null),
+                        &["created_at", "createdAt"],
+                    );
+                    (text_n, voice_n, created, oldest_name, oldest_joined)
+                } else {
+                    let channels = jnum_any(&stats, &["channels"]);
+                    (channels, 0.0, 0.0, String::new(), 0.0)
+                };
+
             let mut obj = BTreeMap::new();
-            obj.insert("memberCount".to_string(), Value::Float64(0.0));
-            obj.insert("textChannels".to_string(), Value::Float64(0.0));
-            obj.insert("voiceChannels".to_string(), Value::Float64(0.0));
-            obj.insert("roleCount".to_string(), Value::Float64(0.0));
-            obj.insert("messageCount".to_string(), Value::Float64(0.0));
+            obj.insert(
+                "memberCount".to_string(),
+                Value::Float64(jnum_any(&stats, &["members", "member_count", "memberCount"])),
+            );
+            obj.insert("textChannels".to_string(), Value::Float64(text_channels));
+            obj.insert("voiceChannels".to_string(), Value::Float64(voice_channels));
+            obj.insert(
+                "roleCount".to_string(),
+                Value::Float64(jnum_any(&stats, &["roles", "role_count", "roleCount"])),
+            );
+            obj.insert(
+                "messageCount".to_string(),
+                Value::Float64(jnum_any(&stats, &["messages", "message_count", "messageCount"])),
+            );
             obj.insert("messagesCapped".to_string(), Value::Boolean(false));
-            obj.insert("createdAt".to_string(), Value::Float64(0.0));
+            obj.insert("createdAt".to_string(), Value::Float64(created_at));
             obj.insert(
                 "oldestMemberName".to_string(),
-                Value::String(String::new()),
+                Value::String(oldest_name),
             );
-            obj.insert("oldestMemberJoinedAt".to_string(), Value::Float64(0.0));
+            obj.insert(
+                "oldestMemberJoinedAt".to_string(),
+                Value::Float64(oldest_joined),
+            );
             Ok(FunctionResult::Value(Value::Object(obj)))
         }
         ("servers", "listMembers") => {
@@ -397,6 +531,36 @@ pub async fn dispatch(
             let owner_id = jstr(&server, "owner_id");
             let roles = json_array(bundle.clone(), "roles");
             let members = json_array(bundle, "members");
+            // Presence: the API doesn't include activity in the member
+            // list, so fan out to GET /presence/:userId per member
+            // (best-effort, parallel) — same pattern as friends:listFriends.
+            let presence_fetches: Vec<_> = members
+                .iter()
+                .map(|m| {
+                    let uid = member_user_id(m);
+                    async move {
+                        if uid.is_empty() {
+                            return (uid, 0i64);
+                        }
+                        let last_seen = c
+                            .rest(Method::GET, &format!("/presence/{uid}"), None)
+                            .await
+                            .ok()
+                            .and_then(|p| {
+                                p.get("last_seen_at")
+                                    .or_else(|| p.get("lastSeenAt"))
+                                    .and_then(|v| v.as_f64())
+                            })
+                            .unwrap_or(0.0) as i64;
+                        (uid, last_seen)
+                    }
+                })
+                .collect();
+            let presence_map: std::collections::HashMap<String, i64> =
+                futures::future::join_all(presence_fetches)
+                    .await
+                    .into_iter()
+                    .collect();
             let mut rows: Vec<Value> = members
                 .iter()
                 .map(|m| {
@@ -422,7 +586,7 @@ pub async fn dispatch(
                             .collect()
                     };
                     let mut obj = BTreeMap::new();
-                    obj.insert("userId".to_string(), Value::String(user_id));
+                    obj.insert("userId".to_string(), Value::String(user_id.clone()));
                     obj.insert(
                         "displayName".to_string(),
                         Value::String(member_str(m, "display_name")),
@@ -458,14 +622,17 @@ pub async fn dispatch(
                     );
                     // No Plus on the new API.
                     obj.insert("plusActive".to_string(), Value::Boolean(false));
-                    // Presence arrives via WS; no per-member presence fetch.
-                    obj.insert("lastSeenAt".to_string(), Value::Float64(0.0));
+                    // Presence enriched above from GET /presence/:userId;
+                    // live changes refetch via the WS `presence` matcher.
+                    let last_seen = presence_map.get(&user_id).copied().unwrap_or(0);
+                    obj.insert("lastSeenAt".to_string(), Value::Float64(last_seen as f64));
                     obj.insert("roles".to_string(), Value::Array(role_tags));
                     Value::Object(obj)
                 })
                 .collect();
-            // Old ordering: owner first, bots last, then display name
-            // (online-first ordering is moot — lastSeenAt is 0 for all).
+            // Old ordering: owner first, bots last, then display name.
+            // (The member rail re-groups online/offline itself, so we
+            // don't sort by activity here.)
             rows.sort_by(|a, b| {
                 let owner = obj_bool_key(b, "isOwner").cmp(&obj_bool_key(a, "isOwner"));
                 if owner != std::cmp::Ordering::Equal {
@@ -486,6 +653,62 @@ pub async fn dispatch(
                 .rest(
                     Method::DELETE,
                     &format!("/servers/{server_id}/members/{user_id}"),
+                    None,
+                )
+                .await
+            {
+                Ok(_) => ok_null(),
+                Err(err) => human_or(err),
+            }
+        }
+        // Temporary server mute (timeout): POST /servers/:id/members/:userId/mute
+        // Unmute: DELETE same path. Mute is always timed (durationHours required).
+        ("servers", "muteMember") => {
+            let server_id = arg_str(&args, "serverId");
+            let user_id = arg_str(&args, "userId");
+            if server_id.is_empty() || user_id.is_empty() {
+                return Ok(FunctionResult::ErrorMessage(
+                    "Server and user required".into(),
+                ));
+            }
+            let hours = arg_f64(&args, "durationHours").unwrap_or(1.0).max(1.0);
+            let duration_ms = (hours * 3_600_000.0).round() as i64;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let expires_at = now + duration_ms;
+            let mut body = serde_json::Map::new();
+            body.insert("permanent".into(), json!(false));
+            body.insert("duration_ms".into(), json!(duration_ms));
+            body.insert("durationMs".into(), json!(duration_ms));
+            body.insert("duration_hours".into(), json!(hours as i64));
+            body.insert("expires_at".into(), json!(expires_at));
+            body.insert("mute_expires_at".into(), json!(expires_at));
+            if let Some(reason) = arg_opt_str(&args, "reason") {
+                if !reason.is_empty() {
+                    body.insert("reason".into(), json!(reason));
+                }
+            }
+            match c
+                .rest(
+                    Method::POST,
+                    &format!("/servers/{server_id}/members/{user_id}/mute"),
+                    Some(json!(body)),
+                )
+                .await
+            {
+                Ok(_) => ok_null(),
+                Err(err) => human_or(err),
+            }
+        }
+        ("servers", "unmuteMember") => {
+            let server_id = arg_str(&args, "serverId");
+            let user_id = arg_str(&args, "userId");
+            match c
+                .rest(
+                    Method::DELETE,
+                    &format!("/servers/{server_id}/members/{user_id}/mute"),
                     None,
                 )
                 .await
@@ -518,15 +741,27 @@ pub async fn dispatch(
         ("servers", "createChannel") => {
             let server_id = arg_str(&args, "serverId");
             let channel_type = arg_str(&args, "channelType");
-            let body = json!({
-                "name": arg_str(&args, "name"),
-                "channelType": if channel_type.is_empty() { "text".to_string() } else { channel_type },
-            });
+            let mut body = serde_json::Map::new();
+            body.insert("name".into(), json!(arg_str(&args, "name")));
+            // API accepts camelCase `channelType` + `categoryId` (not snake).
+            body.insert(
+                "channelType".into(),
+                json!(if channel_type.is_empty() {
+                    "text".to_string()
+                } else {
+                    channel_type
+                }),
+            );
+            if let Some(cat) = arg_opt_str(&args, "categoryId") {
+                if !cat.is_empty() {
+                    body.insert("categoryId".into(), json!(cat));
+                }
+            }
             let resp = match c
                 .rest(
                     Method::POST,
                     &format!("/servers/{server_id}/channels"),
-                    Some(body),
+                    Some(json!(body)),
                 )
                 .await
             {
@@ -872,10 +1107,118 @@ pub async fn dispatch(
                 }
             }
         }
-        // Degradation: no notification-prefs endpoints — the client updates
-        // its own optimistic state, so accept writes as no-ops and report
-        // nothing muted.
-        ("channels", "setMute") => ok_null(),
+        // Notification mute for channel/server. Prefer timed mute body.
+        // Paths may evolve; try conversation/server mute routes then fail clearly.
+        ("channels", "setMute") => {
+            let scope = arg_str(&args, "scope"); // "conversation" | "server"
+            let target_id = arg_str(&args, "targetId");
+            let muted = arg_bool(&args, "muted").unwrap_or(true);
+            if target_id.is_empty() {
+                return Ok(FunctionResult::ErrorMessage("Mute target required".into()));
+            }
+            let hours = arg_f64(&args, "durationHours").unwrap_or(1.0).max(1.0);
+            let duration_ms = (hours * 3_600_000.0).round() as i64;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let expires_at = now + duration_ms;
+            let body = json!({
+                "permanent": false,
+                "duration_ms": duration_ms,
+                "durationMs": duration_ms,
+                "duration_hours": hours as i64,
+                "expires_at": expires_at,
+                "mute_expires_at": expires_at,
+            });
+            let paths: Vec<(reqwest::Method, String, Option<serde_json::Value>)> = if muted {
+                if scope == "server" {
+                    vec![
+                        (
+                            Method::POST,
+                            format!("/servers/{target_id}/mute"),
+                            Some(body.clone()),
+                        ),
+                        (
+                            Method::POST,
+                            format!("/prefs/mutes"),
+                            Some(json!({
+                                "scope": "server",
+                                "targetId": target_id,
+                                "duration_ms": duration_ms,
+                                "expires_at": expires_at,
+                            })),
+                        ),
+                    ]
+                } else {
+                    vec![
+                        (
+                            Method::POST,
+                            format!("/channels/{target_id}/mute"),
+                            Some(body.clone()),
+                        ),
+                        (
+                            Method::POST,
+                            format!("/conversations/{target_id}/mute"),
+                            Some(body.clone()),
+                        ),
+                        (
+                            Method::POST,
+                            format!("/prefs/mutes"),
+                            Some(json!({
+                                "scope": "conversation",
+                                "targetId": target_id,
+                                "duration_ms": duration_ms,
+                                "expires_at": expires_at,
+                            })),
+                        ),
+                    ]
+                }
+            } else if scope == "server" {
+                vec![
+                    (Method::DELETE, format!("/servers/{target_id}/mute"), None),
+                    (
+                        Method::DELETE,
+                        format!("/prefs/mutes/server/{target_id}"),
+                        None,
+                    ),
+                ]
+            } else {
+                vec![
+                    (Method::DELETE, format!("/channels/{target_id}/mute"), None),
+                    (
+                        Method::DELETE,
+                        format!("/conversations/{target_id}/mute"),
+                        None,
+                    ),
+                    (
+                        Method::DELETE,
+                        format!("/prefs/mutes/conversation/{target_id}"),
+                        None,
+                    ),
+                ]
+            };
+            let mut last_err = None;
+            for (method, path, body) in paths {
+                match c.rest(method, &path, body).await {
+                    Ok(_) => return ok_null(),
+                    Err(err) => {
+                        // Keep trying alternates on 404.
+                        if !err.0.starts_with("404") {
+                            return human_or(err);
+                        }
+                        last_err = Some(err);
+                    }
+                }
+            }
+            if let Some(err) = last_err {
+                human_or(err)
+            } else {
+                Ok(FunctionResult::ErrorMessage(
+                    "Mute endpoint not available yet".into(),
+                ))
+            }
+        }
         ("channels", "listMutes") => Ok(FunctionResult::Value(Value::Array(Vec::new()))),
         ("channels", "ensureAnnouncementChannel") => {
             let server_id = arg_str(&args, "serverId");
@@ -1207,10 +1550,33 @@ fn jstr(v: &serde_json::Value, key: &str) -> String {
 }
 
 fn jnum(v: &serde_json::Value, key: &str) -> f64 {
-    match v.get(key) {
-        Some(x) => x.as_f64().unwrap_or(0.0),
-        None => 0.0,
+    jnum_any(v, &[key])
+}
+
+fn jnum_any(v: &serde_json::Value, keys: &[&str]) -> f64 {
+    for key in keys {
+        if let Some(x) = v.get(*key) {
+            if let Some(n) = x
+                .as_f64()
+                .or_else(|| x.as_i64().map(|n| n as f64))
+                .or_else(|| x.as_u64().map(|n| n as f64))
+                .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+            {
+                return n;
+            }
+        }
     }
+    0.0
+}
+
+fn jstr_any(v: &serde_json::Value, keys: &[&str]) -> String {
+    for key in keys {
+        let s = jstr(v, key);
+        if !s.is_empty() {
+            return s;
+        }
+    }
+    String::new()
 }
 
 fn jbool(v: &serde_json::Value, key: &str, default: bool) -> bool {

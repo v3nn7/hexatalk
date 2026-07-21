@@ -9,24 +9,17 @@
 /releases
 /deltas
 
-# ---------- Node / Convex ----------
-node_modules/
+# ---------- Env / secrets ----------
 .env
 .env.local
 .env.*.local
-convex/_generated/
-
-# npm / yarn logs
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
 
 # ---------- Android / APK build output ----------
 dist/
 *.apk
 *.aab
 *.keystore
+.hexatalk-release-keystore-password.txt
 local.properties
 .gradle/
 captures/

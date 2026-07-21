@@ -160,9 +160,66 @@ impl ApiClient {
         }
     }
 
-    /// Public download URL for an uploaded file key.
+    /// Public download URL for an uploaded file key (or passthrough if already a URL).
     pub fn file_url(&self, key: &str) -> String {
+        let key = key.trim();
+        if key.is_empty() {
+            return String::new();
+        }
+        if key.starts_with("http://") || key.starts_with("https://") {
+            return key.to_string();
+        }
+        if let Some(rest) = key.strip_prefix("/files/") {
+            return format!("{}/files/{rest}", self.inner.base_url);
+        }
+        if let Some(rest) = key.strip_prefix("files/") {
+            return format!("{}/files/{rest}", self.inner.base_url);
+        }
         format!("{}/files/{key}", self.inner.base_url)
+    }
+
+    /// POST /users/me/avatar (multipart field `avatar`) → public download URL.
+    pub async fn upload_avatar(&self, bytes: Vec<u8>, filename: &str) -> Result<String, ApiError> {
+        const MAX_AVATAR_BYTES: usize = 8 * 1024 * 1024;
+        if bytes.len() > MAX_AVATAR_BYTES {
+            return Err(ApiError("Avatar is too large (max 8 MB)".into()));
+        }
+        let mime = mime_from_filename(filename);
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(filename.to_string())
+            .mime_str(mime)
+            .map_err(|e| ApiError(format!("multipart: {e}")))?;
+        let form = reqwest::multipart::Form::new().part("avatar", part);
+        let url = format!("{}/users/me/avatar", self.inner.base_url);
+        let mut req = self.inner.http.post(url).multipart(form);
+        if let Some(token) = self.session_token() {
+            req = req.bearer_auth(token);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| ApiError(format!("request failed: {e}")))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| ApiError(format!("read failed: {e}")))?;
+        if !status.is_success() {
+            return Err(ApiError(format!(
+                "{}: {}",
+                status.as_u16(),
+                error_message(&text)
+            )));
+        }
+        let json: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| ApiError(format!("bad json: {e}")))?;
+        if let Some(url) = extract_avatar_url_from_json(self, &json) {
+            return Ok(url);
+        }
+        Err(ApiError(format!(
+            "bad json: missing avatar url/key ({})",
+            text.chars().take(200).collect::<String>()
+        )))
     }
 
     /// POST /files (multipart field "file") → storage key.
@@ -197,7 +254,10 @@ impl ApiClient {
                 ALLOWED_EXTENSIONS.join(", ")
             )));
         }
-        let part = reqwest::multipart::Part::bytes(bytes).file_name(filename.to_string());
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(filename.to_string())
+            .mime_str(mime_from_filename(filename))
+            .map_err(|e| ApiError(format!("multipart: {e}")))?;
         let form = reqwest::multipart::Form::new().part("file", part);
         let url = format!("{}/files", self.inner.base_url);
         let mut req = self.inner.http.post(url).multipart(form);
@@ -298,4 +358,67 @@ fn error_message(text: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+fn mime_from_filename(filename: &str) -> &'static str {
+    match filename
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Pull a usable avatar download URL out of common POST /users/me/avatar
+/// response shapes (flat key/url, nested `user`, camelCase).
+fn extract_avatar_url_from_json(c: &ApiClient, json: &serde_json::Value) -> Option<String> {
+    let pick_url = |v: &serde_json::Value| -> Option<String> {
+        for key in [
+            "url",
+            "avatar_url",
+            "avatarUrl",
+            "avatar_image_url",
+            "avatarImageUrl",
+        ] {
+            if let Some(s) = v.get(key).and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+                return Some(c.file_url(s));
+            }
+        }
+        for key in [
+            "key",
+            "storage_key",
+            "storageKey",
+            "avatar_storage_key",
+            "avatarStorageKey",
+        ] {
+            if let Some(s) = v.get(key).and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+                return Some(c.file_url(s));
+            }
+        }
+        None
+    };
+    if let Some(url) = pick_url(json) {
+        return Some(url);
+    }
+    if let Some(user) = json.get("user") {
+        if let Some(url) = pick_url(user) {
+            return Some(url);
+        }
+    }
+    if let Some(avatar) = json.get("avatar") {
+        if let Some(url) = pick_url(avatar) {
+            return Some(url);
+        }
+        if let Some(s) = avatar.as_str().filter(|s| !s.is_empty()) {
+            return Some(c.file_url(s));
+        }
+    }
+    None
 }

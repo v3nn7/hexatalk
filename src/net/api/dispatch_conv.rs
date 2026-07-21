@@ -54,19 +54,18 @@ pub async fn dispatch(
                 );
                 obj.insert("kind".to_string(), Value::String(js(m, &["kind"])));
                 let title = js(m, &["title", "name", "peer_display_name"]);
-                obj.insert(
-                    "title".to_string(),
-                    Value::String(if title.is_empty() {
-                        "Chat".to_string()
-                    } else {
-                        title
-                    }),
-                );
+                let title = if title.is_empty() {
+                    "Chat".to_string()
+                } else {
+                    title
+                };
+                obj.insert("title".to_string(), Value::String(title.clone()));
                 let peer = js(m, &["peer_user_id", "peer_id", "peerUserId"]);
                 if !peer.is_empty() {
                     obj.insert("peerUserId".to_string(), Value::String(peer));
                 }
-                let last_message_at = jnum(m, &["last_message_at", "lastMessageAt"]);
+                let last_message_at =
+                    normalize_epoch_ms(jnum(m, &["last_message_at", "lastMessageAt"]));
                 obj.insert(
                     "lastMessageAt".to_string(),
                     Value::Float64(last_message_at),
@@ -82,6 +81,11 @@ pub async fn dispatch(
                     "mentionCount".to_string(),
                     Value::Float64(jnum(m, &["mention_count", "mentionCount"])),
                 );
+                // Support staff DM: named "Support", system flag, or is_support.
+                let is_support = jb(m, &["is_support", "isSupport", "is_system", "isSystem"])
+                    || title.eq_ignore_ascii_case("Support")
+                    || title.eq_ignore_ascii_case("HexaTalk Support");
+                obj.insert("isSupport".to_string(), Value::Boolean(is_support));
                 out.push(Value::Object(obj));
             }
             // Server order is already last_message_at DESC — keep it.
@@ -154,8 +158,45 @@ pub async fn dispatch(
             }
             ok(Value::Array(out))
         }
-        // Degradation: no support-DM bypass endpoint on the new API.
-        ("conversations", "openSupportDm") => err_msg("Not supported yet"),
+        // POST /conversations/support — real staff Support inbox.
+        // Prefer targeting the platform support account when peer is empty:
+        // resolve `staff` username, else bare POST (server default support bot).
+        ("conversations", "openSupportDm") => {
+            let mut peer = arg_str(&args, "peerUserId");
+            if peer.is_empty() {
+                // Best-effort: look up the official staff account.
+                if let Ok(resp) = c
+                    .rest(Method::GET, "/users/search?q=staff", None)
+                    .await
+                {
+                    if let Some(arr) = resp.get("users").and_then(|u| u.as_array()) {
+                        for u in arr {
+                            let uname = js(u, &["username"]);
+                            if uname.eq_ignore_ascii_case("staff")
+                                || uname.starts_with("staff")
+                            {
+                                peer = js(u, &["id", "user_id", "userId"]);
+                                if !peer.is_empty() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let body = if peer.is_empty() {
+                json!({})
+            } else {
+                json!({ "userId": peer })
+            };
+            match c
+                .rest(Method::POST, "/conversations/support", Some(body))
+                .await
+            {
+                Ok(resp) => conversation_id_result(&resp),
+                Err(err) => human_or(err),
+            }
+        }
 
         // ---------- messages ----------
         ("messages", "list") => {
@@ -225,7 +266,7 @@ pub async fn dispatch(
                 obj.insert("pinned".to_string(), Value::Boolean(true));
                 obj.insert(
                     "sentAt".to_string(),
-                    Value::Float64(jnum(m, &["sent_at", "created_at", "sentAt"])),
+                    Value::Float64(message_sent_at_ms(m)),
                 );
                 out.push(Value::Object(obj));
             }
@@ -349,16 +390,62 @@ pub async fn dispatch(
                 Err(err) => human_or(err),
             }
         }
-        // ---------- degradations (per migration table) ----------
+        // Hard-delete a soft-deleted message (staff purge in chat UI).
+        // DELETE /messages/:id?permanent=true
+        ("messages", "purge") => {
+            let message_id = arg_str(&args, "messageId");
+            if message_id.is_empty() {
+                return err_msg("Message id required");
+            }
+            match c
+                .rest(
+                    Method::DELETE,
+                    &format!("/messages/{message_id}?permanent=true"),
+                    None,
+                )
+                .await
+            {
+                Ok(_) => ok_null(),
+                Err(err) => human_or(err),
+            }
+        }
+        // Wipe every message in a conversation (owner/staff clear-history).
+        // DELETE /conversations/:id/messages?all=true → {ok:true}
+        ("messages", "clearConversation") | ("messages", "purgeAllHistory") => {
+            let conversation_id = arg_str(&args, "conversationId");
+            if conversation_id.is_empty() {
+                return err_msg("Conversation id required");
+            }
+            match c
+                .rest(
+                    Method::DELETE,
+                    &format!("/conversations/{conversation_id}/messages?all=true"),
+                    None,
+                )
+                .await
+            {
+                Ok(resp) => {
+                    // Call site parse_clear_conversation_result wants
+                    // {purged, done}. API returns {ok:true} (sometimes with
+                    // a count) — one finished batch either way.
+                    let purged = jnum(&resp, &["purged", "deleted", "count"]);
+                    let mut obj = BTreeMap::new();
+                    obj.insert("purged".to_string(), Value::Float64(purged));
+                    obj.insert("done".to_string(), Value::Boolean(true));
+                    ok(Value::Object(obj))
+                }
+                Err(err) => human_or(err),
+            }
+        }
+        // ---------- degradations ----------
         ("messages", "search") => err_msg("Search not available yet"),
-        ("messages", "purge")
-        | ("messages", "clearConversation")
-        | ("messages", "purgeAllHistory") => err_msg("Not supported yet"),
         // No edit-history endpoint — query degrades to an empty trail.
         ("messages", "listEditHistory") => ok(Value::Array(Vec::new())),
         // Uploads go through `ApiClient::upload_file` now; call sites no
         // longer call this path.
-        ("messages", "generateAttachmentUploadUrl") => err_msg("Not supported yet"),
+        ("messages", "generateAttachmentUploadUrl") => {
+            err_msg("Attachment upload is handled internally now")
+        }
 
         _ => Err(ApiError(format!("unmapped path {module}:{name}"))),
     }
@@ -539,9 +626,73 @@ fn message_value(c: &ApiClient, m: &serde_json::Value) -> Value {
     obj.insert("pinned".to_string(), Value::Boolean(jb(m, &["pinned"])));
     obj.insert(
         "sentAt".to_string(),
-        Value::Float64(jnum(m, &["sent_at", "created_at", "sentAt"])),
+        Value::Float64(message_sent_at_ms(m)),
     );
     Value::Object(obj)
+}
+
+/// Message time for the UI (`sentAt` ms epoch).
+///
+/// Prefer API fields (`sent_at` / `created_at` — number or BIGINT string).
+/// Older rows without those columns fall back to the 48-bit ms timestamp
+/// in the ULID id so bubbles never render as 1970-01-01.
+fn message_sent_at_ms(m: &serde_json::Value) -> f64 {
+    let n = jnum(
+        m,
+        &[
+            "sent_at",
+            "created_at",
+            "createdAt",
+            "sentAt",
+            "timestamp",
+            "created_at_ms",
+        ],
+    );
+    if n > 0.0 {
+        return normalize_epoch_ms(n);
+    }
+    let id = js(m, &["id", "message_id"]);
+    let from_ulid = ulid_timestamp_ms(&id) as f64;
+    if from_ulid > 0.0 {
+        return from_ulid;
+    }
+    0.0
+}
+
+/// pg BIGINTs sometimes arrive as seconds (10 digits) instead of ms (13).
+fn normalize_epoch_ms(n: f64) -> f64 {
+    if n <= 0.0 {
+        return 0.0;
+    }
+    // ~2001-09-09 in seconds … ~2286 in seconds — treat as whole seconds.
+    if n < 1e11 {
+        return (n * 1000.0).round();
+    }
+    n
+}
+
+/// Decode the millisecond timestamp from a ULID (first 10 Crockford base32
+/// characters = 48-bit Unix ms). Returns 0 if `id` is not a ULID.
+fn ulid_timestamp_ms(id: &str) -> i64 {
+    // Crockford base32 (ULID): 0123456789ABCDEFGHJKMNPQRSTVWXYZ
+    const ALPHABET: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    let id = id.trim();
+    if id.len() < 10 {
+        return 0;
+    }
+    let mut ts: u64 = 0;
+    for c in id.chars().take(10) {
+        let u = c.to_ascii_uppercase() as u8;
+        let Some(idx) = ALPHABET.iter().position(|&b| b == u) else {
+            return 0;
+        };
+        ts = (ts << 5) | (idx as u64);
+    }
+    // Guard against garbage that decodes but isn't a real message time.
+    if !(1_000_000_000_000..=10_000_000_000_000).contains(&ts) {
+        return 0;
+    }
+    ts as i64
 }
 
 /// Resolve a display URL: a direct URL field wins; otherwise a storage key

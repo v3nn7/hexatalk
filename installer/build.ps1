@@ -132,7 +132,7 @@ if (-not $SkipBuildExe) {
     Write-Host "Building HexaTalk.exe (release)..." -ForegroundColor Cyan
     Push-Location $repoRoot
     try {
-        # Bake CONVEX_URL if .env.local is present
+        # Bake API_URL / TURN_* if .env.local is present
         $envLocal = Join-Path $repoRoot ".env.local"
         if (Test-Path $envLocal) {
             Get-Content $envLocal | ForEach-Object {

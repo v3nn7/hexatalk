@@ -78,6 +78,7 @@ fn apply_full(ui: &ui::AppWindow, nasty: bool) {
                 },
                 unread: i == 2,
                 active: i == 0,
+                is_support: i == 1,
             })
             .collect::<Vec<_>>()
             .as_slice()

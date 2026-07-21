@@ -15,7 +15,10 @@ use crate::state::types::{
     ServerSummary, is_online,
 };
 use crate::ui::mentions;
-use crate::ui::utils::{format_day, format_relative_time, format_time, presence_label};
+use crate::state::types::AdminUserDetail;
+use crate::ui::utils::{
+    format_day, format_relative_time, format_time, format_time_short, presence_label,
+};
 
 pub(crate) fn hex_color(hex: &str) -> slint::Color {
     let hex = hex.trim_start_matches('#');
@@ -71,9 +74,14 @@ pub(crate) fn conversation_rows(
         .iter()
         .map(|c| ui::ConversationRow {
             id: c.conversation_id.clone().into(),
-            title: c.title.clone().into(),
+            title: if c.is_support {
+                "Support".into()
+            } else {
+                c.title.clone().into()
+            },
             unread: c.unread,
             active: active_id == Some(c.conversation_id.as_str()),
+            is_support: c.is_support,
         })
         .collect()
 }
@@ -288,6 +296,73 @@ pub(crate) fn channel_rows(
         .collect()
 }
 
+pub(crate) fn admin_detail_view(detail: Option<&AdminUserDetail>) -> ui::AdminDetailView {
+    let Some(d) = detail else {
+        return ui::AdminDetailView {
+            open: false,
+            user_id: "".into(),
+            username: "".into(),
+            display_name: "".into(),
+            role: "".into(),
+            banned: false,
+            ban_label: "".into(),
+            muted: false,
+            mute_label: "".into(),
+            online: false,
+            bio: "".into(),
+            status_message: "".into(),
+            friend_count: 0,
+            servers_label: "".into(),
+            created_label: "".into(),
+            last_seen_label: "".into(),
+        };
+    };
+    let ban_label = if d.banned {
+        if d.ban_expires_at > 0 {
+            format!("temp ban until {}", format_time_short(d.ban_expires_at))
+        } else {
+            "permanent ban".into()
+        }
+    } else {
+        "not banned".into()
+    };
+    let mute_label = if d.muted {
+        if d.mute_expires_at > 0 {
+            format!("muted until {}", format_time_short(d.mute_expires_at))
+        } else {
+            "muted".into()
+        }
+    } else {
+        "not muted".into()
+    };
+    ui::AdminDetailView {
+        open: true,
+        user_id: d.user_id.clone().into(),
+        username: d.username.clone().into(),
+        display_name: d.display_name.clone().into(),
+        role: d.role.clone().into(),
+        banned: d.banned,
+        ban_label: ban_label.into(),
+        muted: d.muted,
+        mute_label: mute_label.into(),
+        online: d.online,
+        bio: d.bio.clone().into(),
+        status_message: d.status_message.clone().into(),
+        friend_count: d.friend_count as i32,
+        servers_label: if d.server_names.is_empty() {
+            "—".into()
+        } else {
+            d.server_names.join(", ").into()
+        },
+        created_label: format_time_short(d.created_at).into(),
+        last_seen_label: if d.last_seen_at > 0 {
+            format_time_short(d.last_seen_at).into()
+        } else {
+            "—".into()
+        },
+    }
+}
+
 pub(crate) fn admin_user_rows(
     admin_users: &[AdminUserRow],
     search_input: &str,
@@ -303,11 +378,39 @@ pub(crate) fn admin_user_rows(
         })
         .map(|u| {
             let role_locked = u.role == "owner" || u.username == my_username;
-            let status_line = if u.banned {
-                format!("{} · banned", u.role)
+            let mut status_line = if u.banned {
+                if u.ban_expires_at > 0 {
+                    format!(
+                        "{} · temp ban · until {}",
+                        u.role,
+                        format_time_short(u.ban_expires_at)
+                    )
+                } else {
+                    format!("{} · permanent ban", u.role)
+                }
             } else {
                 u.role.clone()
             };
+            if u.muted {
+                if u.mute_expires_at > 0 {
+                    status_line.push_str(&format!(
+                        " · muted until {}",
+                        format_time_short(u.mute_expires_at)
+                    ));
+                } else {
+                    status_line.push_str(" · muted");
+                }
+            }
+            if u.plus_active {
+                if u.plus_expires_at > 0 {
+                    status_line.push_str(&format!(
+                        " · PLUS until {}",
+                        format_time_short(u.plus_expires_at)
+                    ));
+                } else {
+                    status_line.push_str(" · PLUS");
+                }
+            }
             let (badge_text, badge_bg, badge_fg) = badge_for_platform_role(&u.role);
             ui::AdminUserRow {
                 user_id: u.user_id.clone().into(),
@@ -315,6 +418,8 @@ pub(crate) fn admin_user_rows(
                 display_name: u.display_name.clone().into(),
                 role: u.role.clone().into(),
                 banned: u.banned,
+                muted: u.muted,
+                plus_active: u.plus_active,
                 role_locked,
                 status_line: status_line.into(),
                 badge_text,

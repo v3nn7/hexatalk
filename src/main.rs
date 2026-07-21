@@ -25,7 +25,10 @@ use crate::state::types::{
     ResizePanel, ServerMemberRow, ServerRoleRow, ServerSettingsCategory, ServerSummary, Session,
     SettingsCategory, SidebarTab, SocialStats, VoiceUserRow, is_online,
 };
-use crate::ui::utils::{friend_request_privacy_label, presence_label, typing_label};
+use crate::ui::utils::{
+    friend_request_privacy_label, normalize_presence, presence_is_online_like, presence_label,
+    typing_label,
+};
 use crate::ui::viewmodel;
 use crate::update_check::CURRENT_APP_VERSION;
 use std::env;
@@ -410,19 +413,32 @@ async fn run_pump(
     sync_ui(&app, &ui_weak);
 
     while let Some(message) = rx.recv().await {
-        // Tick/HeartbeatFinished fire every few seconds for the whole app
-        // lifetime and, aside from clearing an expired toast, never touch
-        // any UI-visible state -- skip the full resync (property writes +
-        // repaint + accessibility tree rebuild) when that holds.
-        let is_pure_heartbeat = matches!(message, Message::Tick | Message::HeartbeatFinished);
+        // Tick/HeartbeatFinished fire every few seconds. They used to be
+        // UI-noop except toast expiry — now Tick also refreshes detected
+        // app activity (profile + settings Privacy panel), so we resync
+        // when those surfaces need it.
+        let is_heartbeat = matches!(message, Message::Tick | Message::HeartbeatFinished);
         let toast_before = app.toast.is_some();
+        let activity_before = app.current_activity.clone();
+        let was_tick = matches!(message, Message::Tick);
 
         let task = app.update(message);
         task.spawn(&tx);
         registry.reconcile(app.subscription(tx.clone()));
         apply_window_action(&mut app, &ui_weak);
 
-        if !is_pure_heartbeat || app.toast.is_some() != toast_before {
+        let activity_changed = was_tick && app.current_activity != activity_before;
+        let need_activity_ui = was_tick
+            && (app.settings_open
+                || app
+                    .viewing_profile
+                    .as_ref()
+                    .is_some_and(|p| app.session.as_ref().is_some_and(|s| s.user_id == p.user_id)));
+        if !is_heartbeat
+            || app.toast.is_some() != toast_before
+            || activity_changed
+            || need_activity_ui
+        {
             sync_ui(&app, &ui_weak);
         }
     }
@@ -572,6 +588,8 @@ struct SettingsRaw {
     ping_status: Option<String>,
     plus_busy_status: Option<String>,
     plus_checkout_busy: bool,
+    share_activity: bool,
+    current_activity: String,
 }
 
 struct ProfileRaw {
@@ -632,7 +650,13 @@ struct ChatRaw {
     admin_stats: Option<crate::state::types::AdminStats>,
     admin_reports: Vec<crate::state::types::MessageReport>,
     admin_reports_status: Option<String>,
+    admin_ban_reason: String,
+    admin_reports_filter: String,
+    admin_custom_days: String,
+    admin_user_detail: Option<crate::state::types::AdminUserDetail>,
     reporting_message_id: Option<String>,
+    new_channel_category_id: Option<String>,
+    server_categories: Vec<crate::state::types::CategorySummary>,
     active_conversation: Option<String>,
     active_conversation_kind: Option<String>,
     active_conversation_peer_id: Option<String>,
@@ -763,6 +787,8 @@ impl UiSnapshot {
             ping_status: app.ping_status.clone(),
             plus_busy_status: app.plus_busy_status.clone(),
             plus_checkout_busy: app.plus_checkout_busy,
+            share_activity: app.share_activity,
+            current_activity: app.current_activity.clone(),
         });
         let profile = app.session.as_ref().map(|session| ProfileRaw {
             avatar_url: app
@@ -829,6 +855,8 @@ impl UiSnapshot {
             new_channel_open: app.new_channel_open,
             new_channel_name_input: app.new_channel_name_input.clone(),
             new_channel_is_voice: app.new_channel_is_voice,
+            new_channel_category_id: app.new_channel_category_id.clone(),
+            server_categories: app.server_categories.clone(),
             my_server_permissions: app.my_server_permissions,
             admin_search_input: app.admin_search_input.clone(),
             admin_status: app.admin_status.clone(),
@@ -836,6 +864,10 @@ impl UiSnapshot {
             admin_stats: app.admin_stats.clone(),
             admin_reports: app.admin_reports.clone(),
             admin_reports_status: app.admin_reports_status.clone(),
+            admin_ban_reason: app.admin_ban_reason.clone(),
+            admin_reports_filter: app.admin_reports_filter.clone(),
+            admin_custom_days: app.admin_custom_days.clone(),
+            admin_user_detail: app.admin_user_detail.clone(),
             reporting_message_id: app.reporting_message_id.clone(),
             active_conversation: app.active_conversation.clone(),
             active_conversation_kind: app.active_conversation_kind.clone(),
@@ -1330,6 +1362,8 @@ fn apply_settings(
     ui.set_settings_my_badge_fg(badge_fg);
     ui.set_settings_store_chat_history(session.store_chat_history);
     ui.set_settings_hide_online_status(session.hide_online_status);
+    ui.set_settings_share_activity(s.share_activity);
+    ui.set_settings_current_activity(s.current_activity.clone().into());
     ui.set_settings_friends_only_dms(session.friends_only_dms);
     ui.set_settings_discoverable(session.discoverable);
     ui.set_settings_friend_request_privacy_label(
@@ -1435,8 +1469,15 @@ fn apply_profile(
     ui.set_profile_initial(viewmodel::initial(&profile.display_name));
     ui.set_profile_avatar_color(viewmodel::hex_color(&profile.avatar_color));
     ui.set_profile_photo(img_cache::image_for(cache, &p.avatar_url).unwrap_or_default());
-    ui.set_profile_online(is_online(profile.last_seen_at));
+    let presence = normalize_presence(&profile.presence, profile.last_seen_at);
+    let online_like = presence_is_online_like(&presence, profile.last_seen_at);
+    ui.set_profile_online(online_like && presence == "online");
+    ui.set_profile_idle(presence == "idle");
+    ui.set_profile_dnd(presence == "dnd");
+    ui.set_profile_presence_label(presence_label(&presence).into());
     ui.set_profile_status_message(profile.status_message.clone().into());
+    ui.set_profile_activity(profile.activity.clone().into());
+    ui.set_profile_activity_icon(profile.activity_icon.clone().into());
     ui.set_profile_bio(profile.bio.clone().into());
     ui.set_profile_is_staff(profile.is_staff);
     ui.set_profile_is_plus(profile.plus_active);
@@ -1882,6 +1923,18 @@ fn apply_chat(
     ui.set_chat_new_channel_open(c.new_channel_open);
     ui.set_chat_new_channel_name(c.new_channel_name_input.clone().into());
     ui.set_chat_new_channel_is_voice(c.new_channel_is_voice);
+    let sel_cat = c.new_channel_category_id.clone().unwrap_or_default();
+    ui.set_chat_new_channel_category_id(sel_cat.clone().into());
+    let cat_rows: Vec<slint_ui::CategoryPickRow> = c
+        .server_categories
+        .iter()
+        .map(|cat| slint_ui::CategoryPickRow {
+            category_id: cat.category_id.clone().into(),
+            name: cat.name.clone().into(),
+            selected: cat.category_id == sel_cat,
+        })
+        .collect();
+    ui.set_chat_new_channel_categories(cat_rows.as_slice().into());
     set_rows_if_changed(
         &TEXT_CHANNEL_ROWS_CACHE,
         viewmodel::channel_rows(&c.channels, c.active_conversation.as_deref(), false),
@@ -1910,6 +1963,10 @@ fn apply_chat(
     ui.set_chat_admin_servers(stats.servers as i32);
     ui.set_chat_admin_reports(viewmodel::report_rows(&c.admin_reports).as_slice().into());
     ui.set_chat_admin_reports_status(c.admin_reports_status.clone().unwrap_or_default().into());
+    ui.set_chat_admin_ban_reason(c.admin_ban_reason.clone().into());
+    ui.set_chat_admin_reports_filter(c.admin_reports_filter.clone().into());
+    ui.set_chat_admin_custom_days(c.admin_custom_days.clone().into());
+    ui.set_chat_admin_detail(viewmodel::admin_detail_view(c.admin_user_detail.as_ref()));
     ui.set_chat_is_admin(session.is_admin);
     ui.set_chat_my_display_name(session.display_name.clone().into());
     ui.set_chat_my_initial(viewmodel::initial(&session.display_name));
@@ -2641,6 +2698,10 @@ fn wire_chat_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Message>) 
         on_chat_open_admin,
         Message::SidebarTabChanged(SidebarTab::Admin)
     );
+    on0!(
+        on_chat_close_admin,
+        Message::SidebarTabChanged(SidebarTab::Chats)
+    );
 
     // ---- Sidebar: add-server / join-server ----
     on1!(on_chat_new_server_name_changed, |t: slint::SharedString| {
@@ -2763,8 +2824,82 @@ fn wire_chat_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Message>) 
         }
     );
     on2!(
-        on_chat_admin_set_banned,
-        |id: slint::SharedString, banned: bool| { Message::AdminSetBanned(id.to_string(), banned) }
+        on_chat_admin_ban,
+        |id: slint::SharedString, hours: i32| {
+            Message::AdminSetBanned {
+                user_id: id.to_string(),
+                banned: true,
+                duration_hours: if hours > 0 {
+                    Some(hours as u32)
+                } else {
+                    None
+                },
+            }
+        }
+    );
+    on1!(on_chat_admin_unban, |id: slint::SharedString| {
+        Message::AdminSetBanned {
+            user_id: id.to_string(),
+            banned: false,
+            duration_hours: None,
+        }
+    });
+    on2!(
+        on_chat_admin_mute,
+        |id: slint::SharedString, hours: i32| {
+            Message::AdminSetMuted {
+                user_id: id.to_string(),
+                muted: true,
+                duration_hours: if hours > 0 {
+                    Some(hours as u32)
+                } else {
+                    None
+                },
+            }
+        }
+    );
+    on1!(on_chat_admin_unmute, |id: slint::SharedString| {
+        Message::AdminSetMuted {
+            user_id: id.to_string(),
+            muted: false,
+            duration_hours: None,
+        }
+    });
+    on1!(on_chat_admin_ban_reason_changed, |t: slint::SharedString| {
+        Message::AdminBanReasonChanged(t.to_string())
+    });
+    on1!(
+        on_chat_admin_reports_filter_changed,
+        |t: slint::SharedString| Message::AdminReportsFilterChanged(t.to_string())
+    );
+    on1!(on_chat_admin_open_user_detail, |id: slint::SharedString| {
+        Message::ToggleAdminUserDetail(id.to_string())
+    });
+    on0!(on_chat_admin_close_user_detail, Message::CloseAdminUserDetail);
+    on1!(on_chat_admin_custom_days_changed, |t: slint::SharedString| {
+        Message::AdminCustomDaysChanged(t.to_string())
+    });
+    on1!(on_chat_admin_ban_custom_days, |id: slint::SharedString| {
+        Message::AdminBanCustomDays(id.to_string())
+    });
+    on1!(on_chat_admin_mute_custom_days, |id: slint::SharedString| {
+        Message::AdminMuteCustomDays(id.to_string())
+    });
+    on2!(
+        on_chat_admin_grant_plus,
+        |id: slint::SharedString, days: i32| {
+            Message::AdminGrantPlus {
+                user_id: id.to_string(),
+                days: days.max(1) as u32,
+            }
+        }
+    );
+    on1!(on_chat_admin_revoke_plus, |id: slint::SharedString| {
+        Message::AdminRevokePlus(id.to_string())
+    });
+    on1!(
+        on_chat_new_channel_category_changed,
+        |id: slint::SharedString| Message::NewChannelCategoryChanged(id.to_string())
     );
     on2!(
         on_chat_admin_resolve_report,
@@ -3005,6 +3140,7 @@ fn wire_settings_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Messag
         Message::ToggleStoreHistoryGlobal
     );
     on0!(on_settings_toggle_hide_online, Message::ToggleHideOnline);
+    on0!(on_settings_toggle_share_activity, Message::ToggleShareActivity);
     on0!(
         on_settings_toggle_friends_only_dms,
         Message::ToggleFriendsOnlyDms
@@ -3168,6 +3304,18 @@ fn wire_server_settings_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender
     );
     on1!(on_ss_kick_member, |id: slint::SharedString| {
         Message::KickMember(id.to_string())
+    });
+    on2!(
+        on_ss_mute_member,
+        |id: slint::SharedString, hours: i32| {
+            Message::MuteServerMember {
+                user_id: id.to_string(),
+                duration_hours: hours.max(1) as u32,
+            }
+        }
+    );
+    on1!(on_ss_unmute_member, |id: slint::SharedString| {
+        Message::UnmuteServerMember(id.to_string())
     });
     on1!(on_ss_open_profile, |id: slint::SharedString| {
         Message::OpenProfile(id.to_string())

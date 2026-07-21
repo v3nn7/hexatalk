@@ -1,0 +1,658 @@
+// Full-window Admin console: dimmed backdrop + large centered panel
+// (stats, reports queue, user management). Opened from the rail Admin
+// button; closed via the header Close control or Escape (Rust).
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { TextInputField, SecondaryButton } from "widgets.slint";
+import { SmallButton } from "sidebar.slint";
+import { AdminUserRow, ReportRow, AdminDetailView } from "chat_types.slint";
+
+component AdminStatCard inherits Rectangle {
+    in property <string> label;
+    in property <int> value: 0;
+    in property <color> accent: Theme.accent;
+    min-width: 96px;
+    height: 72px;
+    background: Theme.bg-tertiary;
+    border-radius: Theme.radius-md;
+    border-width: 1px;
+    border-color: Theme.border-hairline;
+    // Left accent bar
+    Rectangle {
+        x: 0; y: 10px; width: 3px; height: parent.height - 20px;
+        border-radius: 2px;
+        background: root.accent;
+    }
+    VerticalLayout {
+        padding-left: 14px;
+        padding-right: 12px;
+        padding-top: 12px;
+        padding-bottom: 10px;
+        spacing: 4px;
+        Text {
+            text: root.label;
+            color: Theme.text-muted;
+            font-size: Theme.text-xs;
+            font-family: Theme.font-medium;
+            letter-spacing: 0.8px;
+        }
+        Text {
+            text: root.value;
+            color: Theme.text-primary;
+            font-size: 22px;
+            font-family: Theme.font-medium;
+        }
+    }
+}
+
+component PanelSection inherits Rectangle {
+    in property <string> title;
+    background: Theme.bg-secondary;
+    border-width: 1px;
+    border-color: Theme.border;
+    border-radius: Theme.radius-md;
+    clip: true;
+    VerticalLayout {
+        padding: 14px;
+        spacing: 10px;
+        Text {
+            text: root.title;
+            font-size: Theme.text-md;
+            font-family: Theme.font-medium;
+            color: Theme.text-primary;
+        }
+        @children
+    }
+}
+
+export component AdminPanel inherits Rectangle {
+    // Full-window host (caller sizes to window)
+    background: #00000099;
+
+    in-out property <string> admin_search;
+    in property <string> admin_status;
+    in property <[AdminUserRow]> admin_users: [];
+    in property <bool> is_admin: false;
+    in property <int> admin_total_users: 0;
+    in property <int> admin_online: 0;
+    in property <int> admin_staff: 0;
+    in property <int> admin_banned: 0;
+    in property <int> admin_bots: 0;
+    in property <int> admin_servers: 0;
+    in property <[ReportRow]> admin_reports: [];
+    in property <string> admin_reports_status;
+    in-out property <string> admin_ban_reason;
+    in property <string> admin_reports_filter: "pending";
+    in-out property <string> admin_custom_days;
+    in property <AdminDetailView> admin_detail;
+
+    callback close();
+    callback admin_search_changed(string);
+    callback admin_set_role(string, string);
+    // duration_hours: 0 = permanent ban; >0 = temporary ban length.
+    // For unban use admin_unban.
+    callback admin_ban(string, int);
+    callback admin_unban(string);
+    // Temporary platform mute only (hours > 0). Unmute via admin_unmute.
+    callback admin_mute(string, int);
+    callback admin_unmute(string);
+    callback admin_resolve_report(string, string);
+    callback admin_ban_reason_changed(string);
+    callback admin_reports_filter_changed(string);
+    callback admin_open_user_detail(string);
+    callback admin_close_user_detail();
+    callback admin_custom_days_changed(string);
+    callback admin_ban_custom_days(string);
+    callback admin_mute_custom_days(string);
+    // Gift Plus (API hard-caps at 30 days / 1 month).
+    callback admin_grant_plus(string, int);
+    callback admin_revoke_plus(string);
+
+    // Click dimmed backdrop to close
+    TouchArea {
+        width: 100%; height: 100%;
+        clicked => { root.close(); }
+    }
+
+    // Centered console
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: min(1120px, parent.width - 40px);
+        height: min(760px, parent.height - 40px);
+        background: Theme.bg-primary;
+        border-width: 1px;
+        border-color: Theme.border-strong;
+        border-radius: Theme.radius-lg;
+        drop-shadow-blur: 32px;
+        drop-shadow-offset-y: 12px;
+        drop-shadow-color: #000000aa;
+        // Swallow clicks so backdrop close doesn't fire when clicking the panel
+        TouchArea { }
+
+        VerticalLayout {
+            padding: 0px;
+            spacing: 0px;
+
+            // ---- Header ----
+            Rectangle {
+                height: 56px;
+                background: Theme.bg-secondary;
+                border-radius: Theme.radius-lg;
+                // Only round top corners visually via clip on parent
+                HorizontalLayout {
+                    padding-left: 20px;
+                    padding-right: 16px;
+                    spacing: 12px;
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 2px;
+                        horizontal-stretch: 1;
+                        Text {
+                            text: "Admin console";
+                            font-size: 16px;
+                            font-family: Theme.font-medium;
+                            color: Theme.text-bright;
+                        }
+                        Text {
+                            text: "Platform users, staff actions, and report queue";
+                            font-size: 11px;
+                            color: Theme.text-muted;
+                        }
+                    }
+                    SecondaryButton {
+                        text: "Close";
+                        clicked => { root.close(); }
+                    }
+                }
+                // Bottom hairline
+                Rectangle {
+                    y: parent.height - 1px;
+                    width: 100%; height: 1px;
+                    background: Theme.border-hairline;
+                }
+            }
+
+            // ---- Body ----
+            VerticalLayout {
+                padding: 18px;
+                spacing: 14px;
+                vertical-stretch: 1;
+
+                // Stats strip
+                HorizontalLayout {
+                    spacing: 10px;
+                    AdminStatCard { label: "USERS"; value: root.admin_total_users; accent: Theme.accent; horizontal-stretch: 1; }
+                    AdminStatCard { label: "ONLINE"; value: root.admin_online; accent: Theme.online; horizontal-stretch: 1; }
+                    AdminStatCard { label: "STAFF"; value: root.admin_staff; accent: Theme.accent-hover; horizontal-stretch: 1; }
+                    AdminStatCard { label: "BANNED"; value: root.admin_banned; accent: Theme.dnd; horizontal-stretch: 1; }
+                    AdminStatCard { label: "BOTS"; value: root.admin_bots; accent: Theme.idle; horizontal-stretch: 1; }
+                    AdminStatCard { label: "SERVERS"; value: root.admin_servers; accent: Theme.text-link; horizontal-stretch: 1; }
+                }
+
+                if root.admin_status != "": Text {
+                    text: root.admin_status;
+                    font-size: 12px;
+                    color: Theme.warning;
+                    wrap: word-wrap;
+                }
+
+                // Two columns: reports | users
+                HorizontalLayout {
+                    spacing: 14px;
+                    vertical-stretch: 1;
+
+                    // ---- Reports ----
+                    PanelSection {
+                        title: root.admin_reports.length > 0
+                            ? "Reports (\{root.admin_reports.length})"
+                            : "Reports";
+                        horizontal-stretch: 1;
+                        vertical-stretch: 1;
+                        HorizontalLayout {
+                            spacing: 6px;
+                            SmallButton {
+                                text: "Pending";
+                                bg: root.admin_reports_filter == "pending" ? Theme.accent-soft : Theme.bg-tertiary;
+                                clicked => { root.admin_reports_filter_changed("pending"); }
+                            }
+                            SmallButton {
+                                text: "Actioned";
+                                bg: root.admin_reports_filter == "actioned" ? Theme.accent-soft : Theme.bg-tertiary;
+                                clicked => { root.admin_reports_filter_changed("actioned"); }
+                            }
+                            SmallButton {
+                                text: "Dismissed";
+                                bg: root.admin_reports_filter == "dismissed" ? Theme.accent-soft : Theme.bg-tertiary;
+                                clicked => { root.admin_reports_filter_changed("dismissed"); }
+                            }
+                        }
+                        if root.admin_reports_status != "": Text {
+                            text: root.admin_reports_status;
+                            font-size: 11px;
+                            color: Theme.text-muted;
+                        }
+                        if root.admin_reports.length == 0: Rectangle {
+                            vertical-stretch: 1;
+                            background: Theme.bg-tertiary;
+                            border-radius: Theme.radius-sm;
+                            Text {
+                                width: 100%; height: 100%;
+                                text: "No pending reports.";
+                                font-size: Theme.text-md;
+                                color: Theme.text-muted;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                        if root.admin_reports.length > 0: ListView {
+                            vertical-stretch: 1;
+                            for r in root.admin_reports: Rectangle {
+                                background: Theme.bg-tertiary;
+                                border-width: 1px;
+                                border-color: Theme.border;
+                                border-radius: Theme.radius-sm;
+                                height: report_col.preferred-height + 16px;
+                                report_col := VerticalLayout {
+                                    x: 10px;
+                                    width: parent.width - 20px;
+                                    y: 8px;
+                                    spacing: 4px;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Rectangle {
+                                            height: 18px;
+                                            width: reason_lbl.preferred-width + 10px;
+                                            background: Theme.warning-soft;
+                                            border-radius: Theme.radius-sm;
+                                            reason_lbl := Text {
+                                                text: r.reason;
+                                                font-size: 10px;
+                                                font-family: Theme.font-medium;
+                                                color: Theme.warning;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                        Text {
+                                            text: r.age_label;
+                                            font-size: 10px;
+                                            color: Theme.text-muted;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                            horizontal-alignment: right;
+                                        }
+                                    }
+                                    Text {
+                                        text: "\{r.reporter_username} → \{r.author_username}";
+                                        font-size: 11px;
+                                        color: Theme.text-muted;
+                                        wrap: word-wrap;
+                                    }
+                                    Text {
+                                        text: r.conversation_label;
+                                        font-size: 10px;
+                                        color: Theme.text-link;
+                                    }
+                                    Text {
+                                        text: r.message_body;
+                                        font-size: 13px;
+                                        color: Theme.text-primary;
+                                        wrap: word-wrap;
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        SmallButton {
+                                            text: "Delete msg";
+                                            bg: Theme.danger-soft;
+                                            fg: Theme.danger;
+                                            clicked => { root.admin_resolve_report(r.report_id, "delete_message"); }
+                                        }
+                                        SmallButton {
+                                            text: "Ban author";
+                                            bg: Theme.danger-soft;
+                                            fg: Theme.danger;
+                                            clicked => { root.admin_resolve_report(r.report_id, "ban_author"); }
+                                        }
+                                        SmallButton {
+                                            text: "Dismiss";
+                                            clicked => { root.admin_resolve_report(r.report_id, "dismiss"); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ---- Users ----
+                    PanelSection {
+                        title: "Users";
+                        horizontal-stretch: 1.25;
+                        vertical-stretch: 1;
+                        TextInputField {
+                            placeholder: "Search users…";
+                            value <=> root.admin_search;
+                            edited(t) => { root.admin_search_changed(t); }
+                        }
+                        TextInputField {
+                            placeholder: "Ban / mute reason (optional)…";
+                            value <=> root.admin_ban_reason;
+                            edited(t) => { root.admin_ban_reason_changed(t); }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text {
+                                text: "Custom days:";
+                                font-size: 11px;
+                                color: Theme.text-muted;
+                                vertical-alignment: center;
+                            }
+                            TextInputField {
+                                placeholder: "e.g. 3";
+                                value <=> root.admin_custom_days;
+                                edited(t) => { root.admin_custom_days_changed(t); }
+                                horizontal-stretch: 1;
+                            }
+                        }
+                        if root.admin_users.length == 0: Rectangle {
+                            vertical-stretch: 1;
+                            background: Theme.bg-tertiary;
+                            border-radius: Theme.radius-sm;
+                            Text {
+                                width: 100%; height: 100%;
+                                text: "No users match your search.";
+                                font-size: Theme.text-md;
+                                color: Theme.text-muted;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                        if root.admin_users.length > 0: ListView {
+                            vertical-stretch: 1;
+                            for u in root.admin_users: Rectangle {
+                                height: user_col.preferred-height + 14px;
+                                background: Theme.bg-tertiary;
+                                border-width: 1px;
+                                border-color: Theme.border;
+                                border-radius: Theme.radius-sm;
+                                TouchArea {
+                                    mouse-cursor: MouseCursor.pointer;
+                                    clicked => { root.admin_open_user_detail(u.user_id); }
+                                }
+                                user_col := VerticalLayout {
+                                    x: 10px;
+                                    width: parent.width - 20px;
+                                    y: 7px;
+                                    spacing: 6px;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Text {
+                                            text: "\{u.display_name} (@\{u.username})";
+                                            font-size: 13px;
+                                            font-family: Theme.font-medium;
+                                            color: Theme.text-primary;
+                                            horizontal-stretch: 1;
+                                            overflow: elide;
+                                        }
+                                        if u.badge_text != "": Rectangle {
+                                            background: u.badge_bg;
+                                            height: 18px;
+                                            border-radius: Theme.radius-sm;
+                                            width: admin-badge.preferred-width + 10px;
+                                            admin-badge := Text {
+                                                text: u.badge_text;
+                                                font-size: 9px;
+                                                font-family: Theme.font-medium;
+                                                color: u.badge_fg;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                    Text {
+                                        text: u.status_line;
+                                        font-size: 11px;
+                                        color: Theme.text-muted;
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        if root.is_admin && !u.role_locked: SmallButton {
+                                            text: "User";
+                                            clicked => { root.admin_set_role(u.user_id, "user"); }
+                                        }
+                                        if root.is_admin && !u.role_locked: SmallButton {
+                                            text: "Mod";
+                                            clicked => { root.admin_set_role(u.user_id, "moderator"); }
+                                        }
+                                        if root.is_admin && !u.role_locked: SmallButton {
+                                            text: "Admin";
+                                            bg: Theme.accent-soft;
+                                            clicked => { root.admin_set_role(u.user_id, "admin"); }
+                                        }
+                                        // Bans: temp presets + permanent. IP bans are applied by the API.
+                                        if !u.role_locked && !u.banned: SmallButton {
+                                            text: "1h";
+                                            bg: Theme.warning-soft;
+                                            fg: Theme.warning;
+                                            clicked => { root.admin_ban(u.user_id, 1); }
+                                        }
+                                        if !u.role_locked && !u.banned: SmallButton {
+                                            text: "24h";
+                                            bg: Theme.warning-soft;
+                                            fg: Theme.warning;
+                                            clicked => { root.admin_ban(u.user_id, 24); }
+                                        }
+                                        if !u.role_locked && !u.banned: SmallButton {
+                                            text: "7d";
+                                            bg: Theme.warning-soft;
+                                            fg: Theme.warning;
+                                            clicked => { root.admin_ban(u.user_id, 168); }
+                                        }
+                                        if !u.role_locked && !u.banned: SmallButton {
+                                            text: "Ban Nd";
+                                            bg: Theme.warning-soft;
+                                            fg: Theme.warning;
+                                            clicked => { root.admin_ban_custom_days(u.user_id); }
+                                        }
+                                        if !u.role_locked && !u.banned: SmallButton {
+                                            text: "Perma";
+                                            bg: Theme.danger-soft;
+                                            fg: Theme.danger;
+                                            clicked => { root.admin_ban(u.user_id, 0); }
+                                        }
+                                        if !u.role_locked && u.banned: SmallButton {
+                                            text: "Unban";
+                                            bg: Theme.accent-soft;
+                                            clicked => { root.admin_unban(u.user_id); }
+                                        }
+                                        // Platform mute is temporary only.
+                                        if !u.role_locked && !u.muted: SmallButton {
+                                            text: "Mute 1h";
+                                            bg: Theme.warning-soft;
+                                            fg: Theme.warning;
+                                            clicked => { root.admin_mute(u.user_id, 1); }
+                                        }
+                                        if !u.role_locked && !u.muted: SmallButton {
+                                            text: "Mute 24h";
+                                            bg: Theme.warning-soft;
+                                            fg: Theme.warning;
+                                            clicked => { root.admin_mute(u.user_id, 24); }
+                                        }
+                                        if !u.role_locked && !u.muted: SmallButton {
+                                            text: "Mute 7d";
+                                            bg: Theme.warning-soft;
+                                            fg: Theme.warning;
+                                            clicked => { root.admin_mute(u.user_id, 168); }
+                                        }
+                                        if !u.role_locked && !u.muted: SmallButton {
+                                            text: "Mute Nd";
+                                            bg: Theme.warning-soft;
+                                            fg: Theme.warning;
+                                            clicked => { root.admin_mute_custom_days(u.user_id); }
+                                        }
+                                        if !u.role_locked && u.muted: SmallButton {
+                                            text: "Unmute";
+                                            bg: Theme.accent-soft;
+                                            clicked => { root.admin_unmute(u.user_id); }
+                                        }
+                                        // Plus gift — API max 30 days (1 month).
+                                        if root.is_admin && !u.role_locked && !u.plus_active: SmallButton {
+                                            text: "Plus 7d";
+                                            bg: Theme.plus.transparentize(0.75);
+                                            fg: Theme.plus;
+                                            clicked => { root.admin_grant_plus(u.user_id, 7); }
+                                        }
+                                        if root.is_admin && !u.role_locked && !u.plus_active: SmallButton {
+                                            text: "Plus 30d";
+                                            bg: Theme.plus;
+                                            fg: Theme.plus-foreground;
+                                            clicked => { root.admin_grant_plus(u.user_id, 30); }
+                                        }
+                                        if root.is_admin && !u.role_locked && u.plus_active: SmallButton {
+                                            text: "Revoke Plus";
+                                            bg: Theme.warning-soft;
+                                            fg: Theme.warning;
+                                            clicked => { root.admin_revoke_plus(u.user_id); }
+                                        }
+                                        if u.role_locked: Text {
+                                            text: "rank locked";
+                                            font-size: Theme.text-xs;
+                                            color: Theme.warning;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- User detail drawer (right slide-over) ----
+        if root.admin_detail.open: Rectangle {
+            x: 0; y: 0;
+            width: 100%; height: 100%;
+            background: #00000055;
+            TouchArea { clicked => { root.admin_close_user_detail(); } }
+            Rectangle {
+                x: parent.width - self.width - 16px;
+                y: 16px;
+                width: min(360px, parent.width - 32px);
+                height: parent.height - 32px;
+                background: Theme.bg-elevated;
+                border-width: 1px;
+                border-color: Theme.border-strong;
+                border-radius: Theme.radius-md;
+                drop-shadow-blur: 24px;
+                drop-shadow-color: #00000088;
+                TouchArea { }
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 10px;
+                    HorizontalLayout {
+                        Text {
+                            text: "User detail";
+                            font-size: 15px;
+                            font-family: Theme.font-medium;
+                            color: Theme.text-bright;
+                            horizontal-stretch: 1;
+                        }
+                        SmallButton { text: "Close"; clicked => { root.admin_close_user_detail(); } }
+                    }
+                    Text {
+                        text: root.admin_detail.display_name;
+                        font-size: 18px;
+                        font-family: Theme.font-medium;
+                        color: Theme.text-primary;
+                    }
+                    Text {
+                        text: "@" + root.admin_detail.username + " · " + root.admin_detail.role;
+                        font-size: 12px;
+                        color: Theme.text-muted;
+                    }
+                    Rectangle { height: 1px; background: Theme.border-hairline; }
+                    Text { text: "Status"; font-size: 10px; font-family: Theme.font-medium; color: Theme.text-muted; letter-spacing: 0.8px; }
+                    Text {
+                        text: (root.admin_detail.online ? "Online" : "Offline")
+                            + " · " + root.admin_detail.ban_label
+                            + " · " + root.admin_detail.mute_label;
+                        font-size: 13px;
+                        color: Theme.text-primary;
+                        wrap: word-wrap;
+                    }
+                    Text { text: "Friends"; font-size: 10px; font-family: Theme.font-medium; color: Theme.text-muted; letter-spacing: 0.8px; }
+                    Text { text: root.admin_detail.friend_count; font-size: 13px; color: Theme.text-primary; }
+                    Text { text: "Servers"; font-size: 10px; font-family: Theme.font-medium; color: Theme.text-muted; letter-spacing: 0.8px; }
+                    Text {
+                        text: root.admin_detail.servers_label == "" ? "—" : root.admin_detail.servers_label;
+                        font-size: 13px;
+                        color: Theme.text-primary;
+                        wrap: word-wrap;
+                    }
+                    Text { text: "Bio"; font-size: 10px; font-family: Theme.font-medium; color: Theme.text-muted; letter-spacing: 0.8px; }
+                    Text {
+                        text: root.admin_detail.bio == "" ? "—" : root.admin_detail.bio;
+                        font-size: 13px;
+                        color: Theme.text-primary;
+                        wrap: word-wrap;
+                    }
+                    Text { text: "Status message"; font-size: 10px; font-family: Theme.font-medium; color: Theme.text-muted; letter-spacing: 0.8px; }
+                    Text {
+                        text: root.admin_detail.status_message == "" ? "—" : root.admin_detail.status_message;
+                        font-size: 13px;
+                        color: Theme.text-primary;
+                        wrap: word-wrap;
+                    }
+                    Text { text: "Created"; font-size: 10px; font-family: Theme.font-medium; color: Theme.text-muted; letter-spacing: 0.8px; }
+                    Text { text: root.admin_detail.created_label; font-size: 13px; color: Theme.text-primary; }
+                    Text { text: "Last seen"; font-size: 10px; font-family: Theme.font-medium; color: Theme.text-muted; letter-spacing: 0.8px; }
+                    Text { text: root.admin_detail.last_seen_label; font-size: 13px; color: Theme.text-primary; }
+                    Rectangle { vertical-stretch: 1; }
+                    if !root.admin_detail.banned: HorizontalLayout {
+                        spacing: 6px;
+                        SmallButton { text: "Ban 7d"; bg: Theme.warning-soft; fg: Theme.warning; clicked => { root.admin_ban(root.admin_detail.user_id, 168); } }
+                        SmallButton { text: "Ban Nd"; bg: Theme.warning-soft; fg: Theme.warning; clicked => { root.admin_ban_custom_days(root.admin_detail.user_id); } }
+                        SmallButton { text: "Perma"; bg: Theme.danger-soft; fg: Theme.danger; clicked => { root.admin_ban(root.admin_detail.user_id, 0); } }
+                    }
+                    if root.admin_detail.banned: SmallButton {
+                        text: "Unban";
+                        bg: Theme.accent-soft;
+                        clicked => { root.admin_unban(root.admin_detail.user_id); }
+                    }
+                    if !root.admin_detail.muted: HorizontalLayout {
+                        spacing: 6px;
+                        SmallButton { text: "Mute 24h"; bg: Theme.warning-soft; fg: Theme.warning; clicked => { root.admin_mute(root.admin_detail.user_id, 24); } }
+                        SmallButton { text: "Mute Nd"; bg: Theme.warning-soft; fg: Theme.warning; clicked => { root.admin_mute_custom_days(root.admin_detail.user_id); } }
+                    }
+                    if root.admin_detail.muted: SmallButton {
+                        text: "Unmute";
+                        bg: Theme.accent-soft;
+                        clicked => { root.admin_unmute(root.admin_detail.user_id); }
+                    }
+                    if root.is_admin: HorizontalLayout {
+                        spacing: 6px;
+                        SmallButton {
+                            text: "Plus 7d";
+                            bg: Theme.plus.transparentize(0.75);
+                            fg: Theme.plus;
+                            clicked => { root.admin_grant_plus(root.admin_detail.user_id, 7); }
+                        }
+                        SmallButton {
+                            text: "Plus 30d max";
+                            bg: Theme.plus;
+                            fg: Theme.plus-foreground;
+                            clicked => { root.admin_grant_plus(root.admin_detail.user_id, 30); }
+                        }
+                        SmallButton {
+                            text: "Revoke Plus";
+                            bg: Theme.warning-soft;
+                            fg: Theme.warning;
+                            clicked => { root.admin_revoke_plus(root.admin_detail.user_id); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

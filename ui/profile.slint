@@ -27,7 +27,15 @@ export component ProfileScreen inherits Rectangle {
     in property <color> avatar_color: Theme.accent;
     in property <image> photo;
     in property <bool> online: false;
+    in property <bool> idle: false;
+    in property <bool> dnd: false;
+    // Human label: Online / Idle / Do not disturb / Offline
+    in property <string> presence_label: "Offline";
     in property <string> status_message;
+    // Discord-style activity under status ("Playing Minecraft", …).
+    in property <string> activity: "";
+    // Emoji / short glyph next to the activity line.
+    in property <string> activity_icon: "";
     in property <string> bio;
     // Private note about this user (Discord's NOTE section). Optional --
     // the section renders only when the integrator feeds a non-empty value.
@@ -119,8 +127,8 @@ export component ProfileScreen inherits Rectangle {
                     alignment: start;
 
                     // Banner + overlapping avatar zone: the banner is a solid
-                    // strip of the user's profile color, the avatar sits on a
-                    // card-colored frame that reads as a presence ring.
+                    // strip of the user's profile color (Plus: gold wash), the
+                    // avatar sits on a card-colored frame that reads as a presence ring.
                     Rectangle {
                         height: 148px;
                         Rectangle {
@@ -128,12 +136,30 @@ export component ProfileScreen inherits Rectangle {
                             y: 0;
                             width: parent.width;
                             height: 96px;
-                            background: root.avatar_color;
+                            // Plus without a custom banner: gold wash over the avatar color.
+                            background: root.is_plus && !root.has_banner ? #c9a22799 : root.avatar_color;
                             if root.has_banner: Image {
                                 source: root.banner_photo;
                                 width: parent.width;
                                 height: parent.height;
                                 image-fit: ImageFit.cover;
+                            }
+                            if root.is_plus: Rectangle {
+                                x: parent.width - 72px;
+                                y: 8px;
+                                width: 60px;
+                                height: 18px;
+                                border-radius: 9px;
+                                background: Theme.plus;
+                                Text {
+                                    width: parent.width; height: parent.height;
+                                    text: "PLUS";
+                                    font-size: 10px;
+                                    font-family: Theme.font-medium;
+                                    color: Theme.plus-foreground;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
                             }
                         }
                         Rectangle {
@@ -142,8 +168,9 @@ export component ProfileScreen inherits Rectangle {
                             width: 92px;
                             height: 92px;
                             background: Theme.bg-secondary;
-                            border-width: 1px;
-                            border-color: Theme.border-hairline;
+                            border-width: root.is_plus ? 2px : 1px;
+                            border-color: root.is_plus ? Theme.plus : Theme.border-hairline;
+                            border-radius: 46px;
                             Avatar {
                                 x: 6px;
                                 y: 6px;
@@ -153,6 +180,9 @@ export component ProfileScreen inherits Rectangle {
                                 photo-source: root.photo;
                                 show-presence: true;
                                 online: root.online;
+                                idle: root.idle;
+                                dnd: root.dnd;
+                                plus-ring: root.is_plus;
                             }
                         }
                     }
@@ -164,26 +194,46 @@ export component ProfileScreen inherits Rectangle {
                         spacing: Theme.space-2;
                         alignment: start;
 
-                        Text { text: root.display_name; font-size: Theme.text-xl; font-family: Theme.font-medium; color: Theme.text-primary; }
+                        Text {
+                            text: root.display_name;
+                            font-size: Theme.text-xl;
+                            font-family: Theme.font-medium;
+                            color: root.is_plus ? Theme.plus : Theme.text-primary;
+                        }
                         Text { text: "@" + root.username; font-size: Theme.text-sm; color: Theme.text-muted; }
 
-                        // Badge row: presence chip plus staff chip.
+                        // Badge row: presence chip + staff + plus.
                         HorizontalLayout {
                             spacing: Theme.space-2;
                             Rectangle {
-                                width: presence-label.preferred-width + 26px;
+                                width: presence-chip-label.preferred-width + 26px;
                                 height: 20px;
-                                background: root.online ? Theme.accent-soft : transparent;
+                                background: root.dnd ? Theme.dnd.transparentize(0.85)
+                                    : root.idle ? Theme.idle.transparentize(0.85)
+                                    : root.online ? Theme.accent-soft
+                                    : transparent;
                                 border-width: 1px;
-                                border-color: root.online ? Theme.border-strong : Theme.border;
-                                Rectangle { x: 8px; y: 7px; width: 6px; height: 6px; border-radius: 3px; background: root.online ? Theme.online : Theme.offline; }
-                                presence-label := Text {
+                                border-color: root.dnd ? Theme.dnd
+                                    : root.idle ? Theme.idle
+                                    : root.online ? Theme.border-strong
+                                    : Theme.border;
+                                Rectangle {
+                                    x: 8px; y: 7px; width: 6px; height: 6px; border-radius: 3px;
+                                    background: root.dnd ? Theme.dnd
+                                        : root.idle ? Theme.idle
+                                        : root.online ? Theme.online
+                                        : Theme.offline;
+                                }
+                                presence-chip-label := Text {
                                     x: 18px;
                                     width: parent.width - 22px;
-                                    text: root.online ? "Online" : "Offline";
+                                    text: root.presence_label;
                                     font-size: Theme.text-xs;
                                     font-family: Theme.font-medium;
-                                    color: root.online ? Theme.online : Theme.text-muted;
+                                    color: root.dnd ? Theme.dnd
+                                        : root.idle ? Theme.idle
+                                        : root.online ? Theme.online
+                                        : Theme.text-muted;
                                     vertical-alignment: center;
                                 }
                             }
@@ -193,10 +243,10 @@ export component ProfileScreen inherits Rectangle {
 
                         // Inset info panel, only when at least one section
                         // has content (Discord-style ABOUT ME block).
-                        if root.status_message != "" || root.bio != "" || root.note != "" || root.has_role_info || root.mutual_servers_line != "": Rectangle {
+                        if root.status_message != "" || root.activity != "" || root.bio != "" || root.note != "" || root.has_role_info || root.mutual_servers_line != "": Rectangle {
                             background: Theme.bg-tertiary;
                             border-width: 1px;
-                            border-color: Theme.border-hairline;
+                            border-color: root.is_plus ? Theme.plus.transparentize(0.7) : Theme.border-hairline;
                             height: info-panel.preferred-height;
                             info-panel := VerticalLayout {
                                 padding: Theme.space-4;
@@ -208,6 +258,40 @@ export component ProfileScreen inherits Rectangle {
                                     alignment: start;
                                     ProfileSectionLabel { text: "STATUS"; }
                                     Text { text: root.status_message; font-size: Theme.text-md; color: Theme.text-primary; wrap: word-wrap; }
+                                }
+                                if root.activity != "": VerticalLayout {
+                                    spacing: Theme.space-1;
+                                    alignment: start;
+                                    ProfileSectionLabel { text: "ACTIVITY"; }
+                                    HorizontalLayout {
+                                        spacing: Theme.space-2;
+                                        // App icon: emoji when known, otherwise a letter tile.
+                                        Rectangle {
+                                            width: 28px;
+                                            height: 28px;
+                                            border-radius: Theme.radius-sm;
+                                            background: Theme.bg-elevated;
+                                            border-width: 1px;
+                                            border-color: Theme.border-hairline;
+                                            Text {
+                                                width: parent.width;
+                                                height: parent.height;
+                                                text: root.activity_icon != "" ? root.activity_icon : "💻";
+                                                font-size: root.activity_icon != "" ? 14px : 12px;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                        Text {
+                                            text: root.activity;
+                                            font-size: Theme.text-md;
+                                            font-family: Theme.font-medium;
+                                            color: Theme.text-primary;
+                                            wrap: word-wrap;
+                                            horizontal-stretch: 1;
+                                            vertical-alignment: center;
+                                        }
+                                    }
                                 }
                                 if root.bio != "": VerticalLayout {
                                     spacing: Theme.space-1;

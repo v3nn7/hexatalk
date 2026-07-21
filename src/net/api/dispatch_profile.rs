@@ -87,11 +87,15 @@ pub async fn dispatch(
             "Avatar upload is handled internally now".to_string(),
         )),
         ("profile", "setAvatarImage") => {
-            let key = arg_str(&args, "storageId");
+            // Call sites send `avatarStorageId` (old Convex arg); accept the
+            // legacy `storageId` spelling too.
+            let key = arg_opt_str(&args, "avatarStorageId")
+                .unwrap_or_else(|| arg_str(&args, "storageId"));
             let body = json!({ "avatar_storage_key": key });
             match c.rest(Method::PATCH, "/users/me", Some(body)).await {
                 Ok(_) => {
-                    let key = arg_str(&args, "storageId");
+                    let key = arg_opt_str(&args, "avatarStorageId")
+                        .unwrap_or_else(|| arg_str(&args, "storageId"));
                     Ok(FunctionResult::Value(Value::String(if key.is_empty() {
                         String::new()
                     } else {
@@ -318,6 +322,7 @@ async fn get_profile(
     let mut nickname = String::new();
     let mut private_note = String::new();
     let mut user_staff = false;
+    let mut plus_active = false;
 
     if user_id == my_id && !user_id.is_empty() {
         relation = "self".to_string();
@@ -329,6 +334,7 @@ async fn get_profile(
         status_message = jstr(me, "status_message");
         bio = jstr(me, "bio");
         user_staff = my_staff;
+        plus_active = jbool_any(me, &["plus_active", "plusActive"], false);
     } else {
         // Friends carry full user records + my friend_meta.
         if let Ok(fr) = c.rest(Method::GET, "/friends", None).await {
@@ -353,6 +359,11 @@ async fn get_profile(
                     status_message = jstr(user, "status_message");
                     bio = jstr(user, "bio");
                     user_staff = is_staff_role(&jstr(user, "role"));
+                    plus_active = jbool_any(
+                        user,
+                        &["plus_active", "plusActive"],
+                        false,
+                    );
                     is_friend = true;
                     relation = "friends".to_string();
                     let meta = entry
@@ -402,29 +413,45 @@ async fn get_profile(
     // `hide_online_status` users, so whatever it says is display-ready.
     let mut last_seen_at: i64 = 0;
     let mut presence = "offline".to_string();
+    let mut activity = String::new();
     if relation == "self" {
         let preferred = jstr(me, "presence_status");
-        presence = if preferred.is_empty() || preferred == "invisible" {
+        presence = if preferred.is_empty() {
             "online".to_string()
         } else {
             preferred
         };
+        // Self last_seen: treat as now so the profile ring stays live.
+        last_seen_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        activity = jstr_any(me, &["activity", "custom_activity", "customActivity"]);
+        plus_active = jbool_any(me, &["plus_active", "plusActive"], false)
+            || jstr(me, "plus_tier") == "plus"
+            || jstr(me, "subscription") == "plus";
     } else if let Ok(p) = c
         .rest(Method::GET, &format!("/presence/{user_id}"), None)
         .await
     {
         last_seen_at = jnum_any(&p, &["last_seen_at", "lastSeenAt"]) as i64;
         let status = jstr_any(&p, &["status", "presence_status", "presenceStatus"]);
+        activity = jstr_any(
+            &p,
+            &["activity", "custom_activity", "customActivity", "game"],
+        );
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
         let online = last_seen_at > 0 && now - last_seen_at < ONLINE_MS;
-        presence = if !status.is_empty() && status != "invisible" {
-            if status == "idle" || status == "dnd" {
+        presence = if status == "invisible" {
+            "offline".to_string()
+        } else if status == "idle" || status == "dnd" || status == "online" {
+            // Honour the explicit status even if last_seen is slightly stale
+            // (heartbeat is every ~5–30s; ONLINE_MS is 90s).
+            if online || status != "online" {
                 status
-            } else if online || status == "online" {
-                "online".to_string()
             } else {
                 "offline".to_string()
             }
@@ -433,6 +460,10 @@ async fn get_profile(
         } else {
             "offline".to_string()
         };
+    }
+    // Plus flag from friend row / me when available.
+    if !plus_active {
+        plus_active = jbool_any(me, &["plus_active", "plusActive"], false);
     }
 
     let mut obj = BTreeMap::new();
@@ -466,6 +497,9 @@ async fn get_profile(
         Value::Float64(last_seen_at as f64),
     );
     obj.insert("presence".to_string(), Value::String(presence));
+    obj.insert("activity".to_string(), Value::String(activity));
+    // Icon is client-local (emoji map); server may send one later.
+    obj.insert("activityIcon".to_string(), Value::String(String::new()));
     obj.insert("isStaff".to_string(), Value::Boolean(user_staff));
     obj.insert("isFriend".to_string(), Value::Boolean(is_friend));
     obj.insert(
@@ -479,7 +513,7 @@ async fn get_profile(
     obj.insert("favorite".to_string(), Value::Boolean(favorite));
     obj.insert("nickname".to_string(), Value::String(nickname));
     obj.insert("privateNote".to_string(), Value::String(private_note));
-    obj.insert("plusActive".to_string(), Value::Boolean(false));
+    obj.insert("plusActive".to_string(), Value::Boolean(plus_active));
     Ok(FunctionResult::Value(Value::Object(obj)))
 }
 

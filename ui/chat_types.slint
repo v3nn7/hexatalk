@@ -87,6 +87,8 @@ export struct ConversationRow {
     title: string,
     unread: bool,
     active: bool,
+    /// Official HexaTalk Support inbox — show SUPPORT badge.
+    is_support: bool,
 }
 
 export struct FriendRow {
@@ -193,11 +195,38 @@ export struct AdminUserRow {
     display_name: string,
     role: string,
     banned: bool,
+    muted: bool,
+    plus_active: bool,
     role_locked: bool,
     status_line: string,
     badge_text: string,
     badge_bg: color,
     badge_fg: color,
+}
+
+export struct CategoryPickRow {
+    category_id: string,
+    name: string,
+    selected: bool,
+}
+
+export struct AdminDetailView {
+    open: bool,
+    user_id: string,
+    username: string,
+    display_name: string,
+    role: string,
+    banned: bool,
+    ban_label: string,
+    muted: bool,
+    mute_label: string,
+    online: bool,
+    bio: string,
+    status_message: string,
+    friend_count: int,
+    servers_label: string,
+    created_label: string,
+    last_seen_label: string,
 }
 
 export struct MemberRow {

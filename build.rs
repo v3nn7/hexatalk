@@ -146,7 +146,10 @@ fn emit_obfuscated_secrets() {
         ("UPDATE_SIGNATURE_URL", signature_url),
         (
             "UPDATE_PUBLIC_KEY_B64",
-            "0cJIouMNtQV708XWpDinnsSjevzQm8bQ2mxpe6/s9eg=".to_string(),
+            // Public half of RELEASE_SIGNING_KEY_HEX (the 8a3f..c4d seed).
+            // Verified 2026-07-21 against the live HexaTalk.exe.sig on
+            // astrakit.pro — the previous value matched no released sig.
+            "s/DvU/KKqatNTN+gV+NqxkpQRgl+0pUL92222x+a1O8=".to_string(),
         ),
         // Directory (trailing slash) that bsdiff-compatible incremental
         // update patches are uploaded to, named `HexaTalk-<from>-<to>.delta`

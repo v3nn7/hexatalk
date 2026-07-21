@@ -1,28 +1,24 @@
-//! Convex **HTTP** client (rustls only — no OpenSSL / native-tls).
-//! Same deployment as desktop. Uses poll instead of WS subscriptions.
+//! VyrApp REST client (rustls only — no OpenSSL / native-tls).
+//! Same API as desktop (`https://api.vyrapp.pro`). Poll instead of WS.
 
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 
-/// Production Convex deployment (same as desktop). Override with
-/// `CONVEX_URL` / `NEXT_PUBLIC_CONVEX_URL` only for local experiments.
-///
-/// Security note: the deployment URL below is NOT a secret — it's a public
-/// endpoint (auth happens per-session after connecting), which is why the
-/// mobile crate keeps it as a plaintext fallback instead of the desktop's
-/// XOR-obfuscation (see `build.rs`/`src/obf.rs` there). Only actual
-/// credentials (TURN, keystore passwords, signing keys) must never be
-/// hardcoded here.
-pub fn convex_url() -> String {
-    std::env::var("CONVEX_URL")
-        .or_else(|_| std::env::var("NEXT_PUBLIC_CONVEX_URL"))
+/// Production VyrApp API. Override with `API_URL` for local experiments.
+pub fn api_url() -> String {
+    std::env::var("API_URL")
+        .or_else(|_| std::env::var("HEXATALK_API_URL"))
         .ok()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            "https://REDACTED.convex.example.com".to_string()
-        })
+        .map(|s| s.trim_end_matches('/').to_string())
+        .unwrap_or_else(|| "https://api.vyrapp.pro".to_string())
+}
+
+/// Back-compat alias used by older call sites in this crate.
+pub fn convex_url() -> String {
+    api_url()
 }
 
 #[derive(Clone, Debug)]
@@ -938,43 +934,579 @@ fn extract_error_message(v: &Value) -> String {
     clean_error("request failed")
 }
 
-async fn convex_call(
+fn arg_str(args: &Value, key: &str) -> String {
+    args.get(key)
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn arg_bool(args: &Value, key: &str) -> bool {
+    args.get(key).and_then(|x| x.as_bool()).unwrap_or(false)
+}
+
+fn token_from_args(args: &Value) -> Option<String> {
+    let t = arg_str(args, "sessionToken");
+    if t.is_empty() {
+        None
+    } else {
+        Some(t)
+    }
+}
+
+async fn rest(
     http: &reqwest::Client,
-    kind: &str, // "query" | "mutation" | "action"
+    method: reqwest::Method,
     path: &str,
-    args: Value,
+    token: Option<&str>,
+    body: Option<Value>,
 ) -> Result<Value, String> {
-    let url = format!("{}/api/{kind}", convex_url());
-    let body = json!({
-        "path": path,
-        "args": args,
-        "format": "json",
-    });
-    let resp = http
-        .post(&url)
-        .header("Convex-Client", "hexatalk-mobile-0.3")
-        .json(&body)
+    let url = format!("{}{path}", api_url());
+    let mut req = http.request(method, &url);
+    if let Some(t) = token {
+        req = req.bearer_auth(t);
+    }
+    if let Some(b) = body {
+        req = req.json(&b);
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| clean_error(&e.to_string()))?;
     let status = resp.status();
-    let v: Value = resp
-        .json()
+    let text = resp
+        .text()
         .await
-        .map_err(|e| format!("Bad server response ({status}): {}", clean_error(&e.to_string())))?;
+        .map_err(|e| format!("read failed: {}", clean_error(&e.to_string())))?;
+    if text.trim().is_empty() {
+        if status.is_success() {
+            return Ok(Value::Null);
+        }
+        return Err(format!("{status}"));
+    }
+    let v: Value = serde_json::from_str(&text).map_err(|e| format!("bad json: {e}"))?;
     if !status.is_success() {
         return Err(extract_error_message(&v));
     }
-    // Success shapes: { status: "success", value: ... } or raw value
-    if let Some(st) = v.get("status").and_then(|x| x.as_str()) {
-        if st == "error" || st == "failure" {
-            return Err(extract_error_message(&v));
+    Ok(v)
+}
+
+/// Drop-in replacement for the old Convex `path` + args dispatcher.
+/// Returns values in the **camelCase** shapes the mobile parsers expect.
+async fn convex_call(
+    http: &reqwest::Client,
+    _kind: &str,
+    path: &str,
+    args: Value,
+) -> Result<Value, String> {
+    let token = token_from_args(&args);
+    let tok = token.as_deref();
+    match path {
+        "auth:signIn" => {
+            let body = json!({
+                "username": arg_str(&args, "username"),
+                "password": arg_str(&args, "password"),
+            });
+            let resp = rest(http, reqwest::Method::POST, "/auth/login", None, Some(body)).await?;
+            Ok(mobile_user_from_login(&resp))
         }
-        if let Some(val) = v.get("value") {
-            return Ok(val.clone());
+        "auth:signUp" => {
+            let body = json!({
+                "username": arg_str(&args, "username"),
+                "displayName": arg_str(&args, "displayName"),
+                "email": arg_str(&args, "email"),
+                "password": arg_str(&args, "password"),
+            });
+            let resp =
+                rest(http, reqwest::Method::POST, "/auth/register", None, Some(body)).await?;
+            Ok(mobile_user_from_login(&resp))
+        }
+        "auth:me" => {
+            let resp = rest(http, reqwest::Method::GET, "/auth/me", tok, None).await?;
+            Ok(mobile_user_from_login(&resp))
+        }
+        "auth:requestPasswordReset" => {
+            let body = json!({ "email": arg_str(&args, "email") });
+            rest(
+                http,
+                reqwest::Method::POST,
+                "/auth/request-password-reset",
+                None,
+                Some(body),
+            )
+            .await?;
+            Ok(Value::Null)
+        }
+        "auth:resetPasswordWithCode" => {
+            let body = json!({
+                "email": arg_str(&args, "email"),
+                "code": arg_str(&args, "code"),
+                "newPassword": arg_str(&args, "newPassword"),
+            });
+            rest(
+                http,
+                reqwest::Method::POST,
+                "/auth/confirm-password-reset",
+                None,
+                Some(body),
+            )
+            .await?;
+            Ok(Value::Null)
+        }
+        "conversations:listMyConversations" => {
+            let resp = rest(http, reqwest::Method::GET, "/conversations", tok, None).await?;
+            Ok(map_conversations(&resp))
+        }
+        "messages:list" => {
+            let cid = arg_str(&args, "conversationId");
+            let resp = rest(
+                http,
+                reqwest::Method::GET,
+                &format!("/conversations/{cid}/messages?limit=100"),
+                tok,
+                None,
+            )
+            .await?;
+            Ok(map_messages(&resp))
+        }
+        "messages:send" => {
+            let cid = arg_str(&args, "conversationId");
+            let body = json!({
+                "body": arg_str(&args, "body"),
+                "encrypted": arg_bool(&args, "encrypted"),
+            });
+            rest(
+                http,
+                reqwest::Method::POST,
+                &format!("/conversations/{cid}/messages"),
+                tok,
+                Some(body),
+            )
+            .await?;
+            Ok(Value::Null)
+        }
+        "conversations:getOrCreateDirect" => {
+            let body = json!({ "userId": arg_str(&args, "friendUserId") });
+            let resp = rest(
+                http,
+                reqwest::Method::POST,
+                "/conversations/direct",
+                tok,
+                Some(body),
+            )
+            .await?;
+            Ok(Value::String(extract_conv_id(&resp)))
+        }
+        "conversations:openSupportDm" => {
+            let peer = arg_str(&args, "peerUserId");
+            let body = if peer.is_empty() {
+                json!({})
+            } else {
+                json!({ "userId": peer })
+            };
+            let resp = rest(
+                http,
+                reqwest::Method::POST,
+                "/conversations/support",
+                tok,
+                Some(body),
+            )
+            .await?;
+            Ok(Value::String(extract_conv_id(&resp)))
+        }
+        "friends:listFriends" => {
+            let resp = rest(http, reqwest::Method::GET, "/friends", tok, None).await?;
+            Ok(map_friends_list(&resp))
+        }
+        "friends:listIncomingRequests" => {
+            let resp = rest(http, reqwest::Method::GET, "/friends/requests", tok, None).await?;
+            Ok(map_incoming(&resp))
+        }
+        "friends:listOutgoingRequests" => {
+            let resp = rest(http, reqwest::Method::GET, "/friends/requests", tok, None).await?;
+            Ok(map_outgoing(&resp))
+        }
+        "friends:socialStats" => {
+            let resp = rest(http, reqwest::Method::GET, "/friends/stats", tok, None).await?;
+            Ok(json!({
+                "friendsTotal": jf64_any(&resp, &["friends_total", "friendsTotal"]),
+                "friendsOnline": jf64_any(&resp, &["friends_online", "friendsOnline"]),
+                "incomingPending": jf64_any(&resp, &["incoming_pending", "incomingPending"]),
+                "outgoingPending": jf64_any(&resp, &["outgoing_pending", "outgoingPending"]),
+            }))
+        }
+        "friends:suggestPeople" => {
+            let resp = rest(http, reqwest::Method::GET, "/friends/suggestions", tok, None).await?;
+            Ok(map_suggestions_list(&resp))
+        }
+        "friends:sendRequest" => {
+            let mut body = serde_json::Map::new();
+            body.insert("username".into(), json!(arg_str(&args, "toUsername")));
+            let note = arg_str(&args, "note");
+            if !note.is_empty() {
+                body.insert("note".into(), json!(note));
+            }
+            rest(
+                http,
+                reqwest::Method::POST,
+                "/friends/requests",
+                tok,
+                Some(Value::Object(body)),
+            )
+            .await?;
+            Ok(Value::Null)
+        }
+        "friends:respondRequest" => {
+            let rid = arg_str(&args, "requestId");
+            let accept = arg_bool(&args, "accept");
+            let path = if accept {
+                format!("/friends/requests/{rid}/accept")
+            } else {
+                format!("/friends/requests/{rid}/decline")
+            };
+            rest(http, reqwest::Method::POST, &path, tok, None).await?;
+            Ok(Value::Null)
+        }
+        "friends:cancelRequest" => {
+            let rid = arg_str(&args, "requestId");
+            // Prefer decline/cancel paths; ignore 404.
+            let _ = rest(
+                http,
+                reqwest::Method::POST,
+                &format!("/friends/requests/{rid}/decline"),
+                tok,
+                None,
+            )
+            .await;
+            Ok(Value::Null)
+        }
+        "servers:listMyServers" => {
+            let resp = rest(http, reqwest::Method::GET, "/servers", tok, None).await?;
+            Ok(map_servers(&resp))
+        }
+        "servers:listChannels" => {
+            let sid = arg_str(&args, "serverId");
+            let resp = rest(http, reqwest::Method::GET, &format!("/servers/{sid}"), tok, None)
+                .await?;
+            Ok(map_channels(&resp))
+        }
+        "servers:createServer" => {
+            let body = json!({ "name": arg_str(&args, "name") });
+            rest(http, reqwest::Method::POST, "/servers", tok, Some(body)).await?;
+            Ok(Value::Null)
+        }
+        "servers:joinByInviteCode" => {
+            let body = json!({ "inviteCode": arg_str(&args, "inviteCode") });
+            rest(http, reqwest::Method::POST, "/servers/join", tok, Some(body)).await?;
+            Ok(Value::Null)
+        }
+        "presence:heartbeat" => {
+            rest(
+                http,
+                reqwest::Method::POST,
+                "/presence/heartbeat",
+                tok,
+                Some(json!({})),
+            )
+            .await?;
+            Ok(Value::Null)
+        }
+        "typing:setTyping" => {
+            if arg_bool(&args, "typing") {
+                let cid = arg_str(&args, "conversationId");
+                let _ = rest(
+                    http,
+                    reqwest::Method::POST,
+                    &format!("/conversations/{cid}/typing"),
+                    tok,
+                    None,
+                )
+                .await;
+            }
+            Ok(Value::Null)
+        }
+        "typing:whoIsTyping" => Ok(Value::Array(vec![])),
+        "profile:getProfile" => {
+            let uid = arg_str(&args, "userId");
+            let path = if uid.is_empty() {
+                "/users/me".to_string()
+            } else {
+                format!("/users/{uid}")
+            };
+            let resp = match rest(http, reqwest::Method::GET, &path, tok, None).await {
+                Ok(r) => r,
+                Err(_) => rest(http, reqwest::Method::GET, "/users/me", tok, None).await?,
+            };
+            let u = resp.get("user").unwrap_or(&resp);
+            Ok(json!({
+                "displayName": jstr_any(u, &["display_name", "displayName"]),
+                "statusMessage": jstr_any(u, &["status_message", "statusMessage"]),
+                "bio": jstr_any(u, &["bio"]),
+                "avatarColor": jstr_any(u, &["avatar_color", "avatarColor"]),
+            }))
+        }
+        "prefs:touchSession" | "push:registerToken" => Ok(Value::Null),
+        "messages:search" => Err("Search not available yet".into()),
+        other => Err(format!("unmapped mobile path {other}")),
+    }
+}
+
+fn jstr_any(v: &Value, keys: &[&str]) -> String {
+    for k in keys {
+        if let Some(s) = v.get(*k).and_then(|x| x.as_str()) {
+            return s.to_string();
         }
     }
-    Ok(v)
+    String::new()
+}
+
+fn jf64_any(v: &Value, keys: &[&str]) -> f64 {
+    for k in keys {
+        if let Some(x) = v.get(*k) {
+            if let Some(n) = x
+                .as_f64()
+                .or_else(|| x.as_i64().map(|i| i as f64))
+                .or_else(|| x.as_u64().map(|i| i as f64))
+                .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+            {
+                return n;
+            }
+        }
+    }
+    0.0
+}
+
+fn list_arr<'a>(v: &'a Value, keys: &[&str]) -> Vec<&'a Value> {
+    if let Some(a) = v.as_array() {
+        return a.iter().collect();
+    }
+    for k in keys {
+        if let Some(a) = v.get(*k).and_then(|x| x.as_array()) {
+            return a.iter().collect();
+        }
+    }
+    Vec::new()
+}
+
+fn extract_conv_id(resp: &Value) -> String {
+    if let Some(s) = resp.as_str() {
+        return s.to_string();
+    }
+    for path in [
+        "id",
+        "conversation_id",
+        "conversationId",
+        "conversation.id",
+    ] {
+        if path.contains('.') {
+            let mut cur = resp;
+            let mut ok = true;
+            for p in path.split('.') {
+                if let Some(n) = cur.get(p) {
+                    cur = n;
+                } else {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                if let Some(s) = cur.as_str() {
+                    return s.to_string();
+                }
+            }
+        } else if let Some(s) = resp.get(path).and_then(|x| x.as_str()) {
+            return s.to_string();
+        }
+    }
+    String::new()
+}
+
+fn mobile_user_from_login(resp: &Value) -> Value {
+    let token = jstr_any(resp, &["token"]);
+    let user = resp.get("user").unwrap_or(resp);
+    json!({
+        "token": token,
+        "userId": jstr_any(user, &["id", "user_id", "userId"]),
+        "username": jstr_any(user, &["username"]),
+        "displayName": jstr_any(user, &["display_name", "displayName"]),
+        "role": jstr_any(user, &["role"]),
+    })
+}
+
+fn map_conversations(resp: &Value) -> Value {
+    let rows: Vec<Value> = list_arr(resp, &["conversations", "items", "data"])
+        .into_iter()
+        .map(|m| {
+            let title = jstr_any(m, &["title", "name", "peer_display_name"]);
+            let title = if title.is_empty() {
+                "Chat".to_string()
+            } else {
+                title
+            };
+            let last = jf64_any(m, &["last_message_at", "lastMessageAt"]);
+            let last_read = jf64_any(m, &["last_read_at", "lastReadAt"]);
+            let unread = m
+                .get("unread")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(last > last_read);
+            json!({
+                "conversationId": jstr_any(m, &["id", "conversation_id", "conversationId"]),
+                "kind": jstr_any(m, &["kind"]),
+                "title": title,
+                "unread": unread,
+            })
+        })
+        .collect();
+    Value::Array(rows)
+}
+
+fn map_messages(resp: &Value) -> Value {
+    let rows: Vec<Value> = list_arr(resp, &["messages", "items", "data"])
+        .into_iter()
+        .map(|m| {
+            let mut sent = jf64_any(m, &["sent_at", "created_at", "sentAt", "createdAt"]);
+            if sent <= 0.0 {
+                // ULID fallback — first 10 chars encode ms epoch.
+                sent = ulid_ms(&jstr_any(m, &["id"])) as f64;
+            }
+            json!({
+                "id": jstr_any(m, &["id"]),
+                "authorId": jstr_any(m, &["author_id", "authorId"]),
+                "authorName": jstr_any(m, &["author_name", "authorName"]),
+                "body": jstr_any(m, &["body"]),
+                "encrypted": m.get("encrypted").and_then(|x| x.as_bool()).unwrap_or(false),
+                "deleted": m.get("deleted").and_then(|x| x.as_bool()).unwrap_or(false),
+                "attachmentUrl": jstr_any(m, &["attachment_url", "attachmentUrl"]),
+                "sentAt": sent,
+                "authorPlusActive": false,
+            })
+        })
+        .collect();
+    Value::Array(rows)
+}
+
+fn ulid_ms(id: &str) -> i64 {
+    const ALPHABET: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    if id.len() < 10 {
+        return 0;
+    }
+    let mut ts: u64 = 0;
+    for c in id.chars().take(10) {
+        let u = c.to_ascii_uppercase() as u8;
+        let Some(idx) = ALPHABET.iter().position(|&b| b == u) else {
+            return 0;
+        };
+        ts = (ts << 5) | (idx as u64);
+    }
+    if !(1_000_000_000_000..=10_000_000_000_000).contains(&ts) {
+        return 0;
+    }
+    ts as i64
+}
+
+fn map_friends_list(resp: &Value) -> Value {
+    let rows: Vec<Value> = list_arr(resp, &["friends", "items", "data"])
+        .into_iter()
+        .map(|row| {
+            let person = row
+                .get("user")
+                .or_else(|| row.get("friend"))
+                .unwrap_or(row);
+            json!({
+                "userId": jstr_any(person, &["id", "user_id", "userId"]),
+                "username": jstr_any(person, &["username"]),
+                "displayName": jstr_any(person, &["display_name", "displayName"]),
+                "lastSeenAt": jf64_any(person, &["last_seen_at", "lastSeenAt"]),
+                "presence": jstr_any(person, &["presence", "status"]),
+                "statusMessage": jstr_any(person, &["status_message", "statusMessage"]),
+                "nickname": jstr_any(row, &["nickname"]),
+                "favorite": row.get("favorite").and_then(|x| x.as_bool()).unwrap_or(false),
+                "mutualServers": [],
+            })
+        })
+        .collect();
+    Value::Array(rows)
+}
+
+fn map_incoming(resp: &Value) -> Value {
+    let rows: Vec<Value> = list_arr(resp, &["incoming", "incoming_requests", "items"])
+        .into_iter()
+        .map(|row| {
+            let from = row.get("from").or_else(|| row.get("user")).unwrap_or(row);
+            json!({
+                "requestId": jstr_any(row, &["id", "request_id", "requestId"]),
+                "fromUserId": jstr_any(from, &["id", "user_id", "userId"]),
+                "fromUsername": jstr_any(from, &["username"]),
+                "fromDisplayName": jstr_any(from, &["display_name", "displayName"]),
+                "note": jstr_any(row, &["note"]),
+                "sentAt": jf64_any(row, &["created_at", "sent_at", "sentAt"]),
+            })
+        })
+        .collect();
+    Value::Array(rows)
+}
+
+fn map_outgoing(resp: &Value) -> Value {
+    let rows: Vec<Value> = list_arr(resp, &["outgoing", "outgoing_requests", "items"])
+        .into_iter()
+        .map(|row| {
+            let to = row.get("to").or_else(|| row.get("user")).unwrap_or(row);
+            json!({
+                "requestId": jstr_any(row, &["id", "request_id", "requestId"]),
+                "toUsername": jstr_any(to, &["username"]),
+                "toDisplayName": jstr_any(to, &["display_name", "displayName"]),
+                "note": jstr_any(row, &["note"]),
+                "sentAt": jf64_any(row, &["created_at", "sent_at", "sentAt"]),
+            })
+        })
+        .collect();
+    Value::Array(rows)
+}
+
+fn map_suggestions_list(resp: &Value) -> Value {
+    let rows: Vec<Value> = list_arr(resp, &["suggestions", "users", "items"])
+        .into_iter()
+        .map(|u| {
+            json!({
+                "userId": jstr_any(u, &["id", "user_id", "userId"]),
+                "username": jstr_any(u, &["username"]),
+                "displayName": jstr_any(u, &["display_name", "displayName"]),
+                "mutualServers": [],
+            })
+        })
+        .collect();
+    Value::Array(rows)
+}
+
+fn map_servers(resp: &Value) -> Value {
+    let rows: Vec<Value> = list_arr(resp, &["servers", "items", "data"])
+        .into_iter()
+        .map(|s| {
+            json!({
+                "serverId": jstr_any(s, &["id", "server_id", "serverId"]),
+                "name": jstr_any(s, &["name"]),
+                "isOwner": s.get("is_owner").and_then(|x| x.as_bool()).unwrap_or(false),
+                "inviteCode": jstr_any(s, &["invite_code", "inviteCode"]),
+            })
+        })
+        .collect();
+    Value::Array(rows)
+}
+
+fn map_channels(resp: &Value) -> Value {
+    let channels = list_arr(resp, &["channels", "items"]);
+    let rows: Vec<Value> = channels
+        .into_iter()
+        .map(|ch| {
+            let t = jstr_any(ch, &["channel_type", "channelType"]);
+            json!({
+                "conversationId": jstr_any(ch, &["id", "conversation_id", "conversationId"]),
+                "name": jstr_any(ch, &["name"]),
+                "channelType": if t.is_empty() { "text".into() } else { t },
+            })
+        })
+        .collect();
+    Value::Array(rows)
 }
 
 async fn poll_home(http: &reqwest::Client, tx: &mpsc::UnboundedSender<NetEvent>, token: &str) {

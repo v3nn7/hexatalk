@@ -164,6 +164,9 @@ export component ServerSettingsScreen inherits Rectangle {
     callback toggle_member_picker(string);
     callback toggle_member_role(string, string);
     callback kick_member(string);
+    // Temporary mute only (hours > 0).
+    callback mute_member(string, int);
+    callback unmute_member(string);
     callback open_profile(string);
 
     callback new_role_name_changed(string);
@@ -474,6 +477,12 @@ export component ServerSettingsScreen inherits Rectangle {
                                 if !m.is_owner && (root.can_manage_roles || root.can_kick): HorizontalLayout {
                                     spacing: 6px;
                                     if root.can_manage_roles: SecondaryButton { text: m.picker_open ? "Close" : "+ Add role"; clicked => { root.toggle_member_picker(m.user_id); } }
+                                    // Temporary server mute (API requires a duration).
+                                    if root.can_kick: SecondaryButton { text: "Mute 1h"; clicked => { root.mute_member(m.user_id, 1); } }
+                                    if root.can_kick: SecondaryButton { text: "Mute 24h"; clicked => { root.mute_member(m.user_id, 24); } }
+                                    if root.can_kick: SecondaryButton { text: "Mute 7d"; clicked => { root.mute_member(m.user_id, 168); } }
+                                    if root.can_kick: SecondaryButton { text: "Mute 30d"; clicked => { root.mute_member(m.user_id, 720); } }
+                                    if root.can_kick: SecondaryButton { text: "Unmute"; clicked => { root.unmute_member(m.user_id); } }
                                     if root.can_kick: DangerButton { text: "Kick"; clicked => { root.kick_member(m.user_id); } }
                                 }
                                 if !m.is_owner && root.can_manage_roles && m.picker_open: Rectangle {

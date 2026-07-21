@@ -169,6 +169,8 @@ pub(crate) struct ConversationSummary {
     /// Unread messages that @-mention me (or @everyone) -- the red sidebar
     /// badge. 0 pre-deploy / for old messages without mention metadata.
     pub(crate) mention_count: u32,
+    /// True for the HexaTalk Support staff DM (badge in sidebar).
+    pub(crate) is_support: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -253,7 +255,12 @@ pub(crate) struct ProfileView {
     pub(crate) status_message: String,
     pub(crate) bio: String,
     pub(crate) last_seen_at: i64,
+    /// online | idle | dnd | offline | invisible
     pub(crate) presence: String,
+    /// Discord-style activity line ("Playing Minecraft", "Active in RustRover").
+    pub(crate) activity: String,
+    /// Emoji / short glyph for the activity app icon (optional).
+    pub(crate) activity_icon: String,
     pub(crate) is_staff: bool,
     pub(crate) is_friend: bool,
     pub(crate) can_support_dm: bool,
@@ -281,6 +288,15 @@ pub(crate) struct AdminUserRow {
     pub(crate) display_name: String,
     pub(crate) role: String,
     pub(crate) banned: bool,
+    /// Ms epoch when a temporary ban lifts; 0 = permanent ban (or unknown).
+    pub(crate) ban_expires_at: i64,
+    /// Platform mute (temporary); 0 = not muted / unknown permanent.
+    pub(crate) muted: bool,
+    pub(crate) mute_expires_at: i64,
+    /// HexaTalk Plus currently active.
+    pub(crate) plus_active: bool,
+    /// ms epoch; 0 if inactive / unknown.
+    pub(crate) plus_expires_at: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -384,6 +400,10 @@ pub(crate) struct AdminUserDetail {
     pub(crate) display_name: String,
     pub(crate) role: String,
     pub(crate) banned: bool,
+    /// Ms epoch when temp ban ends; 0 = permanent / not banned.
+    pub(crate) ban_expires_at: i64,
+    pub(crate) muted: bool,
+    pub(crate) mute_expires_at: i64,
     pub(crate) is_bot: bool,
     pub(crate) bio: String,
     pub(crate) status_message: String,
@@ -394,6 +414,13 @@ pub(crate) struct AdminUserDetail {
     pub(crate) last_seen_at: i64,
     pub(crate) server_names: Vec<String>,
     pub(crate) friend_count: i64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CategorySummary {
+    pub(crate) category_id: String,
+    pub(crate) name: String,
+    pub(crate) position: i64,
 }
 
 #[derive(Debug, Clone)]

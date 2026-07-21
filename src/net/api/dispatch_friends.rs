@@ -14,9 +14,8 @@
 //! tolerant: they accept flat snake_case rows as well as nested
 //! `{user: {...}, meta: {...}}` / `{from: {...}}` / `{to: {...}}` shapes.
 //!
-//! Degradations per the migration table:
-//! - `friends:socialStats`   → zero-filled stats object (expected shape),
-//! - `friends:suggestPeople` → empty list.
+//! Live: `listFriends` / requests / blocks / search / socialStats /
+//! suggestPeople. `getRelationship` is a local default (no REST summary).
 
 use std::collections::BTreeMap;
 
@@ -102,16 +101,48 @@ pub async fn dispatch(
                 rows.iter().map(|row| blocked_object(c, row)).collect(),
             ))
         }
-        // Degradation: no counters endpoint — zero-filled object in the
-        // exact shape `social_stats_subscription` parses (Float64 counts).
-        ("friends", "socialStats") => ok(Value::Object(BTreeMap::from([
-            ("friendsTotal".to_string(), Value::Float64(0.0)),
-            ("friendsOnline".to_string(), Value::Float64(0.0)),
-            ("incomingPending".to_string(), Value::Float64(0.0)),
-            ("outgoingPending".to_string(), Value::Float64(0.0)),
-        ]))),
-        // Degradation: no suggestions endpoint — empty list.
-        ("friends", "suggestPeople") => ok(Value::Array(Vec::new())),
+        // GET /friends/stats → snake_case counters for social_stats_subscription.
+        ("friends", "socialStats") => {
+            let resp = match c.rest(Method::GET, "/friends/stats", None).await {
+                Ok(resp) => resp,
+                Err(err) => return human_or(err),
+            };
+            ok(Value::Object(BTreeMap::from([
+                (
+                    "friendsTotal".to_string(),
+                    Value::Float64(jf64_any(&resp, &["friends_total", "friendsTotal"])),
+                ),
+                (
+                    "friendsOnline".to_string(),
+                    Value::Float64(jf64_any(&resp, &["friends_online", "friendsOnline"])),
+                ),
+                (
+                    "incomingPending".to_string(),
+                    Value::Float64(jf64_any(
+                        &resp,
+                        &["incoming_pending", "incomingPending"],
+                    )),
+                ),
+                (
+                    "outgoingPending".to_string(),
+                    Value::Float64(jf64_any(
+                        &resp,
+                        &["outgoing_pending", "outgoingPending"],
+                    )),
+                ),
+            ])))
+        }
+        // GET /friends/suggestions → people cards (same shape as search hits).
+        ("friends", "suggestPeople") => {
+            let resp = match c.rest(Method::GET, "/friends/suggestions", None).await {
+                Ok(resp) => resp,
+                Err(err) => return human_or(err),
+            };
+            let rows = list_from(&resp, &["suggestions", "users", "items", "data"]);
+            ok(Value::Array(
+                rows.iter().map(|row| people_hit_object(c, row)).collect(),
+            ))
+        }
         // Not in the degradation table and cheap to serve: count the
         // pending incoming requests from the same endpoint the list uses.
         ("friends", "countPendingIncoming") => {
@@ -339,9 +370,9 @@ pub async fn dispatch(
             }
         }
 
-        // Admin maintenance mutation — no equivalent on the new API.
+        // One-shot Convex maintenance tool — never exposed in the UI.
         ("friends", "purgeAutoAcceptedFriendshipsAsAdmin") => {
-            err("Admin panel not available yet")
+            err("Not available on this backend")
         }
 
         _ => Err(ApiError(format!("unmapped path {module}:{name}"))),
@@ -442,8 +473,19 @@ fn jbool_any(v: &serde_json::Value, keys: &[&str], default: bool) -> bool {
 
 fn jf64_any(v: &serde_json::Value, keys: &[&str]) -> f64 {
     for key in keys {
-        if let Some(n) = v.get(*key).and_then(|x| x.as_f64()) {
-            return n;
+        if let Some(x) = v.get(*key) {
+            if let Some(n) = x
+                .as_f64()
+                .or_else(|| x.as_i64().map(|n| n as f64))
+                .or_else(|| x.as_u64().map(|n| n as f64))
+                .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+            {
+                // Seconds vs ms (same heuristic as dispatch_conv).
+                if n > 0.0 && n < 1e11 {
+                    return (n * 1000.0).round();
+                }
+                return n;
+            }
         }
     }
     0.0

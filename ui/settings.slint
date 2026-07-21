@@ -149,6 +149,8 @@ export component SettingsScreen inherits Rectangle {
     in property <color> my_badge_fg;
     in property <bool> store_chat_history: true;
     in property <bool> hide_online_status: false;
+    in property <bool> share_activity: true;
+    in property <string> current_activity;
     in property <bool> friends_only_dms: false;
     in property <bool> discoverable: true;
     in property <string> friend_request_privacy_label;
@@ -207,6 +209,7 @@ export component SettingsScreen inherits Rectangle {
 
     callback toggle_store_history;
     callback toggle_hide_online;
+    callback toggle_share_activity;
     callback toggle_friends_only_dms;
     callback toggle_discoverable;
     callback cycle_friend_request_privacy;
@@ -455,6 +458,24 @@ export component SettingsScreen inherits Rectangle {
                                 Divider {}
                                 ToggleRow { title: "Chat history storage"; description: "Off = live-only (peerseal); nothing saved on Convex for chats you're in."; value: root.store_chat_history; toggled => { root.toggle_store_history(); } }
                                 ToggleRow { title: "Hide online status"; description: "Others see you as offline (you still receive messages)."; value: root.hide_online_status; toggled => { root.toggle_hide_online(); } }
+                                ToggleRow {
+                                    title: "Share detected app activity";
+                                    description: "Show what you're playing or working in (Minecraft, RustRover, VS Code, …) on your profile. Turn off to stop scanning apps.";
+                                    value: root.share_activity;
+                                    toggled => { root.toggle_share_activity(); }
+                                }
+                                if root.share_activity && root.current_activity != "": Text {
+                                    text: "Detected now: " + root.current_activity + "  (foreground app + running processes)";
+                                    font-size: 11px;
+                                    color: Theme.accent;
+                                    wrap: word-wrap;
+                                }
+                                if root.share_activity && root.current_activity == "": Text {
+                                    text: "No known app detected right now.";
+                                    font-size: 11px;
+                                    color: Theme.text-muted;
+                                    wrap: word-wrap;
+                                }
                                 ToggleRow { title: "Friends-only DMs"; description: "Only people on your friends list can start a direct chat."; value: root.friends_only_dms; toggled => { root.toggle_friends_only_dms(); } }
                                 ToggleRow { title: "Discoverable profile"; description: "When off, you are harder to find (exact username still works)."; value: root.discoverable; toggled => { root.toggle_discoverable(); } }
                                 Divider {}
@@ -513,10 +534,13 @@ export component SettingsScreen inherits Rectangle {
                                 }
                                 Divider {}
                                 Text { text: "What you get"; font-size: Theme.text-sm; font-family: Theme.font-medium; color: Theme.text-primary; }
-                                Text { text: "• PLUS badge next to your name in chat & member list"; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
-                                Text { text: "• Custom profile banner"; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
+                                Text { text: "• PLUS badge next to your name in chat, members & profile"; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
+                                Text { text: "• Gold name highlight on your profile"; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
+                                Text { text: "• Gold avatar ring + banner strip (or custom banner)"; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
+                                Text { text: "• Custom profile banner image"; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
                                 Text { text: "• Any avatar color (#RRGGBB)"; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
                                 Text { text: "• Longer status message & bio"; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
+                                Text { text: "• Subtle gold border on the profile info card"; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
                                 Divider {}
                                 HorizontalLayout {
                                     spacing: 8px;

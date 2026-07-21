@@ -603,7 +603,10 @@ pub(crate) fn members_subscription(
             },
             DEFAULT_TICK,
             move |event: &WsEvent| {
-                is_server_scope_event(&event.kind) && payload_matches_server(event, &watch)
+                // Server-scope changes + presence (arrives on the personal
+                // channel = my userId, so it's not server-scoped).
+                (is_server_scope_event(&event.kind) && payload_matches_server(event, &watch))
+                    || event.kind == "presence"
             },
             move |result| {
                 let members = parse_object_array(result)
@@ -865,15 +868,22 @@ pub(crate) fn conversations_subscription(
             move |result| {
                 let conversations = parse_object_array(result)
                     .into_iter()
-                    .map(|obj| ConversationSummary {
-                        conversation_id: obj_str(&obj, "conversationId"),
-                        title: obj_str(&obj, "title"),
-                        kind: obj_str(&obj, "kind"),
-                        peer_user_id: obj_opt_str(&obj, "peerUserId"),
-                        last_message_at: obj_ms(&obj, "lastMessageAt"),
-                        unread: obj_bool(&obj, "unread"),
-                        // Absent pre-deploy -> 0 (badge hidden).
-                        mention_count: obj_f64(&obj, "mentionCount") as u32,
+                    .map(|obj| {
+                        let title = obj_str(&obj, "title");
+                        let is_support = obj_bool(&obj, "isSupport")
+                            || title.eq_ignore_ascii_case("Support")
+                            || title.eq_ignore_ascii_case("HexaTalk Support");
+                        ConversationSummary {
+                            conversation_id: obj_str(&obj, "conversationId"),
+                            title,
+                            kind: obj_str(&obj, "kind"),
+                            peer_user_id: obj_opt_str(&obj, "peerUserId"),
+                            last_message_at: obj_ms(&obj, "lastMessageAt"),
+                            unread: obj_bool(&obj, "unread"),
+                            // Absent pre-deploy -> 0 (badge hidden).
+                            mention_count: obj_f64(&obj, "mentionCount") as u32,
+                            is_support,
+                        }
                     })
                     .collect();
                 tx.send(Message::ConversationsUpdated(conversations)).is_ok()
@@ -905,6 +915,25 @@ pub(crate) fn admin_users_subscription(
                         display_name: obj_str(&obj, "displayName"),
                         role: obj_str(&obj, "role"),
                         banned: obj_bool(&obj, "banned"),
+                        ban_expires_at: {
+                            let a = obj_ms(&obj, "banExpiresAt");
+                            if a > 0 {
+                                a
+                            } else {
+                                obj_ms(&obj, "bannedUntil")
+                            }
+                        },
+                        muted: obj_bool(&obj, "muted"),
+                        mute_expires_at: {
+                            let a = obj_ms(&obj, "muteExpiresAt");
+                            if a > 0 {
+                                a
+                            } else {
+                                obj_ms(&obj, "mutedUntil")
+                            }
+                        },
+                        plus_active: obj_bool(&obj, "plusActive"),
+                        plus_expires_at: obj_ms(&obj, "plusExpiresAt"),
                     })
                     .collect();
                 tx.send(Message::AdminUsersUpdated(users)).is_ok()

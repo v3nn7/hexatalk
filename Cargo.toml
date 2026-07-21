@@ -5,7 +5,7 @@ resolver = "2"
 
 [package]
 name = "HexaTalk"
-version = "0.1.9"
+version = "0.1.15"
 edition = "2024"
 
 [dependencies]
@@ -59,7 +59,13 @@ peerseal = { path = "crates/reprotocol" }
 rustls = { version = "0.23.42", default-features = false, features = ["std", "tls12", "ring"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_Media_Multimedia", "Win32_Security_Cryptography"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation",
+    "Win32_Media_Multimedia",
+    "Win32_Security_Cryptography",
+    "Win32_System_Threading",
+] }
 
 # The tray icon needs a live event loop on whatever thread owns it: a Win32
 # message loop on Windows, a GTK/glib main loop on Linux (see src/tray.rs).

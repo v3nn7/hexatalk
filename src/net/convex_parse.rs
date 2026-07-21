@@ -334,6 +334,8 @@ pub(crate) fn parse_profile_view(result: FunctionResult) -> Result<ProfileView, 
                 let p = obj_str(&obj, "presence");
                 if p.is_empty() { "offline".into() } else { p }
             },
+            activity: obj_str(&obj, "activity"),
+            activity_icon: obj_str(&obj, "activityIcon"),
             is_staff: obj.get("isStaff").map(value_as_bool).unwrap_or(false),
             is_friend: obj.get("isFriend").map(value_as_bool).unwrap_or(false),
             can_support_dm: obj.get("canSupportDm").map(value_as_bool).unwrap_or(false),
@@ -415,6 +417,23 @@ pub(crate) fn parse_admin_user_detail(result: FunctionResult) -> Option<AdminUse
             display_name: obj_str(&obj, "displayName"),
             role: obj_str(&obj, "role"),
             banned: obj_bool(&obj, "banned"),
+            ban_expires_at: {
+                let a = obj_ms(&obj, "banExpiresAt");
+                if a > 0 {
+                    a
+                } else {
+                    obj_ms(&obj, "bannedUntil")
+                }
+            },
+            muted: obj_bool(&obj, "muted"),
+            mute_expires_at: {
+                let a = obj_ms(&obj, "muteExpiresAt");
+                if a > 0 {
+                    a
+                } else {
+                    obj_ms(&obj, "mutedUntil")
+                }
+            },
             is_bot: obj_bool(&obj, "isBot"),
             bio: obj_str(&obj, "bio"),
             status_message: obj_str(&obj, "statusMessage"),

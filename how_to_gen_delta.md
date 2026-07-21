@@ -3,7 +3,7 @@
 `scripts\release.ps1` does the full pipeline:
 
 1. Bump version in `Cargo.toml`
-2. `cargo build --release` (bakes `CONVEX_URL` from `.env.local`)
+2. `cargo build --release` (bakes `API_URL` from `.env.local` / default api.vyrapp.pro)
 3. Archive `releases\HexaTalk-<ver>.exe` (local only — next delta base)
 4. **Sign** → ed25519, 64 raw bytes (embedded into each delta)
 5. **Deltas** → qbsdiff, **HTD1 AES-256-GCM**, then **trailing target-exe sig**

@@ -289,6 +289,8 @@ pub(crate) enum Message {
     ToggleHideOnline,
     ToggleFriendsOnlyDms,
     ToggleDiscoverable,
+    /// Local-only: share detected app activity (Minecraft / RustRover / …).
+    ToggleShareActivity,
     PrivacyFlagFinished(Result<(), String>),
     SignOutOtherSessions,
     SignOutOthersFinished(Result<u32, String>),
@@ -359,8 +361,26 @@ pub(crate) enum Message {
     AdminSetRole(String, bool),
     AdminSetPlatformRole(String, String),
     AdminSetRoleFinished(Result<(), String>),
-    AdminSetBanned(String, bool),
+    /// Ban/unban. `duration_hours`: `None` = permanent, `Some(h)` = temp ban of h hours.
+    /// When `banned` is false, duration is ignored (unban).
+    AdminSetBanned {
+        user_id: String,
+        banned: bool,
+        duration_hours: Option<u32>,
+    },
     AdminSetBannedFinished(Result<(), String>),
+    /// Revert optimistic ban flip + show error.
+    AdminSetBannedRevert(String, Vec<(String, bool, i64)>),
+    AdminBanReasonChanged(String),
+    AdminReportsFilterChanged(String),
+    NewChannelCategoryChanged(String),
+    LoadServerCategories,
+    ServerCategoriesUpdated(Vec<crate::state::types::CategorySummary>),
+    AdminCustomDaysChanged(String),
+    /// Ban with admin_custom_days (whole days → hours).
+    AdminBanCustomDays(String),
+    AdminMuteCustomDays(String),
+    CloseAdminUserDetail,
     // ---- Admin panel: stats, filter, per-user detail, force-logout ----
     LoadAdminStats,
     AdminStatsUpdated(Result<crate::state::types::AdminStats, String>),
@@ -371,6 +391,27 @@ pub(crate) enum Message {
     AdminUserDetailUpdated(Option<crate::state::types::AdminUserDetail>),
     AdminRevokeSessions(String),
     AdminRevokeSessionsFinished(Result<(), String>),
+    /// Platform mute (admin). `duration_hours` must be > 0 (temporary only).
+    AdminSetMuted {
+        user_id: String,
+        muted: bool,
+        duration_hours: Option<u32>,
+    },
+    AdminSetMutedFinished(Result<(), String>),
+    AdminSetMutedRevert(String, Vec<(String, bool, i64)>),
+    /// Staff gift of HexaTalk Plus. API max is 30 days (1 month).
+    AdminGrantPlus { user_id: String, days: u32 },
+    AdminGrantPlusFinished(Result<String, String>),
+    /// Revoke gifted / active Plus on a user.
+    AdminRevokePlus(String),
+    AdminRevokePlusFinished(Result<String, String>),
+    /// Server-scoped temporary mute of a member.
+    MuteServerMember {
+        user_id: String,
+        duration_hours: u32,
+    },
+    UnmuteServerMember(String),
+    MuteServerMemberFinished(Result<String, String>),
 
     Tick,
     HeartbeatFinished,
@@ -442,7 +483,9 @@ pub(crate) enum Message {
     AvatarImageLoaded(String, Result<Vec<u8>, String>),
     PickAvatarImage,
     AvatarFilePicked(AvatarPick),
-    AvatarUploadFinished(Result<String, String>),
+    /// `(download_url, raw_image_bytes)` so the UI can paint the new photo
+    /// immediately without waiting on a second HTTP fetch of the same bytes.
+    AvatarUploadFinished(Result<(String, Vec<u8>), String>),
     RemoveAvatarImage,
     AvatarRemoveFinished(Result<(), String>),
 

@@ -1,13 +1,13 @@
 # HexaTalk
 
-Natywny komunikator desktop (Rust + **Slint**) z realtime bazą
-[Convex](https://convex.dev). Dodatkowo: mobile Android (egui), bot SDK,
+Natywny komunikator desktop (Rust + **Slint**) z własnym API
+(`https://api.vyrapp.pro`). Dodatkowo: mobile Android (egui), bot SDK,
 P2P **peerseal** (E2EE), WebRTC głos / screen share, serwery w stylu Discord.
 
 ## Funkcje (aktualne)
 
 ### Czat i social
-- Rejestracja / logowanie (PBKDF2 + sesje), limity logowania
+- Rejestracja / logowanie (sesje + Bearer token)
 - Znajomi, zaproszenia, bloki, nicki / ulubione
 - DM 1:1 (opcjonalnie live peerseal E2EE), grupy, kanały serwerowe
 - Reakcje, reply, mentions, pin, załączniki, typing, presence
@@ -17,7 +17,7 @@ P2P **peerseal** (E2EE), WebRTC głos / screen share, serwery w stylu Discord.
 - **Kategorie kanałów** + position
 - **Permission overwrites** per kanał (rola / członek)
 - **#announcements** — zawsze na górze, wszyscy czytają, piszą tylko staff (`ANNOUNCE` / owner)
-- Mute kanału / serwera (`notificationPrefs`) — desktop nie spamuje toastami
+- Mute kanału / serwera — desktop nie spamuje toastami
 
 ### Głos i media
 - Call 1:1 WebRTC + ADPCM
@@ -29,14 +29,11 @@ P2P **peerseal** (E2EE), WebRTC głos / screen share, serwery w stylu Discord.
 - Lokalne DSP: noise gate + HPF + **AGC** + deharsh (niski CPU, na urządzeniu)
 
 ### Bezpieczeństwo
-- Lista sesji / revoke (`prefs:listSessions`, `prefs:revokeSession`)
-- `prefs:touchSession` (device name + platform) przy logowaniu
-- Sign out other devices
+- Platform admin panel (lista userów, role, ban, stats, reports)
 - SAS / fingerprint peerseal w DM
 
 ### Mobile + infra
 - Android crate (`crates/hexatalk-mobile`) — chat, friends, servers
-- `push:registerToken` + `push:tokensForConversationNotify` (FCM/APNs keys w Convex env)
 - Auto-update check, tray, installer
 
 ### Boty
@@ -46,8 +43,8 @@ P2P **peerseal** (E2EE), WebRTC głos / screen share, serwery w stylu Discord.
 
 | Ścieżka | Rola |
 |---------|------|
-| `convex/` | Schema + mutations/queries (auth, servers, channels, messages, voice, push…) |
 | `src/` | Desktop app (Slint UI, WebRTC, peerseal, tray) |
+| `src/net/api/` | REST + WebSocket adapter do api.vyrapp.pro |
 | `ui/*.slint` | GUI |
 | `crates/reprotocol` | peerseal P2P (nie edytować — tylko integrować) |
 | `crates/hexatalk-bot` | Bot SDK |
@@ -57,22 +54,15 @@ P2P **peerseal** (E2EE), WebRTC głos / screen share, serwery w stylu Discord.
 ## Uruchomienie
 
 ```bash
-npm install
-npx convex dev   # terminal 1 — wdraża schema + functions
-cargo run        # terminal 2 — desktop
+cargo run        # desktop (API: https://api.vyrapp.pro)
 ```
+
+Opcjonalnie w `.env.local`: `API_URL=…` (override bake w `build.rs`).
 
 Mobile APK: zobacz `crates/hexatalk-mobile/README.md`.
 
-## Nowe API (skrót)
-
-- `channels:*` — categories, overwrites, mute, channel perms
-- `messages:search` — wyszukiwanie plaintext w historii
-- `prefs:listSessions` / `revokeSession` / `touchSession`
-- `push:tokensForConversationNotify` — respektuje mute
-
 ## Model bezpieczeństwa
 
-Własny system logowania (token sesji w argumencie). Do produkcji: 2FA,
+Własny system logowania (Bearer session token). Do produkcji: 2FA,
 twardsza rotacja tokenów, FCM z podpisem. E2EE DM przez peerseal; historia
-Convex jest opcjonalna (`storeChatHistory` / per-chat store).
+na serwerze jest opcjonalna (`storeChatHistory` / per-chat store).

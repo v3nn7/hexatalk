@@ -19,6 +19,7 @@ import { CallBanner } from "call_banner.slint";
 import { ProfileScreen } from "profile.slint";
 import { SettingsScreen, SettingsCategory, BotRow, DeviceRow } from "settings.slint";
 import { ServerSettingsScreen, ServerSettingsCategory } from "server_settings.slint";
+import { AdminPanel } from "admin_panel.slint";
 import {
     SSChannelRow, SSMemberRow, SSRoleRow, SSPermRow,
     SSChannelRolePick, SSChannelOverwritePermRow,
@@ -27,7 +28,7 @@ import {
     ServerRow, ConversationRow, FriendRow, IncomingRequestRow, OutgoingRequestRow,
     PeopleHitRow, SuggestionRow, BlockedRow, ChannelRow, AdminUserRow, GroupCandidateRow,
     ChatMessageRow, MemberRow, ShareTargetRow, RoleTagRow, VoiceUserVolumeRow, ReportRow,
-    PinnedMessageRow,
+    PinnedMessageRow, CategoryPickRow, AdminDetailView,
 } from "chat_types.slint";
 
 export { AuthMode, SidebarTab }
@@ -157,7 +158,12 @@ export component AppWindow inherits Window {
     in property <color> profile_avatar_color: Theme.accent;
     in property <image> profile_photo;
     in property <bool> profile_online: false;
+    in property <bool> profile_idle: false;
+    in property <bool> profile_dnd: false;
+    in property <string> profile_presence_label: "Offline";
     in property <string> profile_status_message;
+    in property <string> profile_activity;
+    in property <string> profile_activity_icon;
     in property <string> profile_bio;
     in property <bool> profile_is_staff: false;
     in property <bool> profile_is_plus: false;
@@ -201,7 +207,12 @@ export component AppWindow inherits Window {
         avatar_color: root.profile_avatar_color;
         photo: root.profile_photo;
         online: root.profile_online;
+        idle: root.profile_idle;
+        dnd: root.profile_dnd;
+        presence_label: root.profile_presence_label;
         status_message: root.profile_status_message;
+        activity: root.profile_activity;
+        activity_icon: root.profile_activity_icon;
         bio: root.profile_bio;
         is_staff: root.profile_is_staff;
         is_plus: root.profile_is_plus;
@@ -256,6 +267,8 @@ export component AppWindow inherits Window {
     in property <color> settings_my_badge_fg;
     in property <bool> settings_store_chat_history: true;
     in property <bool> settings_hide_online_status: false;
+    in property <bool> settings_share_activity: true;
+    in property <string> settings_current_activity;
     in property <bool> settings_friends_only_dms: false;
     in property <bool> settings_discoverable: true;
     in property <string> settings_friend_request_privacy_label;
@@ -307,6 +320,7 @@ export component AppWindow inherits Window {
     callback settings_log_out;
     callback settings_toggle_store_history;
     callback settings_toggle_hide_online;
+    callback settings_toggle_share_activity;
     callback settings_toggle_friends_only_dms;
     callback settings_toggle_discoverable;
     callback settings_cycle_friend_request_privacy;
@@ -354,6 +368,8 @@ export component AppWindow inherits Window {
         my_badge_fg: root.settings_my_badge_fg;
         store_chat_history: root.settings_store_chat_history;
         hide_online_status: root.settings_hide_online_status;
+        share_activity: root.settings_share_activity;
+        current_activity: root.settings_current_activity;
         friends_only_dms: root.settings_friends_only_dms;
         discoverable: root.settings_discoverable;
         friend_request_privacy_label: root.settings_friend_request_privacy_label;
@@ -399,6 +415,7 @@ export component AppWindow inherits Window {
         log_out => { root.settings_log_out(); }
         toggle_store_history => { root.settings_toggle_store_history(); }
         toggle_hide_online => { root.settings_toggle_hide_online(); }
+        toggle_share_activity => { root.settings_toggle_share_activity(); }
         toggle_friends_only_dms => { root.settings_toggle_friends_only_dms(); }
         toggle_discoverable => { root.settings_toggle_discoverable(); }
         cycle_friend_request_privacy => { root.settings_cycle_friend_request_privacy(); }
@@ -486,6 +503,8 @@ export component AppWindow inherits Window {
     callback ss_toggle_member_picker(string);
     callback ss_toggle_member_role(string, string);
     callback ss_kick_member(string);
+    callback ss_mute_member(string, int);
+    callback ss_unmute_member(string);
     callback ss_open_profile(string);
     callback ss_new_role_name_changed(string);
     callback ss_create_role;
@@ -570,6 +589,8 @@ export component AppWindow inherits Window {
         toggle_member_picker(id) => { root.ss_toggle_member_picker(id); }
         toggle_member_role(uid, rid) => { root.ss_toggle_member_role(uid, rid); }
         kick_member(id) => { root.ss_kick_member(id); }
+        mute_member(id, hours) => { root.ss_mute_member(id, hours); }
+        unmute_member(id) => { root.ss_unmute_member(id); }
         open_profile(id) => { root.ss_open_profile(id); }
         new_role_name_changed(t) => { root.ss_new_role_name_changed(t); }
         create_role => { root.ss_create_role(); }
@@ -613,6 +634,7 @@ export component AppWindow inherits Window {
     callback chat_open_friends;
     callback chat_open_requests;
     callback chat_open_admin;
+    callback chat_close_admin;
 
     // ---- Sidebar ----
     in property <SidebarTab> chat_tab: SidebarTab.Chats;
@@ -649,6 +671,9 @@ export component AppWindow inherits Window {
     in property <bool> chat_new_channel_open: false;
     in-out property <string> chat_new_channel_name;
     in property <bool> chat_new_channel_is_voice: false;
+    in property <[CategoryPickRow]> chat_new_channel_categories: [];
+    in property <string> chat_new_channel_category_id: "";
+    callback chat_new_channel_category_changed(string);
     in property <[ChannelRow]> chat_text_channels: [];
     in property <[ChannelRow]> chat_voice_channels: [];
     in-out property <string> chat_admin_search;
@@ -713,7 +738,24 @@ export component AppWindow inherits Window {
     callback chat_open_channel(string);
     callback chat_admin_search_changed(string);
     callback chat_admin_set_role(string, string);
-    callback chat_admin_set_banned(string, bool);
+    // duration_hours: 0 = permanent; >0 = temporary. Unban is separate.
+    callback chat_admin_ban(string, int);
+    callback chat_admin_unban(string);
+    callback chat_admin_mute(string, int);
+    callback chat_admin_unmute(string);
+    in-out property <string> chat_admin_ban_reason;
+    in property <string> chat_admin_reports_filter: "pending";
+    callback chat_admin_ban_reason_changed(string);
+    callback chat_admin_reports_filter_changed(string);
+    callback chat_admin_open_user_detail(string);
+    callback chat_admin_close_user_detail();
+    in-out property <string> chat_admin_custom_days;
+    callback chat_admin_custom_days_changed(string);
+    callback chat_admin_ban_custom_days(string);
+    callback chat_admin_mute_custom_days(string);
+    callback chat_admin_grant_plus(string, int);
+    callback chat_admin_revoke_plus(string);
+    in property <AdminDetailView> chat_admin_detail;
     callback chat_open_settings;
     callback chat_sidebar_resize_started;
     callback chat_sidebar_resize_moved(length);
@@ -998,7 +1040,6 @@ export component AppWindow inherits Window {
                 open_channel(id) => { root.chat_open_channel(id); }
                 admin_search_changed(t) => { root.chat_admin_search_changed(t); }
                 admin_set_role(id, role) => { root.chat_admin_set_role(id, role); }
-                admin_set_banned(id, b) => { root.chat_admin_set_banned(id, b); }
                 open_settings => { root.chat_open_settings(); }
                 resize_started => { root.chat_sidebar_resize_started(); }
                 resize_moved(x) => { root.chat_sidebar_resize_moved(x); }
@@ -1107,6 +1148,46 @@ export component AppWindow inherits Window {
             text: rail.hovered_tooltip;
             x: 80px;
             y: call_banner.height + rail.tooltip_y + 11px;
+        }
+
+        // Full-window Admin console (centered modal). Opened from the rail
+        // Admin button; close via header / backdrop / Escape.
+        if root.chat_admin_active: AdminPanel {
+            width: size_ref.width;
+            height: size_ref.height;
+            admin_search <=> root.chat_admin_search;
+            admin_status: root.chat_admin_status;
+            admin_users: root.chat_admin_users;
+            is_admin: root.chat_is_admin;
+            admin_total_users: root.chat_admin_total_users;
+            admin_online: root.chat_admin_online;
+            admin_staff: root.chat_admin_staff;
+            admin_banned: root.chat_admin_banned;
+            admin_bots: root.chat_admin_bots;
+            admin_servers: root.chat_admin_servers;
+            admin_reports: root.chat_admin_reports;
+            admin_reports_status: root.chat_admin_reports_status;
+            admin_ban_reason <=> root.chat_admin_ban_reason;
+            admin_reports_filter: root.chat_admin_reports_filter;
+            admin_custom_days <=> root.chat_admin_custom_days;
+            admin_detail: root.chat_admin_detail;
+            close => { root.chat_close_admin(); }
+            admin_search_changed(t) => { root.chat_admin_search_changed(t); }
+            admin_set_role(id, role) => { root.chat_admin_set_role(id, role); }
+            admin_ban(id, hours) => { root.chat_admin_ban(id, hours); }
+            admin_unban(id) => { root.chat_admin_unban(id); }
+            admin_mute(id, hours) => { root.chat_admin_mute(id, hours); }
+            admin_unmute(id) => { root.chat_admin_unmute(id); }
+            admin_resolve_report(id, status) => { root.chat_admin_resolve_report(id, status); }
+            admin_ban_reason_changed(t) => { root.chat_admin_ban_reason_changed(t); }
+            admin_reports_filter_changed(t) => { root.chat_admin_reports_filter_changed(t); }
+            admin_open_user_detail(id) => { root.chat_admin_open_user_detail(id); }
+            admin_close_user_detail => { root.chat_admin_close_user_detail(); }
+            admin_custom_days_changed(t) => { root.chat_admin_custom_days_changed(t); }
+            admin_ban_custom_days(id) => { root.chat_admin_ban_custom_days(id); }
+            admin_mute_custom_days(id) => { root.chat_admin_mute_custom_days(id); }
+            admin_grant_plus(id, days) => { root.chat_admin_grant_plus(id, days); }
+            admin_revoke_plus(id) => { root.chat_admin_revoke_plus(id); }
         }
     }
 
@@ -1368,6 +1449,27 @@ export component AppWindow inherits Window {
                     text: root.chat_new_channel_name == "" ? (root.chat_new_channel_is_voice ? "🔊 Voice Lounge" : "# new-channel") : (root.chat_new_channel_is_voice ? "🔊 " + root.chat_new_channel_name : "# " + root.chat_new_channel_name);
                     font-size: 11px;
                     color: Theme.text-muted;
+                }
+
+                FieldLabel { text: "CATEGORY (OPTIONAL)"; }
+                HorizontalLayout {
+                    spacing: 6px;
+                    SmallButton {
+                        text: "None";
+                        bg: root.chat_new_channel_category_id == "" ? Theme.accent-soft : Theme.bg-control;
+                        clicked => { root.chat_new_channel_category_changed(""); }
+                    }
+                    for cat in root.chat_new_channel_categories: SmallButton {
+                        text: cat.name;
+                        bg: cat.selected ? Theme.accent-soft : Theme.bg-control;
+                        clicked => { root.chat_new_channel_category_changed(cat.category_id); }
+                    }
+                }
+                if root.chat_new_channel_categories.length == 0: Text {
+                    text: "No categories yet — channel goes to the top level.";
+                    font-size: 11px;
+                    color: Theme.text-muted;
+                    wrap: word-wrap;
                 }
 
                 if root.chat_server_status != "": Text { text: root.chat_server_status; font-size: 11px; color: Theme.danger; wrap: word-wrap; }

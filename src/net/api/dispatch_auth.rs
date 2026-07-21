@@ -6,8 +6,8 @@
 //! arg is ignored), and the snake_case JSON response is rebuilt into the
 //! camelCase `Value` shape that `convex_parse.rs` (`parse_session` /
 //! `parse_me`) and the call sites already expect. Paths with no endpoint on
-//! the new API degrade per the migration doc's table — empty but correct
-//! shapes, never a crash.
+//! shapes the UI already expects. Session list/revoke and change-password
+//! hit live REST; per-conversation storage prefs stay local defaults.
 
 use std::collections::BTreeMap;
 
@@ -73,11 +73,20 @@ pub async fn dispatch(
                 None,
             )))
         }
-        // Degradation: no change-password endpoint — direct users to the
-        // email-code reset flow instead.
-        ("auth", "changePassword") => Ok(FunctionResult::ErrorMessage(
-            "Password change is not available yet — use password reset".to_string(),
-        )),
+        ("auth", "changePassword") => {
+            let body = json!({
+                "currentPassword": arg_str(&args, "currentPassword"),
+                "newPassword": arg_str(&args, "newPassword"),
+            });
+            match c
+                .rest(Method::POST, "/auth/change-password", Some(body))
+                .await
+            {
+                Ok(_) => ok_null(),
+                // "invalid current password" etc. — user-facing copy.
+                Err(err) => human_or(err),
+            }
+        }
         ("auth", "requestPasswordReset") => {
             let body = json!({ "email": arg_str(&args, "email") });
             match c
@@ -166,24 +175,109 @@ pub async fn dispatch(
             Ok(FunctionResult::Value(Value::Object(obj)))
         }
         ("prefs", "setConversationStore") => ok_null(),
-        ("prefs", "signOutOtherSessions") => Ok(FunctionResult::ErrorMessage(
-            "Not supported yet".to_string(),
-        )),
-        // Degradation: no session-listing / per-session revoke endpoints —
-        // empty list (UI shows "no other sessions") and a clear message.
-        ("prefs", "listSessions") => Ok(FunctionResult::Value(Value::Array(Vec::new()))),
-        ("prefs", "revokeSession") => Ok(FunctionResult::ErrorMessage(
-            "Not supported yet".to_string(),
-        )),
+        // DELETE /auth/sessions?others=true — kills every session except the
+        // current Bearer. Call site expects `{ killed: n }`.
+        ("prefs", "signOutOtherSessions") => {
+            let killed = match c.rest(Method::GET, "/auth/sessions", None).await {
+                Ok(resp) => session_rows(&resp)
+                    .iter()
+                    .filter(|s| !jbool(s, "current", false))
+                    .count() as f64,
+                Err(_) => 0.0,
+            };
+            match c
+                .rest(Method::DELETE, "/auth/sessions?others=true", None)
+                .await
+            {
+                Ok(_) => {
+                    let mut obj = BTreeMap::new();
+                    obj.insert("killed".to_string(), Value::Float64(killed));
+                    Ok(FunctionResult::Value(Value::Object(obj)))
+                }
+                Err(err) => human_or(err),
+            }
+        }
+        // GET /auth/sessions → [{id, created_at, last_seen_at, platform, current, ...}]
+        ("prefs", "listSessions") => {
+            let resp = match c.rest(Method::GET, "/auth/sessions", None).await {
+                Ok(resp) => resp,
+                Err(err) => return human_or(err),
+            };
+            let rows = session_rows(&resp);
+            let mut out = Vec::with_capacity(rows.len());
+            for s in rows {
+                let mut obj = BTreeMap::new();
+                obj.insert(
+                    "sessionId".to_string(),
+                    Value::String(jstr(s, "id")),
+                );
+                obj.insert(
+                    "createdAt".to_string(),
+                    Value::Float64(jnum(s, "created_at")),
+                );
+                obj.insert(
+                    "lastActiveAt".to_string(),
+                    Value::Float64(jnum(s, "last_seen_at")),
+                );
+                obj.insert(
+                    "deviceName".to_string(),
+                    Value::String({
+                        let d = jstr(s, "device_name");
+                        if d.is_empty() {
+                            jstr(s, "user_agent")
+                        } else {
+                            d
+                        }
+                    }),
+                );
+                obj.insert(
+                    "platform".to_string(),
+                    Value::String(jstr(s, "platform")),
+                );
+                obj.insert(
+                    "current".to_string(),
+                    Value::Boolean(jbool(s, "current", false)),
+                );
+                out.push(Value::Object(obj));
+            }
+            Ok(FunctionResult::Value(Value::Array(out)))
+        }
+        // DELETE /auth/sessions/:id
+        ("prefs", "revokeSession") => {
+            let session_id = arg_str(&args, "sessionId");
+            if session_id.is_empty() {
+                return Ok(FunctionResult::ErrorMessage("Session id required".into()));
+            }
+            match c
+                .rest(Method::DELETE, &format!("/auth/sessions/{session_id}"), None)
+                .await
+            {
+                Ok(_) => ok_null(),
+                Err(err) => human_or(err),
+            }
+        }
 
         // ---------- presence ----------
         ("presence", "heartbeat") => {
-            let body = match arg_opt_str(&args, "status") {
-                Some(status) => json!({ "status": status }),
-                None => json!({}),
-            };
-            c.rest(Method::POST, "/presence/heartbeat", Some(body))
-                .await?;
+            // Best-effort activity share: servers that don't know `activity`
+            // simply ignore the extra field.
+            let mut body = serde_json::Map::new();
+            if let Some(status) = arg_opt_str(&args, "status") {
+                body.insert("status".into(), json!(status));
+            }
+            if let Some(activity) = arg_opt_str(&args, "activity") {
+                if activity.is_empty() {
+                    body.insert("activity".into(), serde_json::Value::Null);
+                } else {
+                    body.insert("activity".into(), json!(activity));
+                }
+            }
+            c.rest(
+                Method::POST,
+                "/presence/heartbeat",
+                Some(serde_json::Value::Object(body)),
+            )
+            .await?;
             ok_null()
         }
 
@@ -247,8 +341,42 @@ fn jstr(v: &serde_json::Value, key: &str) -> String {
         .to_string()
 }
 
+fn jstr_any(v: &serde_json::Value, keys: &[&str]) -> String {
+    for key in keys {
+        if let Some(s) = v.get(*key).and_then(|x| x.as_str()) {
+            if !s.is_empty() {
+                return s.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
 fn jbool(v: &serde_json::Value, key: &str, default: bool) -> bool {
     v.get(key).and_then(|x| x.as_bool()).unwrap_or(default)
+}
+
+fn jnum(v: &serde_json::Value, key: &str) -> f64 {
+    v.get(key)
+        .and_then(|x| {
+            x.as_f64()
+                .or_else(|| x.as_i64().map(|n| n as f64))
+                .or_else(|| x.as_u64().map(|n| n as f64))
+                .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+        })
+        .unwrap_or(0.0)
+}
+
+fn session_rows(resp: &serde_json::Value) -> Vec<&serde_json::Value> {
+    if let Some(arr) = resp.as_array() {
+        return arr.iter().collect();
+    }
+    for key in ["sessions", "items", "data"] {
+        if let Some(arr) = resp.get(key).and_then(|v| v.as_array()) {
+            return arr.iter().collect();
+        }
+    }
+    Vec::new()
 }
 
 /// Build the camelCase session/user object `parse_session` / `parse_me`
@@ -280,16 +408,31 @@ fn user_object(c: &ApiClient, user: &serde_json::Value, token: Option<String>) -
         Value::String(jstr(user, "status_message")),
     );
     obj.insert("bio".to_string(), Value::String(jstr(user, "bio")));
-    // Storage keys become download URLs; empty key = no avatar.
-    let avatar_key = jstr(user, "avatar_storage_key");
-    obj.insert(
-        "avatarImageUrl".to_string(),
-        Value::String(if avatar_key.is_empty() {
-            String::new()
-        } else {
-            c.file_url(&avatar_key)
-        }),
+    // Storage key → download URL; also accept camelCase / prebuilt URL fields
+    // (auth:me / login shapes have varied after the Convex → VyrApp move).
+    let avatar_key = jstr_any(
+        user,
+        &[
+            "avatar_storage_key",
+            "avatarStorageKey",
+            "avatar_key",
+            "avatarKey",
+        ],
     );
+    let avatar_url = if !avatar_key.is_empty() {
+        c.file_url(&avatar_key)
+    } else {
+        jstr_any(
+            user,
+            &[
+                "avatar_url",
+                "avatarUrl",
+                "avatar_image_url",
+                "avatarImageUrl",
+            ],
+        )
+    };
+    obj.insert("avatarImageUrl".to_string(), Value::String(avatar_url));
     obj.insert(
         "storeChatHistory".to_string(),
         Value::Boolean(jbool(user, "store_chat_history", true)),

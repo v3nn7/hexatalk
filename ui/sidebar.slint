@@ -410,7 +410,6 @@ export component Sidebar inherits Rectangle {
 
     callback admin_search_changed(string);
     callback admin_set_role(string, string);
-    callback admin_set_banned(string, bool);
 
     callback open_settings;
 
@@ -548,14 +547,32 @@ export component Sidebar inherits Rectangle {
                                 }
                                 HorizontalLayout {
                                     padding-left: 14px;
-                                    alignment: start;
+                                    padding-right: 10px;
+                                    spacing: 8px;
+                                    alignment: center;
                                     Text {
                                         text: c.title;
                                         font-size: Theme.text-md;
                                         font-family: c.unread && !c.active ? Theme.font-medium : Theme.font-body;
                                         color: c.active || c.unread || ct.has-hover ? Theme.text-primary : Theme.text-muted;
                                         vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                        overflow: elide;
                                         animate color { duration: 120ms; }
+                                    }
+                                    if c.is_support: Rectangle {
+                                        height: 16px;
+                                        width: support-badge.preferred-width + 8px;
+                                        background: Theme.accent-soft;
+                                        border-radius: Theme.radius-sm;
+                                        support-badge := Text {
+                                            text: "SUPPORT";
+                                            font-size: 9px;
+                                            font-family: Theme.font-medium;
+                                            color: Theme.accent-hover;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
                                     }
                                 }
                             }
@@ -823,78 +840,26 @@ export component Sidebar inherits Rectangle {
                         Rectangle {}
                     }
 
+                    // Admin UI lives in the full-window AdminPanel overlay
+                    // (main.slint). Sidebar only shows a short placeholder so
+                    // the tab still has a stable body while the modal is up.
                     if root.tab == SidebarTab.Admin: VerticalLayout {
-        opacity: 0;
-        init => { self.opacity = 1; }
-        animate opacity { duration: 140ms; }
-                        padding: 12px;
+                        padding: 16px;
                         spacing: 10px;
-                        HorizontalLayout {
-                            spacing: 6px;
-                            StatsChip { label: "Users"; value: root.admin_total_users; }
-                            StatsChip { label: "Online"; value: root.admin_online; }
-                            StatsChip { label: "Staff"; value: root.admin_staff; }
-                            StatsChip { label: "Banned"; value: root.admin_banned; }
-                            StatsChip { label: "Bots"; value: root.admin_bots; }
-                            StatsChip { label: "Servers"; value: root.admin_servers; }
+                        vertical-stretch: 1;
+                        Text {
+                            text: "Admin console";
+                            font-size: Theme.text-md;
+                            font-family: Theme.font-medium;
+                            color: Theme.text-primary;
                         }
-                        if root.admin_reports_status != "": Text { text: root.admin_reports_status; font-size: 11px; color: Theme.text-muted; }
-                        if root.admin_reports.length > 0: Text { text: "Reports (\{root.admin_reports.length})"; font-size: 12px; font-family: Theme.font-medium; color: Theme.warning; }
-                        if root.admin_reports.length > 0: ListView {
-                            height: 180px;
-                            for r in root.admin_reports: Rectangle {
-                                background: Theme.bg-tertiary;
-                                border-width: 1px;
-                                border-color: Theme.border;
-                                height: report_col.preferred-height + 12px;
-                                report_col := VerticalLayout {
-                                    x: 6px;
-                                    width: parent.width - 12px;
-                                    y: 6px;
-                                    spacing: 3px;
-                                    HorizontalLayout {
-                                        spacing: 6px;
-                                        Text { text: r.reason; font-size: 11px; color: Theme.warning; horizontal-stretch: 1; }
-                                        Text { text: r.age_label; font-size: 10px; color: Theme.text-muted; vertical-alignment: center; }
-                                    }
-                                    Text { text: "\{r.reporter_username} reported \{r.author_username} in \{r.conversation_label}"; font-size: 11px; color: Theme.text-muted; wrap: word-wrap; }
-                                    Text { text: r.message_body; font-size: 12px; color: Theme.text-primary; wrap: word-wrap; }
-                                    HorizontalLayout {
-                                        spacing: 6px;
-                                        SmallButton { text: "Actioned"; bg: Theme.danger-soft; fg: Theme.danger; clicked => { root.admin_resolve_report(r.report_id, "actioned"); } }
-                                        SmallButton { text: "Dismiss"; clicked => { root.admin_resolve_report(r.report_id, "dismissed"); } }
-                                    }
-                                }
-                            }
+                        Text {
+                            text: "The admin panel is open as a full-screen window. Close it with Esc or the Close button.";
+                            font-size: 12px;
+                            color: Theme.text-muted;
+                            wrap: word-wrap;
                         }
-                        TextInputField { placeholder: "Search users..."; value <=> root.admin_search; edited(t) => { root.admin_search_changed(t); } }
-                        if root.admin_status != "": Text { text: root.admin_status; font-size: 11px; color: Theme.text-muted; }
-                        if root.admin_users.length == 0: EmptyState { text: "No users found."; box-height: 72px; }
-                        list_admin := ListView {
-                            vertical-stretch: 1;
-                            for u in root.admin_users: PersonCard {
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    Text { text: "\{u.display_name} (@\{u.username})"; font-size: 13px; color: Theme.text-primary; horizontal-stretch: 1; }
-                                    if u.badge_text != "": Rectangle {
-                                        background: u.badge_bg;
-                                        height: 16px;
-                                        border-radius: Theme.radius-sm;
-                                        width: admin-badge.preferred-width + 8px;
-                                        admin-badge := Text { text: u.badge_text; font-size: 9px; color: u.badge_fg; horizontal-alignment: center; vertical-alignment: center; }
-                                    }
-                                }
-                                Text { text: u.status_line; font-size: 11px; color: Theme.text-muted; }
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    if root.is_admin && !u.role_locked: SmallButton { text: "User"; clicked => { root.admin_set_role(u.user_id, "user"); } }
-                                    if root.is_admin && !u.role_locked: SmallButton { text: "Mod"; clicked => { root.admin_set_role(u.user_id, "moderator"); } }
-                                    if root.is_admin && !u.role_locked: SmallButton { text: "Admin"; bg: Theme.accent-soft; clicked => { root.admin_set_role(u.user_id, "admin"); } }
-                                    if !u.role_locked: SmallButton { text: u.banned ? "Unban" : "Ban"; bg: Theme.danger-soft; fg: Theme.danger; clicked => { root.admin_set_banned(u.user_id, !u.banned); } }
-                                    if u.role_locked: Text { text: "rank locked"; font-size: Theme.text-xs; color: Theme.warning; vertical-alignment: center; }
-                                }
-                            }
-                        }
+                        Rectangle { vertical-stretch: 1; }
                     }
                 }
 

@@ -27,6 +27,9 @@ pub(super) struct PersistedSettings {
     /// Per-peer voice volume gains (peer user_id -> gain, 0.0..=5.0). The
     /// 1:1 call remote uses the special key "*".
     pub(super) voice_gains: HashMap<String, f32>,
+    /// When true (default), scan local processes and share a Discord-style
+    /// "Playing / Active in …" activity on the presence heartbeat + profile.
+    pub(super) share_activity: Option<bool>,
 }
 
 fn settings_file_path() -> std::path::PathBuf {

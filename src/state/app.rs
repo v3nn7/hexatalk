@@ -131,6 +131,10 @@ pub(crate) struct App {
     /// Pending reports queue (admin panel Reports section).
     pub(crate) admin_reports: Vec<crate::state::types::MessageReport>,
     pub(crate) admin_reports_status: Option<String>,
+    /// Report queue filter: pending | actioned | dismissed | "" (default pending).
+    pub(crate) admin_reports_filter: String,
+    /// Optional ban reason sent with the next ban action.
+    pub(crate) admin_ban_reason: String,
     /// Message id whose "why are you reporting this" reason picker is open
     /// in the chat view — at most one at a time.
     pub(crate) reporting_message_id: Option<String>,
@@ -174,6 +178,12 @@ pub(crate) struct App {
     pub(crate) new_channel_open: bool,
     pub(crate) new_channel_name_input: String,
     pub(crate) new_channel_is_voice: bool,
+    /// Optional category id when creating a channel (under PPM / category).
+    pub(crate) new_channel_category_id: Option<String>,
+    /// Categories of the selected server (for create-channel picker).
+    pub(crate) server_categories: Vec<crate::state::types::CategorySummary>,
+    /// Custom ban/mute duration in whole days (admin panel input).
+    pub(crate) admin_custom_days: String,
     pub(crate) server_settings_open: bool,
     pub(crate) server_settings_category: ServerSettingsCategory,
     pub(crate) rename_server_input: String,
@@ -336,6 +346,13 @@ pub(crate) struct App {
     pub(crate) plus_busy_status: Option<String>,
     pub(crate) plus_checkout_busy: bool,
 
+    /// Share detected app activity (Playing Minecraft / Active in …) with others.
+    pub(crate) share_activity: bool,
+    /// Last locally detected activity label (empty = nothing known).
+    pub(crate) current_activity: String,
+    /// Emoji / glyph for the detected app (shown next to the activity line).
+    pub(crate) current_activity_icon: String,
+
     pub(crate) typing_names: Vec<String>,
     pub(crate) typing_active: bool,
     pub(crate) last_typing_ping: Option<Instant>,
@@ -423,6 +440,8 @@ impl App {
                 admin_user_detail: None,
                 admin_reports: Vec::new(),
                 admin_reports_status: None,
+                admin_reports_filter: "pending".to_string(),
+                admin_ban_reason: String::new(),
                 reporting_message_id: None,
                 sidebar_tab: SidebarTab::Chats,
                 chat_filter_input: String::new(),
@@ -457,6 +476,9 @@ impl App {
                 new_channel_open: false,
                 new_channel_name_input: String::new(),
                 new_channel_is_voice: false,
+                new_channel_category_id: None,
+                server_categories: Vec::new(),
+                admin_custom_days: String::new(),
                 server_settings_open: false,
                 server_settings_category: ServerSettingsCategory::Overview,
                 rename_server_input: String::new(),
@@ -572,6 +594,9 @@ impl App {
                 avatar_upload_busy: false,
                 plus_busy_status: None,
                 plus_checkout_busy: false,
+                share_activity: persisted_settings.share_activity.unwrap_or(true),
+                current_activity: String::new(),
+                current_activity_icon: String::new(),
                 typing_names: Vec::new(),
                 typing_active: false,
                 last_typing_ping: None,
@@ -716,6 +741,7 @@ impl App {
                 .lock()
                 .map(|gains| gains.clone())
                 .unwrap_or_default(),
+            share_activity: Some(self.share_activity),
         });
     }
 
@@ -938,16 +964,21 @@ impl App {
                     let result = request.send().await;
                     match result {
                         Ok(response) => {
-                            let bytes = response
-                                .bytes()
-                                .await
-                                .map(|b| b.to_vec())
-                                .map_err(|err| err.to_string())?;
-                            if let (Some(key), Some(nonce)) = (att_key, att_nonce) {
-                                crypto::decrypt_attachment(&key, &nonce, &bytes)
-                                    .ok_or_else(|| "Failed to decrypt attachment".to_string())
+                            let status = response.status();
+                            if !status.is_success() {
+                                Err(format!("HTTP {status} for {url}"))
                             } else {
-                                Ok(bytes)
+                                let bytes = response
+                                    .bytes()
+                                    .await
+                                    .map(|b| b.to_vec())
+                                    .map_err(|err| err.to_string())?;
+                                if let (Some(key), Some(nonce)) = (att_key, att_nonce) {
+                                    crypto::decrypt_attachment(&key, &nonce, &bytes)
+                                        .ok_or_else(|| "Failed to decrypt attachment".to_string())
+                                } else {
+                                    Ok(bytes)
+                                }
                             }
                         }
                         Err(err) => Err(err.to_string()),

@@ -11,6 +11,17 @@ pub(super) fn format_time(sent_at_ms: i64) -> String {
     }
 }
 
+/// Compact local datetime for admin ban expiry labels etc.
+pub(crate) fn format_time_short(ms: i64) -> String {
+    if ms <= 0 {
+        return String::new();
+    }
+    match chrono::Local.timestamp_millis_opt(ms) {
+        chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M").to_string(),
+        _ => String::new(),
+    }
+}
+
 pub(super) fn format_relative_time(sent_at_ms: i64) -> String {
     if sent_at_ms <= 0 {
         return String::new();
@@ -73,6 +84,26 @@ pub(crate) fn presence_label(presence: &str) -> &'static str {
         "dnd" => "Do not disturb",
         "invisible" => "Invisible",
         _ => "Offline",
+    }
+}
+
+/// True when the user should light up as "available" (green/yellow/red ring).
+pub(crate) fn presence_is_online_like(presence: &str, last_seen_at: i64) -> bool {
+    match presence {
+        "online" | "idle" | "dnd" => true,
+        "offline" | "invisible" => false,
+        _ => crate::state::types::is_online(last_seen_at),
+    }
+}
+
+/// Normalize raw presence strings from the API.
+pub(crate) fn normalize_presence(raw: &str, last_seen_at: i64) -> String {
+    let p = raw.trim().to_ascii_lowercase();
+    match p.as_str() {
+        "online" | "idle" | "dnd" | "invisible" | "offline" => p,
+        "" if crate::state::types::is_online(last_seen_at) => "online".into(),
+        "" => "offline".into(),
+        other => other.to_string(),
     }
 }
 

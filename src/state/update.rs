@@ -172,6 +172,20 @@ fn upload_filename_for(content_type: &str, stem: &str) -> String {
     format!("{stem}.{ext}")
 }
 
+/// Parse a positive whole-day count from the admin custom-days field.
+fn parse_positive_days(raw: &str) -> u32 {
+    let s = raw.trim();
+    if s.is_empty() {
+        return 0;
+    }
+    // Accept "3", "3.0", "3 days"
+    let num: String = s
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    num.parse::<u32>().unwrap_or(0)
+}
+
 impl App {
     fn move_channel_task(&self, conversation_id: String, direction: &'static str) -> Task<Message> {
         let Some(client) = self.client.clone() else {
@@ -1427,22 +1441,32 @@ impl App {
                 let Some(session) = self.session.clone() else {
                     return Task::none();
                 };
+                let status = self.admin_reports_filter.clone();
                 let mut client = client;
                 Task::perform(
                     async move {
+                        let mut args = btreemap! {
+                            "sessionToken".to_string() => Value::String(session.token),
+                        };
+                        if !status.is_empty() {
+                            args.insert("status".to_string(), Value::String(status));
+                        }
                         client
-                            .query(
-                                "reports:adminListReports",
-                                btreemap! {
-                                    "sessionToken".to_string() => Value::String(session.token),
-                                },
-                            )
+                            .query("reports:adminListReports", args)
                             .await
                             .map_err(|err| humanize_error(&err.to_string()))
                             .and_then(parse_message_reports)
                     },
                     Message::AdminReportsUpdated,
                 )
+            }
+            Message::AdminReportsFilterChanged(filter) => {
+                self.admin_reports_filter = filter;
+                Task::done(Message::LoadAdminReports)
+            }
+            Message::AdminBanReasonChanged(reason) => {
+                self.admin_ban_reason = reason;
+                Task::none()
             }
             Message::AdminReportsUpdated(Ok(reports)) => {
                 self.admin_reports = reports;
@@ -2269,6 +2293,19 @@ impl App {
                 Task::none()
             }
             Message::SelectServer(server_id) => {
+                // Re-clicking the already-open server must NOT clear channels /
+                // members — subscriptions only restart when the job key
+                // changes, so wiping state left an empty shell until the next
+                // 30s poll.
+                if self
+                    .selected_server
+                    .as_ref()
+                    .is_some_and(|s| s.server_id == server_id)
+                {
+                    self.server_add_menu_open = false;
+                    self.sidebar_tab = SidebarTab::Servers;
+                    return Task::none();
+                }
                 let Some(server) = self
                     .servers
                     .iter()
@@ -2710,9 +2747,85 @@ impl App {
                     // previous attempt.
                     self.new_channel_name_input.clear();
                     self.new_channel_is_voice = false;
+                    self.new_channel_category_id = None;
                     self.server_status = None;
+                    // Load categories for the picker.
+                    return Task::done(Message::LoadServerCategories);
                 }
                 Task::none()
+            }
+            Message::LoadServerCategories => {
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                let Some(server) = self.selected_server.clone() else {
+                    self.server_categories.clear();
+                    return Task::none();
+                };
+                let mut client = client;
+                Task::perform(
+                    async move {
+                        let result = client
+                            .query(
+                                "channels:listCategories",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(session.token),
+                                    "serverId".to_string() => Value::String(server.server_id),
+                                },
+                            )
+                            .await
+                            .ok()?;
+                        let rows = parse_object_array(result);
+                        Some(
+                            rows.into_iter()
+                                .map(|obj| crate::state::types::CategorySummary {
+                                    category_id: obj_str(&obj, "categoryId"),
+                                    name: obj_str(&obj, "name"),
+                                    position: obj_ms(&obj, "position"),
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                    },
+                    |cats| Message::ServerCategoriesUpdated(cats.unwrap_or_default()),
+                )
+            }
+            Message::ServerCategoriesUpdated(cats) => {
+                self.server_categories = cats;
+                Task::none()
+            }
+            Message::AdminCustomDaysChanged(v) => {
+                self.admin_custom_days = v;
+                Task::none()
+            }
+            Message::AdminBanCustomDays(user_id) => {
+                let days = parse_positive_days(&self.admin_custom_days);
+                if days == 0 {
+                    self.admin_status =
+                        Some("Enter custom days as a positive number (e.g. 3, 14, 90)".into());
+                    return Task::none();
+                }
+                // hours = days * 24
+                Task::done(Message::AdminSetBanned {
+                    user_id,
+                    banned: true,
+                    duration_hours: Some(days.saturating_mul(24)),
+                })
+            }
+            Message::AdminMuteCustomDays(user_id) => {
+                let days = parse_positive_days(&self.admin_custom_days);
+                if days == 0 {
+                    self.admin_status =
+                        Some("Enter custom days as a positive number (e.g. 3, 14, 90)".into());
+                    return Task::none();
+                }
+                Task::done(Message::AdminSetMuted {
+                    user_id,
+                    muted: true,
+                    duration_hours: Some(days.saturating_mul(24)),
+                })
             }
             Message::NewChannelNameChanged(value) => {
                 // Discord-style live formatting for text channels
@@ -2753,19 +2866,24 @@ impl App {
                     "text"
                 }
                 .to_string();
+                // Optional category (from create-channel modal / server settings).
+                let category_id = self.new_channel_category_id.clone();
                 let mut client = client;
                 Task::perform(
                     async move {
+                        let mut args = btreemap! {
+                            "sessionToken".to_string() => Value::String(session.token),
+                            "serverId".to_string() => Value::String(server.server_id),
+                            "name".to_string() => Value::String(name),
+                            "channelType".to_string() => Value::String(channel_type),
+                        };
+                        if let Some(cat) = category_id {
+                            if !cat.is_empty() {
+                                args.insert("categoryId".to_string(), Value::String(cat));
+                            }
+                        }
                         client
-                            .mutation(
-                                "servers:createChannel",
-                                btreemap! {
-                                    "sessionToken".to_string() => Value::String(session.token),
-                                    "serverId".to_string() => Value::String(server.server_id),
-                                    "name".to_string() => Value::String(name),
-                                    "channelType".to_string() => Value::String(channel_type),
-                                },
-                            )
+                            .mutation("servers:createChannel", args)
                             .await
                             .map_err(|err| err.to_string())
                             .and_then(expect_string)
@@ -2774,10 +2892,15 @@ impl App {
                     Message::CreateChannelFinished,
                 )
             }
+            Message::NewChannelCategoryChanged(id) => {
+                self.new_channel_category_id = if id.is_empty() { None } else { Some(id) };
+                Task::none()
+            }
             Message::CreateChannelFinished(Ok(())) => {
                 self.new_channel_open = false;
                 self.new_channel_name_input.clear();
                 self.new_channel_is_voice = false;
+                self.new_channel_category_id = None;
                 self.server_status = None;
                 Task::none()
             }
@@ -4131,6 +4254,20 @@ impl App {
                 self.settings_profile_status = Some((err, true));
                 Task::none()
             }
+            Message::ToggleShareActivity => {
+                self.share_activity = !self.share_activity;
+                if !self.share_activity {
+                    self.current_activity.clear();
+                    self.current_activity_icon.clear();
+                }
+                self.persist_settings();
+                self.show_toast(if self.share_activity {
+                    "App activity sharing on"
+                } else {
+                    "App activity sharing off"
+                });
+                Task::none()
+            }
             Message::ToggleHideOnline => {
                 let Some(client) = self.client.clone() else {
                     return Task::none();
@@ -4875,11 +5012,239 @@ impl App {
                 self.show_toast("Role updated");
                 Task::none()
             }
-            Message::AdminSetBanned(user_id, banned) => {
+            Message::AdminSetBanned {
+                user_id,
+                banned,
+                duration_hours,
+            } => {
                 let Some(client) = self.client.clone() else {
                     return Task::none();
                 };
                 let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                // Optimistic UI — flip ban state immediately; revert on error.
+                let prev: Vec<(String, bool, i64)> = self
+                    .admin_users
+                    .iter()
+                    .map(|u| (u.user_id.clone(), u.banned, u.ban_expires_at))
+                    .collect();
+                let now = chrono::Utc::now().timestamp_millis();
+                let expires = match duration_hours {
+                    Some(h) if h > 0 && banned => {
+                        now + (h as i64) * 3_600_000
+                    }
+                    _ => 0,
+                };
+                for u in &mut self.admin_users {
+                    if u.user_id == user_id {
+                        u.banned = banned;
+                        u.ban_expires_at = if banned { expires } else { 0 };
+                    }
+                }
+                let reason = self.admin_ban_reason.clone();
+                let mut client = client;
+                let uid = user_id.clone();
+                Task::perform(
+                    async move {
+                        let mut args = btreemap! {
+                            "sessionToken".to_string() => Value::String(session.token),
+                            "userId".to_string() => Value::String(uid),
+                            "banned".to_string() => Value::Boolean(banned),
+                        };
+                        if banned {
+                            match duration_hours {
+                                Some(hours) if hours > 0 => {
+                                    args.insert(
+                                        "durationHours".to_string(),
+                                        Value::Float64(hours as f64),
+                                    );
+                                    args.insert(
+                                        "permanent".to_string(),
+                                        Value::Boolean(false),
+                                    );
+                                }
+                                _ => {
+                                    args.insert(
+                                        "permanent".to_string(),
+                                        Value::Boolean(true),
+                                    );
+                                }
+                            }
+                            if !reason.is_empty() {
+                                args.insert("reason".to_string(), Value::String(reason));
+                            }
+                        }
+                        match client
+                            .mutation("admin:setBanned", args)
+                            .await
+                            .map_err(|err| err.to_string())
+                            .and_then(expect_null)
+                        {
+                            Ok(()) => Ok(prev),
+                            Err(e) => Err((e, prev)),
+                        }
+                    },
+                    |r| match r {
+                        Ok(_) => Message::AdminSetBannedFinished(Ok(())),
+                        Err((e, prev)) => Message::AdminSetBannedRevert(e, prev),
+                    },
+                )
+            }
+            Message::AdminSetBannedRevert(err, prev) => {
+                for (id, banned, exp) in prev {
+                    if let Some(u) = self.admin_users.iter_mut().find(|u| u.user_id == id) {
+                        u.banned = banned;
+                        u.ban_expires_at = exp;
+                    }
+                }
+                self.admin_status = Some(err);
+                Task::none()
+            }
+            Message::AdminSetBannedFinished(Err(err)) => {
+                self.admin_status = Some(err);
+                Task::none()
+            }
+            Message::AdminSetBannedFinished(Ok(())) => {
+                self.admin_status = None;
+                self.admin_ban_reason.clear();
+                self.show_toast("Ban updated");
+                Task::none()
+            }
+            Message::AdminSetMuted {
+                user_id,
+                muted,
+                duration_hours,
+            } => {
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                if muted && duration_hours.unwrap_or(0) == 0 {
+                    self.admin_status = Some("Mute must be temporary (pick 1h / 24h / 7d)".into());
+                    return Task::none();
+                }
+                let prev: Vec<(String, bool, i64)> = self
+                    .admin_users
+                    .iter()
+                    .map(|u| (u.user_id.clone(), u.muted, u.mute_expires_at))
+                    .collect();
+                let now = chrono::Utc::now().timestamp_millis();
+                let expires = match duration_hours {
+                    Some(h) if h > 0 && muted => now + (h as i64) * 3_600_000,
+                    _ => 0,
+                };
+                for u in &mut self.admin_users {
+                    if u.user_id == user_id {
+                        u.muted = muted;
+                        u.mute_expires_at = if muted { expires } else { 0 };
+                    }
+                }
+                let reason = self.admin_ban_reason.clone();
+                let mut client = client;
+                let uid = user_id.clone();
+                Task::perform(
+                    async move {
+                        let mut args = btreemap! {
+                            "sessionToken".to_string() => Value::String(session.token),
+                            "userId".to_string() => Value::String(uid),
+                            "muted".to_string() => Value::Boolean(muted),
+                        };
+                        if muted {
+                            if let Some(h) = duration_hours {
+                                args.insert(
+                                    "durationHours".to_string(),
+                                    Value::Float64(h as f64),
+                                );
+                            }
+                            if !reason.is_empty() {
+                                args.insert("reason".to_string(), Value::String(reason));
+                            }
+                        }
+                        match client
+                            .mutation("admin:setMuted", args)
+                            .await
+                            .map_err(|err| err.to_string())
+                            .and_then(expect_null)
+                        {
+                            Ok(()) => Ok(prev),
+                            Err(e) => Err((e, prev)),
+                        }
+                    },
+                    |r| match r {
+                        Ok(_) => Message::AdminSetMutedFinished(Ok(())),
+                        Err((e, prev)) => Message::AdminSetMutedRevert(e, prev),
+                    },
+                )
+            }
+            Message::AdminSetMutedRevert(err, prev) => {
+                for (id, muted, exp) in prev {
+                    if let Some(u) = self.admin_users.iter_mut().find(|u| u.user_id == id) {
+                        u.muted = muted;
+                        u.mute_expires_at = exp;
+                    }
+                }
+                self.admin_status = Some(err);
+                Task::none()
+            }
+            Message::AdminSetMutedFinished(Err(err)) => {
+                self.admin_status = Some(err);
+                Task::none()
+            }
+            Message::AdminSetMutedFinished(Ok(())) => {
+                self.admin_status = None;
+                self.show_toast("Mute updated");
+                Task::none()
+            }
+            Message::MuteServerMember {
+                user_id,
+                duration_hours,
+            } => {
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                let Some(server) = self.selected_server.clone() else {
+                    return Task::none();
+                };
+                if duration_hours == 0 {
+                    self.server_status = Some("Server mute must be temporary".into());
+                    return Task::none();
+                }
+                let mut client = client;
+                let hours = duration_hours;
+                Task::perform(
+                    async move {
+                        client
+                            .mutation(
+                                "servers:muteMember",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(session.token),
+                                    "serverId".to_string() => Value::String(server.server_id),
+                                    "userId".to_string() => Value::String(user_id),
+                                    "durationHours".to_string() => Value::Float64(hours as f64),
+                                },
+                            )
+                            .await
+                            .map_err(|e| humanize_error(&e.to_string()))
+                            .and_then(expect_null)
+                            .map(|_| format!("Member muted for {hours}h"))
+                    },
+                    Message::MuteServerMemberFinished,
+                )
+            }
+            Message::UnmuteServerMember(user_id) => {
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                let Some(server) = self.selected_server.clone() else {
                     return Task::none();
                 };
                 let mut client = client;
@@ -4887,25 +5252,30 @@ impl App {
                     async move {
                         client
                             .mutation(
-                                "admin:setBanned",
+                                "servers:unmuteMember",
                                 btreemap! {
                                     "sessionToken".to_string() => Value::String(session.token),
+                                    "serverId".to_string() => Value::String(server.server_id),
                                     "userId".to_string() => Value::String(user_id),
-                                    "banned".to_string() => Value::Boolean(banned),
                                 },
                             )
                             .await
-                            .map_err(|err| err.to_string())
+                            .map_err(|e| humanize_error(&e.to_string()))
                             .and_then(expect_null)
+                            .map(|_| "Member unmuted".to_string())
                     },
-                    Message::AdminSetBannedFinished,
+                    Message::MuteServerMemberFinished,
                 )
             }
-            Message::AdminSetBannedFinished(Err(err)) => {
-                self.admin_status = Some(err);
+            Message::MuteServerMemberFinished(Ok(msg)) => {
+                self.show_toast(msg);
+                self.server_status = None;
                 Task::none()
             }
-            Message::AdminSetBannedFinished(Ok(())) => Task::none(),
+            Message::MuteServerMemberFinished(Err(err)) => {
+                self.server_status = Some(err);
+                Task::none()
+            }
 
             Message::LoadAdminStats => {
                 let Some(client) = self.client.clone() else {
@@ -4936,9 +5306,107 @@ impl App {
             }
             Message::AdminStatsUpdated(Ok(stats)) => {
                 self.admin_stats = Some(stats);
+                self.admin_status = None;
                 Task::none()
             }
             Message::AdminStatsUpdated(Err(err)) => {
+                self.admin_status = Some(err);
+                Task::none()
+            }
+            Message::AdminGrantPlus { user_id, days } => {
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                // Hard cap: API allows at most one month per grant.
+                let days = days.clamp(1, 30);
+                let mut client = client;
+                let uid = user_id.clone();
+                // Optimistic Plus flag.
+                for u in &mut self.admin_users {
+                    if u.user_id == user_id {
+                        u.plus_active = true;
+                        let now = chrono::Utc::now().timestamp_millis();
+                        let base = if u.plus_expires_at > now {
+                            u.plus_expires_at
+                        } else {
+                            now
+                        };
+                        u.plus_expires_at = base + (days as i64) * 86_400_000;
+                    }
+                }
+                Task::perform(
+                    async move {
+                        client
+                            .mutation(
+                                "plus:adminGrant",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(session.token),
+                                    "userId".to_string() => Value::String(uid.clone()),
+                                    "days".to_string() => Value::Float64(days as f64),
+                                },
+                            )
+                            .await
+                            .map_err(|e| e.to_string())
+                            .and_then(expect_null)
+                            .map(|_| format!("Plus granted for {days} day(s)"))
+                            .map_err(|e| (e, uid))
+                    },
+                    |r| match r {
+                        Ok(msg) => Message::AdminGrantPlusFinished(Ok(msg)),
+                        Err((e, _)) => Message::AdminGrantPlusFinished(Err(e)),
+                    },
+                )
+            }
+            Message::AdminGrantPlusFinished(Ok(msg)) => {
+                self.admin_status = Some(msg);
+                self.show_toast("Plus granted");
+                Task::done(Message::LoadAdminStats)
+            }
+            Message::AdminGrantPlusFinished(Err(err)) => {
+                self.admin_status = Some(err);
+                Task::none()
+            }
+            Message::AdminRevokePlus(user_id) => {
+                let Some(client) = self.client.clone() else {
+                    return Task::none();
+                };
+                let Some(session) = self.session.clone() else {
+                    return Task::none();
+                };
+                for u in &mut self.admin_users {
+                    if u.user_id == user_id {
+                        u.plus_active = false;
+                        u.plus_expires_at = 0;
+                    }
+                }
+                let mut client = client;
+                Task::perform(
+                    async move {
+                        client
+                            .mutation(
+                                "plus:adminRevoke",
+                                btreemap! {
+                                    "sessionToken".to_string() => Value::String(session.token),
+                                    "userId".to_string() => Value::String(user_id),
+                                },
+                            )
+                            .await
+                            .map_err(|e| e.to_string())
+                            .and_then(expect_null)
+                            .map(|_| "Plus revoked".to_string())
+                    },
+                    Message::AdminRevokePlusFinished,
+                )
+            }
+            Message::AdminRevokePlusFinished(Ok(msg)) => {
+                self.admin_status = Some(msg);
+                self.show_toast("Plus revoked");
+                Task::done(Message::LoadAdminStats)
+            }
+            Message::AdminRevokePlusFinished(Err(err)) => {
                 self.admin_status = Some(err);
                 Task::none()
             }
@@ -5259,6 +5727,36 @@ impl App {
                         self.toast = None;
                     }
                 }
+                // Detect local app activity (games/IDE) off the hot path of
+                // every keystroke — once per 5s tick is plenty.
+                if self.share_activity {
+                    if let Some(a) = crate::media::activity::detect_activity() {
+                        self.current_activity = a.label;
+                        self.current_activity_icon = a.icon;
+                    } else {
+                        self.current_activity.clear();
+                        self.current_activity_icon.clear();
+                    }
+                } else if !self.current_activity.is_empty() {
+                    self.current_activity.clear();
+                    self.current_activity_icon.clear();
+                }
+                // If we're looking at our own profile, keep the activity line live.
+                if let Some(profile) = &mut self.viewing_profile {
+                    if self
+                        .session
+                        .as_ref()
+                        .is_some_and(|s| s.user_id == profile.user_id)
+                    {
+                        if self.share_activity {
+                            profile.activity = self.current_activity.clone();
+                            profile.activity_icon = self.current_activity_icon.clone();
+                        } else {
+                            profile.activity.clear();
+                            profile.activity_icon.clear();
+                        }
+                    }
+                }
                 let Some(client) = self.client.clone() else {
                     return Task::none();
                 };
@@ -5266,15 +5764,23 @@ impl App {
                     return Task::none();
                 };
                 let mut client = client;
+                let status = session.presence_status.clone();
+                let activity = if self.share_activity {
+                    self.current_activity.clone()
+                } else {
+                    String::new()
+                };
                 Task::perform(
                     async move {
+                        let mut args = btreemap! {
+                            "sessionToken".to_string() => Value::String(session.token),
+                        };
+                        if !status.is_empty() {
+                            args.insert("status".to_string(), Value::String(status));
+                        }
+                        args.insert("activity".to_string(), Value::String(activity));
                         client
-                            .mutation(
-                                "presence:heartbeat",
-                                btreemap! {
-                                    "sessionToken".to_string() => Value::String(session.token),
-                                },
-                            )
+                            .mutation("presence:heartbeat", args)
                             .await
                             .map_err(|err| err.to_string())
                             .and_then(expect_null)
@@ -5619,16 +6125,21 @@ impl App {
                 let mut client = client;
                 Task::perform(
                     async move {
+                        let mut args = btreemap! {
+                            "sessionToken".to_string() => Value::String(session.token),
+                            "scope".to_string() => Value::String("conversation".into()),
+                            "targetId".to_string() => Value::String(conv_id),
+                            "muted".to_string() => Value::Boolean(muted),
+                        };
+                        // Notification mute is always temporary on the API.
+                        if muted {
+                            args.insert(
+                                "durationHours".to_string(),
+                                Value::Float64(1.0),
+                            );
+                        }
                         let result = client
-                            .mutation(
-                                "channels:setMute",
-                                btreemap! {
-                                    "sessionToken".to_string() => Value::String(session.token),
-                                    "scope".to_string() => Value::String("conversation".into()),
-                                    "targetId".to_string() => Value::String(conv_id),
-                                    "muted".to_string() => Value::Boolean(muted),
-                                },
-                            )
+                            .mutation("channels:setMute", args)
                             .await
                             .map_err(|e| humanize_error(&e.to_string()))?;
                         expect_null(result).map_err(|e| humanize_error(&e))?;
@@ -5641,8 +6152,9 @@ impl App {
                 )
             }
             Message::ChannelMuteFinished(Ok(muted)) => {
+                // Revert optimistic flag if API lacks notification mute yet.
                 self.show_toast(if muted {
-                    "Channel muted"
+                    "Channel muted for 1h"
                 } else {
                     "Channel unmuted"
                 });
@@ -5781,6 +6293,15 @@ impl App {
                 } else if self.server_settings_open {
                     self.server_settings_open = false;
                     self.confirm_delete_server = false;
+                } else if self.admin_user_detail.is_some() {
+                    self.admin_user_detail = None;
+                    self.admin_detail_user_id = None;
+                } else if self.sidebar_tab == SidebarTab::Admin {
+                    // Full-window admin console — Esc closes it.
+                    self.sidebar_tab = SidebarTab::Chats;
+                    self.admin_search_input.clear();
+                    self.admin_user_detail = None;
+                    self.admin_detail_user_id = None;
                 } else if self.toast.is_some() {
                     self.toast = None;
                 } else if !self.chat_filter_input.is_empty()
@@ -5822,7 +6343,31 @@ impl App {
                     Message::ProfileLoaded,
                 )
             }
-            Message::ProfileLoaded(Ok(profile)) => {
+            Message::ProfileLoaded(Ok(mut profile)) => {
+                // Own profile: prefer live local activity + session Plus flag.
+                if self
+                    .session
+                    .as_ref()
+                    .is_some_and(|s| s.user_id == profile.user_id)
+                {
+                    if self.share_activity && !self.current_activity.is_empty() {
+                        profile.activity = self.current_activity.clone();
+                        profile.activity_icon = self.current_activity_icon.clone();
+                    }
+                    if let Some(s) = &self.session {
+                        if s.plus_active {
+                            profile.plus_active = true;
+                        }
+                        if !s.profile_banner_url.is_empty() && profile.profile_banner_url.is_empty()
+                        {
+                            profile.profile_banner_url = s.profile_banner_url.clone();
+                        }
+                        // Self presence comes from the status picker.
+                        if !s.presence_status.is_empty() {
+                            profile.presence = s.presence_status.clone();
+                        }
+                    }
+                }
                 let avatar_url = profile.avatar_image_url.clone();
                 let banner_url = profile.profile_banner_url.clone();
                 self.viewing_profile = Some(profile);
@@ -6169,7 +6714,8 @@ impl App {
             // Remember the failure so the UI stops showing the row as
             // "loading image..." forever (view-model reads this set and
             // renders the "[image unavailable]" fallback instead).
-            Message::AvatarImageLoaded(url, Err(_)) => {
+            Message::AvatarImageLoaded(url, Err(err)) => {
+                eprintln!("[img] fetch failed: {err}");
                 self.avatar_image_failed.insert(url);
                 Task::none()
             }
@@ -6217,45 +6763,65 @@ impl App {
                     self.avatar_upload_busy = false;
                     return Task::none();
                 };
-                let Some(session) = self.session.clone() else {
+                if self.session.is_none() {
                     self.avatar_upload_busy = false;
                     return Task::none();
-                };
+                }
                 self.settings_profile_status = Some(("Uploading...".to_string(), false));
                 let client = client;
+                // Keep original bytes so settings + rail can paint immediately
+                // after upload without a second download round-trip.
                 Task::perform(
                     async move {
-                        // New API: multipart POST /files → key; the public
-                        // avatar URL is derived client-side via file_url().
                         let filename = upload_filename_for(&content_type, "avatar");
-                        let key = client
-                            .upload_file(bytes, &filename)
-                            .await
-                            .map_err(|err| err.to_string())?;
-                        let url = client.file_url(&key);
-                        client
-                            .mutation(
-                                "profile:setAvatarImage",
-                                btreemap! {
-                                    "sessionToken".to_string() => Value::String(session.token),
-                                    "avatarStorageId".to_string() => Value::String(key),
-                                },
-                            )
-                            .await
-                            .map_err(|err| err.to_string())
-                            .and_then(expect_null)?;
-                        Ok(url)
+                        let url = match client.upload_avatar(bytes.clone(), &filename).await {
+                            Ok(url) => url,
+                            Err(primary_err) => {
+                                // Fallback: generic /files + attach key on profile.
+                                let key = client
+                                    .upload_file(bytes.clone(), &filename)
+                                    .await
+                                    .map_err(|err| {
+                                        format!(
+                                            "Avatar upload failed ({primary_err}); file upload also failed: {err}"
+                                        )
+                                    })?;
+                                client
+                                    .mutation(
+                                        "profile:setAvatarImage",
+                                        btreemap! {
+                                            "storageId".to_string() => Value::String(key.clone()),
+                                            "avatarStorageId".to_string() => Value::String(key.clone()),
+                                        },
+                                    )
+                                    .await
+                                    .map_err(|err| err.to_string())
+                                    .and_then(expect_null)?;
+                                client.file_url(&key)
+                            }
+                        };
+                        if url.is_empty() {
+                            return Err("Server accepted the upload but returned no avatar URL".into());
+                        }
+                        Ok((url, bytes))
                     },
                     Message::AvatarUploadFinished,
                 )
             }
-            Message::AvatarUploadFinished(Ok(url)) => {
+            Message::AvatarUploadFinished(Ok((url, bytes))) => {
                 self.avatar_upload_busy = false;
                 self.settings_profile_status = Some(("Photo updated".to_string(), false));
                 if let Some(session) = &mut self.session {
                     session.avatar_image_url = url.clone();
                 }
-                self.fetch_missing_avatars(std::iter::once(url))
+                // Drop any stale failure / old bytes for this URL, then seed
+                // the cache with the file the user just picked so settings
+                // and the bottom-left rail repaint on the next sync without
+                // waiting on GET /files/:key.
+                self.avatar_image_failed.remove(&url);
+                self.avatar_image_cache
+                    .insert(url.clone(), Arc::from(bytes));
+                Task::none()
             }
             Message::AvatarUploadFinished(Err(err)) => {
                 self.avatar_upload_busy = false;
@@ -6378,7 +6944,15 @@ impl App {
                 )
             }
             Message::AdminUserDetailUpdated(detail) => {
+                if let Some(d) = &detail {
+                    self.admin_detail_user_id = Some(d.user_id.clone());
+                }
                 self.admin_user_detail = detail;
+                Task::none()
+            }
+            Message::CloseAdminUserDetail => {
+                self.admin_user_detail = None;
+                self.admin_detail_user_id = None;
                 Task::none()
             }
             Message::AdminRevokeSessions(user_id) => {

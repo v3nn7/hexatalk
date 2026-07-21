@@ -405,6 +405,10 @@ export component Avatar inherits Rectangle {
     in property <image> photo-source;
     in property <bool> show-presence: false;
     in property <bool> online: false;
+    in property <bool> idle: false;
+    in property <bool> dnd: false;
+    // Plus gold ring (cosmetic).
+    in property <bool> plus-ring: false;
     in property <length> size: 36px;
 
     width: root.size;
@@ -412,8 +416,8 @@ export component Avatar inherits Rectangle {
     // Avatars are circles; `clip` keeps the photo inside the ring.
     border-radius: root.size / 2;
     background: root.photo-source.width > 0 ? transparent : root.avatar-color;
-    border-width: root.photo-source.width > 0 ? 0px : 1px;
-    border-color: Theme.border-hairline;
+    border-width: root.plus-ring ? 2px : (root.photo-source.width > 0 ? 0px : 1px);
+    border-color: root.plus-ring ? Theme.plus : Theme.border-hairline;
     clip: true;
 
     if root.photo-source.width > 0: Image {
@@ -432,7 +436,9 @@ export component Avatar inherits Rectangle {
     }
 
     if root.show-presence: PresenceDot {
-        online: root.online;
+        online: root.online && !root.idle && !root.dnd;
+        idle: root.idle;
+        dnd: root.dnd;
         x: parent.width - self.width;
         y: parent.height - self.height;
     }

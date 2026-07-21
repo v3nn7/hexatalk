@@ -2,6 +2,7 @@
 //! wire codec, screen-share capture, UI-thread image decoding, and sound /
 //! OS-notification side effects.
 
+pub(crate) mod activity;
 pub(crate) mod adpcm;
 pub(crate) mod call;
 pub(crate) mod img_cache;

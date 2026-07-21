@@ -29,7 +29,9 @@ const MAX_CACHED_IMAGES: usize = 256;
 const MAX_PIXELS: u64 = 50_000_000;
 
 thread_local! {
-    static DECODED: RefCell<HashMap<String, Image>> = RefCell::new(HashMap::new());
+    /// url → (source byte signature, decoded image)
+    static DECODED: RefCell<HashMap<String, ((usize, u64), Image)>> =
+        RefCell::new(HashMap::new());
     /// Insertion order of `DECODED` keys for FIFO eviction.
     static ORDER: RefCell<VecDeque<String>> = RefCell::new(VecDeque::new());
 }
@@ -56,24 +58,31 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<Image> {
 /// cache carried in the snapshot. Returns `None` when there are no bytes yet
 /// for that URL, so the caller can fall back to the colored-initial
 /// placeholder.
+///
+/// When the byte-cache entry changes (e.g. user re-uploaded an avatar under
+/// the same URL), we re-decode: the decoded cache stores `(len, first8)` of
+/// the source bytes alongside the image so a silent content swap still
+/// refreshes settings / the bottom-left rail.
 pub(crate) fn image_for(byte_cache: &HashMap<String, Arc<[u8]>>, url: &str) -> Option<Image> {
     if url.is_empty() {
         return None;
     }
-    if let Some(img) = DECODED.with(|d| d.borrow().get(url).cloned()) {
-        return Some(img);
-    }
     let bytes = byte_cache.get(url)?;
+    let sig = byte_sig(bytes);
+    if let Some((cached_sig, img)) = DECODED.with(|d| d.borrow().get(url).cloned()) {
+        if cached_sig == sig {
+            return Some(img);
+        }
+    }
     let img = decode(bytes)?;
     DECODED.with(|d| {
         let mut map = d.borrow_mut();
-        if map.contains_key(url) {
-            return;
-        }
-        map.insert(url.to_string(), img.clone());
+        map.insert(url.to_string(), (sig, img.clone()));
         ORDER.with(|o| {
             let mut order = o.borrow_mut();
-            order.push_back(url.to_string());
+            if !order.iter().any(|u| u == url) {
+                order.push_back(url.to_string());
+            }
             while order.len() > MAX_CACHED_IMAGES {
                 if let Some(evicted) = order.pop_front() {
                     map.remove(&evicted);
@@ -82,4 +91,11 @@ pub(crate) fn image_for(byte_cache: &HashMap<String, Arc<[u8]>>, url: &str) -> O
         });
     });
     Some(img)
+}
+
+fn byte_sig(bytes: &[u8]) -> (usize, u64) {
+    let mut first = [0u8; 8];
+    let n = bytes.len().min(8);
+    first[..n].copy_from_slice(&bytes[..n]);
+    (bytes.len(), u64::from_le_bytes(first))
 }
