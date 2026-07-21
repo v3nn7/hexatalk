@@ -1,68 +1,68 @@
 # HexaTalk
 
-Natywny komunikator desktop (Rust + **Slint**) z własnym API
-(`https://api.vyrapp.pro`). Dodatkowo: mobile Android (egui), bot SDK,
-P2P **peerseal** (E2EE), WebRTC głos / screen share, serwery w stylu Discord.
+Native desktop messenger in **Rust + Slint** with a private backend (`https://api.vyrapp.pro`). Includes an Android client, a P2P E2EE library (**peerseal**), WebRTC voice / screen share, and Discord-style servers.
 
-## Funkcje (aktualne)
+## Features
 
-### Czat i social
-- Rejestracja / logowanie (sesje + Bearer token)
-- Znajomi, zaproszenia, bloki, nicki / ulubione
-- DM 1:1 (opcjonalnie live peerseal E2EE), grupy, kanały serwerowe
-- Reakcje, reply, mentions, pin, załączniki, typing, presence
+### Chat & Social
+- Registration / login (sessions + Bearer token)
+- Friends, requests, blocks, nicknames / favorites
+- 1:1 DMs (optional live peerseal E2EE), group DMs, server channels
+- Reactions, replies, mentions, pin, attachments, typing indicators, presence
 
-### Serwery (Discord-like)
-- Role + bitfield permissions (`VIEW`, `SEND`, `MANAGE_*`, `VOICE`, **`ANNOUNCE`**)
-- **Kategorie kanałów** + position
-- **Permission overwrites** per kanał (rola / członek)
-- **#announcements** — zawsze na górze, wszyscy czytają, piszą tylko staff (`ANNOUNCE` / owner)
-- Mute kanału / serwera — desktop nie spamuje toastami
+### Servers (Discord-like)
+- Roles + bitfield permissions (`VIEW`, `SEND`, `MANAGE_*`, `VOICE`, `ANNOUNCE`)
+- Channel categories with ordering
+- Permission overwrites per channel (role / member)
+- `#announcements` — always on top, read-only for everyone except staff
+- Mute server / channel (no toast spam)
 
-### Głos i media
-- Call 1:1 WebRTC + ADPCM
-- Voice rooms (full-mesh)
-- Screen share (JPEG over data channel)
-- **System audio** (best-effort: Stereo Mix / VB-Cable / loopback)
-- **Mute stream** po stronie oglądającego (+ sygnał do sharera)
-- **Go-live quality HUD**: fps / kbps / KB/frame
-- Lokalne DSP: noise gate + HPF + **AGC** + deharsh (niski CPU, na urządzeniu)
+### Voice & Media
+- 1:1 WebRTC calls with ADPCM audio codec
+- Voice rooms (full-mesh topology)
+- Screen sharing (JPEG over data channel)
+- System audio capture (Stereo Mix / VB-Cable / loopback)
+- Per-viewer mute with signal back to the sharer
+- Go-live quality HUD: fps, kbps, KB/frame
+- On-device audio DSP: noise gate, HPF, AGC, deharsh
 
-### Bezpieczeństwo
-- Platform admin panel (lista userów, role, ban, stats, reports)
-- SAS / fingerprint peerseal w DM
+### Security
+- Platform admin panel (users, roles, bans, stats, reports)
+- SAS / fingerprint verification in peerseal DMs
 
-### Mobile + infra
-- Android crate (`crates/hexatalk-mobile`) — chat, friends, servers
-- Auto-update check, tray, installer
+### Mobile
+- Android client in `crates/hexatalk-mobile` — chat, friends, servers
 
-### Boty
+### Bots
 - Headless `hexatalk-bot` SDK (login token, send to channels)
 
-## Struktura
+## Project Structure
 
-| Ścieżka | Rola |
-|---------|------|
+| Path | Role |
+|------|------|
 | `src/` | Desktop app (Slint UI, WebRTC, peerseal, tray) |
-| `src/net/api/` | REST + WebSocket adapter do api.vyrapp.pro |
-| `ui/*.slint` | GUI |
-| `crates/reprotocol` | peerseal P2P (nie edytować — tylko integrować) |
+| `src/net/api/` | REST + WebSocket client for api.vyrapp.pro |
+| `ui/*.slint` | GUI markup |
+| `crates/reprotocol` | peerseal P2P library |
 | `crates/hexatalk-bot` | Bot SDK |
 | `crates/hexatalk-mobile` | Android client |
-| `server/hexatalk-relay` | Relay peerseal |
+| `server/hexatalk-relay` | peerseal WebSocket relay |
 
-## Uruchomienie
+## Running
 
 ```bash
 cargo run        # desktop (API: https://api.vyrapp.pro)
 ```
 
-Opcjonalnie w `.env.local`: `API_URL=…` (override bake w `build.rs`).
+Override the API URL via `.env.local`: `API_URL=…`.
 
-Mobile APK: zobacz `crates/hexatalk-mobile/README.md`.
+Mobile APK: see `crates/hexatalk-mobile/README.md`.
 
-## Model bezpieczeństwa
+## Licensing
 
-Własny system logowania (Bearer session token). Do produkcji: 2FA,
-twardsza rotacja tokenów, FCM z podpisem. E2EE DM przez peerseal; historia
-na serwerze jest opcjonalna (`storeChatHistory` / per-chat store).
+| Component | License |
+|-----------|---------|
+| Desktop app + mobile | `GPL-3.0-only` |
+| `reprotocol` (peerseal) | `GPL-3.0-only OR Apache-2.0` |
+| `hexatalk-relay` | `GPL-3.0-only OR Apache-2.0` |
+| `hexatalk-bot` | `Apache-2.0` |
