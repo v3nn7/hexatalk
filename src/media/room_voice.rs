@@ -15,9 +15,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use convex::{ConvexClient, FunctionResult, Value};
+use crate::net::api::{ApiClient, FunctionResult, Value};
 use futures::channel::mpsc::Sender as EventSender;
-use futures::{SinkExt, StreamExt};
+use futures::SinkExt;
 use maplit::btreemap;
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
@@ -51,7 +51,7 @@ pub(crate) enum RoomVoiceEvent {
 }
 
 pub(crate) struct RoomVoiceParams {
-    pub(crate) client: ConvexClient,
+    pub(crate) client: ApiClient,
     pub(crate) session_token: String,
     pub(crate) user_id: String,
     pub(crate) conversation_id: String,
@@ -133,8 +133,17 @@ fn parse_str_field(obj: &std::collections::BTreeMap<String, Value>, key: &str) -
     }
 }
 
-fn parse_bool_field(obj: &std::collections::BTreeMap<String, Value>, key: &str) -> bool {
-    matches!(obj.get(key), Some(Value::Boolean(true)))
+/// Reads the first present non-empty string field from a WS event payload,
+/// accepting both the server's snake_case and the legacy camelCase spellings.
+fn j_str(payload: &serde_json::Value, keys: &[&str]) -> String {
+    for key in keys {
+        if let Some(s) = payload.get(*key).and_then(|v| v.as_str()) {
+            if !s.is_empty() {
+                return s.to_string();
+            }
+        }
+    }
+    String::new()
 }
 
 pub(crate) async fn run_room_voice(
@@ -231,34 +240,15 @@ pub(crate) async fn run_room_voice(
     let mut applied_ice: HashMap<String, HashSet<String>> = HashMap::new();
     let any_connected = Arc::new(AtomicBool::new(false));
 
-    // Subscribe to room roster + my mesh links.
-    let users_sub = client
-        .subscribe(
-            "voice:listInChannel",
-            btreemap! {
-                "sessionToken".to_string() => Value::String(session_token.clone()),
-                "conversationId".to_string() => Value::String(conversation_id.clone()),
-            },
-        )
-        .await;
-    let links_sub = client
-        .subscribe(
-            "voice:listMyLinks",
-            btreemap! {
-                "sessionToken".to_string() => Value::String(session_token.clone()),
-                "conversationId".to_string() => Value::String(conversation_id.clone()),
-            },
-        )
-        .await;
-
-    let Ok(mut users_sub) = users_sub else {
-        fail(&mut output, "Could not watch voice room").await;
-        return;
-    };
-    let Ok(mut links_sub) = links_sub else {
-        fail(&mut output, "Could not watch voice links").await;
-        return;
-    };
+    // Signaling on the new API: the room roster is polled (there is a GET
+    // endpoint for it), while mesh link state is rebuilt from WS
+    // `voice.link.*` events (there is no list-links endpoint). Incoming
+    // `voice.join`/`voice.leave` events just reset the roster tick so the
+    // next poll happens immediately instead of up to 2 s late.
+    client.ensure_ws();
+    let mut ws_events = client.subscribe_events();
+    let mut roster_tick = tokio::time::interval(Duration::from_millis(2000));
+    roster_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // Per-link ICE candidate subscriptions (link_id -> stream).
     // We poll listLinkIce via a single shared ticker + active link set to
@@ -268,10 +258,18 @@ pub(crate) async fn run_room_voice(
 
     loop {
         tokio::select! {
-            next = users_sub.next() => {
-                let Some(result) = next else { break; };
+            _ = roster_tick.tick() => {
+                let result = client
+                    .query(
+                        "voice:listInChannel",
+                        btreemap! {
+                            "sessionToken".to_string() => Value::String(session_token.clone()),
+                            "conversationId".to_string() => Value::String(conversation_id.clone()),
+                        },
+                    )
+                    .await;
                 let remote_ids = match result {
-                    FunctionResult::Value(Value::Array(items)) => {
+                    Ok(FunctionResult::Value(Value::Array(items))) => {
                         items.into_iter().filter_map(|item| {
                             let Value::Object(obj) = item else { return None; };
                             let id = parse_str_field(&obj, "userId")?;
@@ -370,61 +368,77 @@ pub(crate) async fn run_room_voice(
                 )).await;
             }
 
-            next = links_sub.next() => {
-                let Some(result) = next else { break; };
-                let links = match result {
-                    FunctionResult::Value(Value::Array(items)) => items,
-                    _ => continue,
-                };
-                for item in links {
-                    let Value::Object(obj) = item else { continue; };
-                    let Some(peer_id) = parse_str_field(&obj, "peerId") else { continue; };
-                    let Some(link_id) = parse_str_field(&obj, "linkId") else { continue; };
-                    let is_offerer = parse_bool_field(&obj, "isOfferer");
-                    let offer_sdp = parse_str_field(&obj, "offerSdp");
-                    let answer_sdp = parse_str_field(&obj, "answerSdp");
-                    let status = parse_str_field(&obj, "status").unwrap_or_default();
-                    if status == "ended" {
+            event = ws_events.recv() => {
+                let event = match event {
+                    Ok(event) => event,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        // WS task restarted or gone — re-subscribe; the roster
+                        // and ICE polls keep working in the meantime.
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        client.ensure_ws();
+                        ws_events = client.subscribe_events();
                         continue;
                     }
-
-                    // Ensure peer slot exists (answerer may learn about offer before roster tick).
-                    if !peers.contains_key(&peer_id) {
-                        match create_peer_slot(
-                            &api,
-                            &config,
-                            Arc::clone(&jitter),
-                            Arc::clone(&any_connected),
-                            output.clone(),
-                            peer_id.clone(),
-                            Arc::clone(&gains),
-                        ).await {
-                            Ok(slot) => {
-                                if let Ok(mut tracks) = local_tracks.lock() {
-                                    tracks.push(Arc::clone(&slot.local_track));
-                                }
-                                peers.insert(peer_id.clone(), slot);
-                            }
-                            Err(_) => continue,
+                };
+                match event.kind.as_str() {
+                    "voice.join" | "voice.leave" => {
+                        if event.channel == conversation_id {
+                            // Refresh the roster immediately instead of
+                            // waiting out the current roster tick.
+                            roster_tick.reset();
                         }
                     }
-
-                    let Some(slot) = peers.get_mut(&peer_id) else { continue; };
-
-                    if slot.link_id.as_deref() != Some(link_id.as_str()) {
-                        slot.link_id = Some(link_id.clone());
-                        active_link_ids.insert(link_id.clone());
-                        start_ice_sender(
-                            client.clone(),
-                            session_token.clone(),
-                            link_id.clone(),
-                            Arc::clone(&slot.pc),
-                            Arc::clone(&slot.ice_alive),
+                    "voice.link.offer" => {
+                        // We are the answerer: create the peer slot if the
+                        // roster tick hasn't seen this peer yet, then apply
+                        // the offer (which publishes our answer).
+                        let payload = &event.payload;
+                        let link_id = j_str(payload, &["link_id", "linkId", "id"]);
+                        let peer_id = j_str(
+                            payload,
+                            &["offerer_id", "offererId", "from_user_id", "fromUserId"],
                         );
-                    }
+                        let offer_json = j_str(payload, &["offer_sdp", "offerSdp"]);
+                        if link_id.is_empty() || peer_id.is_empty() || peer_id == user_id {
+                            continue;
+                        }
 
-                    if !is_offerer && !slot.answer_applied {
-                        if let Some(offer_json) = offer_sdp {
+                        if !peers.contains_key(&peer_id) {
+                            match create_peer_slot(
+                                &api,
+                                &config,
+                                Arc::clone(&jitter),
+                                Arc::clone(&any_connected),
+                                output.clone(),
+                                peer_id.clone(),
+                                Arc::clone(&gains),
+                            ).await {
+                                Ok(slot) => {
+                                    if let Ok(mut tracks) = local_tracks.lock() {
+                                        tracks.push(Arc::clone(&slot.local_track));
+                                    }
+                                    peers.insert(peer_id.clone(), slot);
+                                }
+                                Err(_) => continue,
+                            }
+                        }
+
+                        let Some(slot) = peers.get_mut(&peer_id) else { continue; };
+
+                        if slot.link_id.as_deref() != Some(link_id.as_str()) {
+                            slot.link_id = Some(link_id.clone());
+                            active_link_ids.insert(link_id.clone());
+                            start_ice_sender(
+                                client.clone(),
+                                session_token.clone(),
+                                link_id.clone(),
+                                Arc::clone(&slot.pc),
+                                Arc::clone(&slot.ice_alive),
+                            );
+                        }
+
+                        if !slot.answer_applied && !offer_json.is_empty() {
                             if apply_answerer_offer(
                                 &mut client,
                                 &session_token,
@@ -436,9 +450,21 @@ pub(crate) async fn run_room_voice(
                             }
                         }
                     }
-
-                    if is_offerer && !slot.answer_applied {
-                        if let Some(answer_json) = answer_sdp {
+                    "voice.link.answer" => {
+                        // We are the offerer: apply the peer's answer.
+                        let payload = &event.payload;
+                        let link_id = j_str(payload, &["link_id", "linkId", "id"]);
+                        let answer_json = j_str(payload, &["answer_sdp", "answerSdp"]);
+                        if link_id.is_empty() || answer_json.is_empty() {
+                            continue;
+                        }
+                        let Some(slot) = peers
+                            .values_mut()
+                            .find(|s| s.link_id.as_deref() == Some(link_id.as_str()))
+                        else {
+                            continue;
+                        };
+                        if !slot.answer_applied {
                             if let Ok(answer) =
                                 serde_json::from_str::<RTCSessionDescription>(&answer_json)
                             {
@@ -448,6 +474,57 @@ pub(crate) async fn run_room_voice(
                             }
                         }
                     }
+                    "voice.link.ice" => {
+                        // Live trickle from the peer; the 400 ms listLinkIce
+                        // poll below remains as the snapshot fallback.
+                        let payload = &event.payload;
+                        let link_id = j_str(payload, &["link_id", "linkId", "id"]);
+                        let cand_json = j_str(payload, &["candidate"]);
+                        if link_id.is_empty() || cand_json.is_empty() {
+                            continue;
+                        }
+                        let pc = peers.values().find_map(|s| {
+                            if s.link_id.as_deref() == Some(link_id.as_str()) {
+                                Some(Arc::clone(&s.pc))
+                            } else {
+                                None
+                            }
+                        });
+                        let Some(pc) = pc else { continue; };
+                        let applied = applied_ice.entry(link_id).or_default();
+                        if applied.insert(format!("ws:{cand_json}")) {
+                            if let Ok(init) =
+                                serde_json::from_str::<RTCIceCandidateInit>(&cand_json)
+                            {
+                                let _ = pc.add_ice_candidate(init).await;
+                            }
+                        }
+                    }
+                    "voice.link.end" => {
+                        let payload = &event.payload;
+                        let link_id = j_str(payload, &["link_id", "linkId", "id"]);
+                        if link_id.is_empty() {
+                            continue;
+                        }
+                        let peer_id = peers.iter().find_map(|(id, s)| {
+                            if s.link_id.as_deref() == Some(link_id.as_str()) {
+                                Some(id.clone())
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(peer_id) = peer_id {
+                            if let Some(slot) = peers.remove(&peer_id) {
+                                slot.ice_alive.store(false, Ordering::Relaxed);
+                                active_link_ids.remove(&link_id);
+                                let _ = slot.pc.close().await;
+                                if let Ok(mut tracks) = local_tracks.lock() {
+                                    tracks.retain(|t| !Arc::ptr_eq(t, &slot.local_track));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
 
@@ -625,7 +702,7 @@ async fn create_peer_slot(
 }
 
 async fn publish_offer_for(
-    client: &mut ConvexClient,
+    client: &mut ApiClient,
     session_token: &str,
     conversation_id: &str,
     peer_id: &str,
@@ -672,7 +749,7 @@ async fn publish_offer_for(
 }
 
 async fn apply_answerer_offer(
-    client: &mut ConvexClient,
+    client: &mut ApiClient,
     session_token: &str,
     link_id: &str,
     offer_json: &str,
@@ -720,7 +797,7 @@ async fn apply_answerer_offer(
 }
 
 fn start_ice_sender(
-    mut client: ConvexClient,
+    mut client: ApiClient,
     session_token: String,
     link_id: String,
     pc: Arc<RTCPeerConnection>,

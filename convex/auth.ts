@@ -106,6 +106,51 @@ export function timingSafeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
+/**
+ * Signup that never finished email verification (user row exists, no
+ * verified address). Safe to reclaim so a failed mail send doesn't permanently
+ * lock the username.
+ */
+function isIncompleteSignup(user: Doc<"users">): boolean {
+  return (
+    user.emailVerified !== true &&
+    !user.email &&
+    !user.clerkId &&
+    !!user.passwordHash &&
+    !user.isBot
+  );
+}
+
+function nestedErrorMessage(err: unknown): string {
+  if (err instanceof ConvexError) {
+    const data = err.data as unknown;
+    if (typeof data === "string" && data.trim()) return data.trim();
+    if (data && typeof data === "object") {
+      const msg = (data as { message?: unknown }).message;
+      if (typeof msg === "string" && msg.trim()) return msg.trim();
+    }
+  }
+  if (err instanceof Error && err.message.trim()) {
+    // Nested runAction often wraps as: Uncaught Error: <msg>\n    at ...
+    const raw = err.message;
+    for (const marker of [
+      "Uncaught ConvexError: ",
+      "Uncaught Error: ",
+      "ConvexError: ",
+      "Error: ",
+    ]) {
+      const idx = raw.indexOf(marker);
+      if (idx >= 0) {
+        const rest = raw.slice(idx + marker.length);
+        const line = rest.split("\n")[0]?.trim();
+        if (line) return line;
+      }
+    }
+    return raw.split("\n")[0]?.trim() || raw;
+  }
+  return String(err);
+}
+
 export const signUp = action({
   args: {
     username: v.string(),
@@ -149,11 +194,14 @@ export const signUp = action({
       internal.auth.getUserByUsername,
       { username },
     );
-    if (existing) {
+    if (existing && !isIncompleteSignup(existing)) {
       authError("This username is taken");
     }
-    const existingEmail = await ctx.runQuery(internal.email.getUserByEmail, { email });
-    if (existingEmail) {
+
+    const existingEmail = await ctx.runQuery(internal.email.getUserByEmail, {
+      email,
+    });
+    if (existingEmail && (!existing || existingEmail._id !== existing._id)) {
       authError("This email is already in use");
     }
 
@@ -161,13 +209,28 @@ export const signUp = action({
     const passwordHash = await hashPassword(args.password, salt);
     const role: PlatformRole = forcedRoleForUsername(username) ?? "user";
 
-    const userId: Id<"users"> = await ctx.runMutation(internal.auth.createUser, {
-      username,
-      displayName,
-      salt,
-      passwordHash,
-      role,
-    });
+    // Reclaim incomplete prior signup (e.g. mail provider failed mid-way),
+    // otherwise create a fresh user. Either way the verification email is
+    // mandatory — if it fails we roll the row back so the username is free.
+    let userId: Id<"users">;
+    if (existing && isIncompleteSignup(existing)) {
+      userId = existing._id;
+      await ctx.runMutation(internal.auth.resetIncompleteSignup, {
+        userId,
+        displayName,
+        salt,
+        passwordHash,
+        role,
+      });
+    } else {
+      userId = await ctx.runMutation(internal.auth.createUser, {
+        username,
+        displayName,
+        salt,
+        passwordHash,
+        role,
+      });
+    }
 
     const token = randomHex(32);
     await ctx.runMutation(internal.auth.createSession, {
@@ -176,11 +239,26 @@ export const signUp = action({
       expiresAt: Date.now() + SESSION_TTL_MS,
     });
 
-    // Fire off the verification code; the client gates the new account on
-    // a "verify your email" screen until this comes back confirmed.
-    await ctx.runAction(internal.email.issueCodeForUser, { userId, email });
+    try {
+      await ctx.runAction(internal.email.issueCodeForUser, { userId, email });
+    } catch (err) {
+      // Don't leave a half-created account that blocks the same username.
+      await ctx.runMutation(internal.auth.rollbackIncompleteSignup, { userId });
+      authError(
+        nestedErrorMessage(err) ||
+          "Could not send verification email — try again later",
+      );
+    }
 
-    return { token, userId, username, displayName, role, email, emailVerified: false };
+    return {
+      token,
+      userId,
+      username,
+      displayName,
+      role,
+      email,
+      emailVerified: false,
+    };
   },
 });
 
@@ -325,6 +403,96 @@ export const createUser = internalMutation({
   },
   handler: async (ctx, args) => {
     return await ctx.db.insert("users", args);
+  },
+});
+
+/** Update credentials on an incomplete signup and drop old sessions/codes. */
+export const resetIncompleteSignup = internalMutation({
+  args: {
+    userId: v.id("users"),
+    displayName: v.string(),
+    salt: v.string(),
+    passwordHash: v.string(),
+    role: v.union(
+      v.literal("user"),
+      v.literal("moderator"),
+      v.literal("admin"),
+      v.literal("owner"),
+    ),
+  },
+  handler: async (ctx, args) => {
+    const user = await ctx.db.get("users", args.userId);
+    if (!user) throw new Error("User not found");
+    if (user.emailVerified === true || user.email || user.clerkId || user.isBot) {
+      throw new Error("Account is not an incomplete signup");
+    }
+    await ctx.db.patch("users", args.userId, {
+      displayName: args.displayName,
+      salt: args.salt,
+      passwordHash: args.passwordHash,
+      role: args.role,
+      email: undefined,
+      emailVerified: false,
+    });
+    const sessions = await ctx.db
+      .query("sessions")
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .take(200);
+    for (const s of sessions) {
+      await ctx.db.delete("sessions", s._id);
+    }
+    const code = await ctx.db
+      .query("emailVerificationCodes")
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .unique();
+    if (code) {
+      await ctx.db.delete("emailVerificationCodes", code._id);
+    }
+  },
+});
+
+/**
+ * Drop a user created during signup after verification email failed.
+ * Only removes incomplete (never-verified, no email) accounts.
+ */
+export const rollbackIncompleteSignup = internalMutation({
+  args: { userId: v.id("users") },
+  handler: async (ctx, args) => {
+    const user = await ctx.db.get("users", args.userId);
+    if (!user) return;
+    if (user.emailVerified === true || user.email || user.clerkId || user.isBot) {
+      // Never delete a real account — just clear the pending session/code.
+      const sessions = await ctx.db
+        .query("sessions")
+        .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+        .take(200);
+      for (const s of sessions) {
+        await ctx.db.delete("sessions", s._id);
+      }
+      return;
+    }
+    const sessions = await ctx.db
+      .query("sessions")
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .take(200);
+    for (const s of sessions) {
+      await ctx.db.delete("sessions", s._id);
+    }
+    const code = await ctx.db
+      .query("emailVerificationCodes")
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .unique();
+    if (code) {
+      await ctx.db.delete("emailVerificationCodes", code._id);
+    }
+    const login = await ctx.db
+      .query("loginAttempts")
+      .withIndex("by_username", (q) => q.eq("username", user.username))
+      .unique();
+    if (login) {
+      await ctx.db.delete("loginAttempts", login._id);
+    }
+    await ctx.db.delete("users", args.userId);
   },
 });
 

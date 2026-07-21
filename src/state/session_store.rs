@@ -1,28 +1,20 @@
-//! Local session/identity persistence: the Convex connection bootstrap
+//! Local session/identity persistence: the API connection bootstrap
 //! task, the session-token file next to the app (so login survives a
 //! restart), and the on-disk E2EE identity keypair (generated once per
 //! account, never uploaded).
 
 use std::env;
 
-use convex::ConvexClient;
-
 use crate::crypto;
+use crate::net::api::ApiClient;
 use crate::net::rt::Task;
 use crate::state::message::Message;
 use crate::state::types::Session;
 
 pub(super) fn connect_task(deployment_url: String) -> Task<Message> {
     Task::perform(
-        async move {
-            ConvexClient::new(&deployment_url)
-                .await
-                .map_err(|err| err.to_string())
-        },
-        |result| match result {
-            Ok(client) => Message::Connected(client),
-            Err(err) => Message::ConnectFailed(err),
-        },
+        async move { ApiClient::new(&deployment_url) },
+        Message::Connected,
     )
 }
 

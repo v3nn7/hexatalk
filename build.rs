@@ -1,6 +1,6 @@
 //! Bakes a handful of deployment-specific values into the binary at build
-//! time (read from `.env.local` or `.env` in the crate root, where
-//! `npx convex dev` writes `CONVEX_URL`) so the compiled .exe works
+//! time (read from `.env.local` or `.env` in the crate root, which may set
+//! `API_URL`) so the compiled .exe works
 //! standalone -- e.g. copied to the Desktop with no `.env.local` sitting
 //! next to it -- instead of only working when launched from a directory
 //! that happens to contain that file. `main.rs`/`call.rs` still check the
@@ -96,20 +96,54 @@ fn emit_obfuscated_secrets() {
         relay
     };
 
+    // Platform-specific full-download artefact on astrakit R2.
+    // Windows keeps the historical HexaTalk.exe name so existing clients
+    // keep working; Linux ships an explicit arch tag.
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let (download_url, signature_url) = match (target_os.as_str(), target_arch.as_str()) {
+        ("windows", _) => (
+            "https://astrakit.pro/HexaTalk.exe".to_string(),
+            "https://astrakit.pro/HexaTalk.exe.sig".to_string(),
+        ),
+        ("linux", "aarch64") => (
+            "https://astrakit.pro/HexaTalk-linux-aarch64.AppImage".to_string(),
+            "https://astrakit.pro/HexaTalk-linux-aarch64.AppImage.sig".to_string(),
+        ),
+        ("linux", _) => (
+            "https://astrakit.pro/HexaTalk-linux-x86_64.AppImage".to_string(),
+            "https://astrakit.pro/HexaTalk-linux-x86_64.AppImage.sig".to_string(),
+        ),
+        _ => (
+            "https://astrakit.pro/HexaTalk.exe".to_string(),
+            "https://astrakit.pro/HexaTalk.exe.sig".to_string(),
+        ),
+    };
+
+    // Production API deployment — always the default for shipped builds.
+    // `.env.local` may override during experiments, but an empty/missing
+    // value must never leave the binary without a backend URL.
+    const PROD_API_URL: &str = "https://api.vyrapp.pro";
+    let api_url = {
+        let from_env = env_value("API_URL");
+        if from_env.is_empty() {
+            PROD_API_URL.to_string()
+        } else {
+            from_env
+        }
+    };
+
     // Update-host endpoints + the ed25519 release public key (moved here
     // from src/update_check.rs so they go through the same obfuscation).
     let values: [(&str, String); 11] = [
-        ("CONVEX_URL", env_value("CONVEX_URL")),
+        ("API_URL", api_url),
         ("TURN_URL", env_value("TURN_URL")),
         ("TURN_USERNAME", env_value("TURN_USERNAME")),
         ("TURN_CREDENTIAL", env_value("TURN_CREDENTIAL")),
         ("PEERSEAL_RELAY", relay),
         ("UPDATE_VERSION_URL", "https://astrakit.pro/version.txt".to_string()),
-        ("UPDATE_DOWNLOAD_URL", "https://astrakit.pro/HexaTalk.exe".to_string()),
-        (
-            "UPDATE_SIGNATURE_URL",
-            "https://astrakit.pro/HexaTalk.exe.sig".to_string(),
-        ),
+        ("UPDATE_DOWNLOAD_URL", download_url),
+        ("UPDATE_SIGNATURE_URL", signature_url),
         (
             "UPDATE_PUBLIC_KEY_B64",
             "0cJIouMNtQV708XWpDinnsSjevzQm8bQ2mxpe6/s9eg=".to_string(),

@@ -222,12 +222,26 @@ async fn run_update_check() -> UpdateOutcome {
 /// Returns `None` on missing/bad delta so the caller can try full download.
 /// Returns `(patched_exe, sig_bytes)` where `sig_bytes` is empty when unsigned.
 async fn try_delta_patch(remote_version: &str) -> Option<(Vec<u8>, Vec<u8>)> {
-    let delta_url = format!(
-        "{}HexaTalk-{}-{}.delta",
-        crate::obf::update_delta_base_url(),
-        CURRENT_APP_VERSION,
-        remote_version
-    );
+    // Windows: HexaTalk-<from>-<to>.delta (historical)
+    // Linux:   HexaTalk-linux-x86_64.AppImage-<from>-<to>.delta
+    // (stem already includes the .AppImage suffix on Linux)
+    let stem = update_artifact_stem();
+    let delta_url = if stem == "HexaTalk" {
+        format!(
+            "{}HexaTalk-{}-{}.delta",
+            crate::obf::update_delta_base_url(),
+            CURRENT_APP_VERSION,
+            remote_version
+        )
+    } else {
+        format!(
+            "{}{}-{}-{}.delta",
+            crate::obf::update_delta_base_url(),
+            stem,
+            CURRENT_APP_VERSION,
+            remote_version
+        )
+    };
     let delta_blob = download_bounded(&delta_url, MAX_DELTA_BYTES, 60).await.ok()?;
     // Prefer HTD1-encrypted frames (what release.ps1 ships). Legacy plain
     // qbsdiff blobs are still accepted so older staged deltas keep working
@@ -427,8 +441,83 @@ pub(crate) fn stage_exe_swap(staged_path: &std::path::Path, relaunch: bool) {
         .spawn();
 }
 
-#[cfg(not(windows))]
-pub(crate) fn stage_exe_swap(_staged_path: &std::path::Path, _relaunch: bool) {}
+/// Linux / Unix: shell helper waits for this PID to exit, then replaces the
+/// binary (or AppImage) in place. When running inside an AppImage the
+/// `$APPIMAGE` env var points at the real file on disk — `current_exe()` is
+/// only the FUSE mount and must not be overwritten.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) fn stage_exe_swap(staged_path: &std::path::Path, relaunch: bool) {
+    let exe_path = std::env::var_os("APPIMAGE")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_exe().ok());
+    let Some(exe_path) = exe_path else {
+        return;
+    };
+    if !staged_file_signature_valid(staged_path) {
+        let _ = std::fs::remove_file(staged_path);
+        let _ = std::fs::remove_file(format!("{}.sig", staged_path.display()));
+        return;
+    }
+    let staged = staged_path.display().to_string();
+    let exe = exe_path.display().to_string();
+    let pid = std::process::id();
+    // Pass paths via env so we never have to shell-escape them.
+    let mut cmd = std::process::Command::new("sh");
+    cmd.env("HT_STAGED", &staged)
+        .env("HT_EXE", &exe)
+        .env("HT_PID", pid.to_string())
+        .env("HT_RELAUNCH", if relaunch { "1" } else { "0" })
+        .arg("-c")
+        .arg(
+            r#"
+while kill -0 "$HT_PID" 2>/dev/null; do sleep 0.2; done
+sleep 0.3
+mv -f "$HT_STAGED" "$HT_EXE"
+chmod +x "$HT_EXE"
+rm -f "${HT_STAGED}.sig"
+if [ "$HT_RELAUNCH" = "1" ]; then
+  nohup "$HT_EXE" >/dev/null 2>&1 &
+fi
+"#,
+        )
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let _ = cmd.spawn();
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn stage_exe_swap(_staged_path: &std::path::Path, _relaunch: bool) {
+    // macOS packaging (app bundle) is a separate release path; self-replace
+    // of a bare binary is not supported yet.
+}
+
+/// Filename stem used in CDN paths (without extension).
+/// Windows keeps the historical `HexaTalk` / `HexaTalk.exe` names so existing
+/// deltas keep working; Linux uses an explicit platform tag.
+pub(crate) fn update_artifact_stem() -> &'static str {
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    {
+        "HexaTalk"
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        // AppImage is the supported portable Linux artefact.
+        "HexaTalk-linux-x86_64.AppImage"
+    }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    {
+        "HexaTalk-linux-aarch64.AppImage"
+    }
+    #[cfg(not(any(
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+    )))]
+    {
+        "HexaTalk"
+    }
+}
 
 #[cfg(test)]
 mod tests {

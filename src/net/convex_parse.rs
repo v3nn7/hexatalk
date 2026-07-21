@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use convex::{FunctionResult, Value};
+use crate::net::api::{FunctionResult, Value};
 
 use crate::state::types::{
     AdminStats, AdminUserDetail, DeepLinkJoinInfo, ProfileView, ServerStats, Session,
@@ -261,13 +261,47 @@ pub(crate) fn humanize_error(raw: &str) -> String {
     if trimmed.is_empty() {
         return "Something went wrong".to_string();
     }
-    // Common Convex client noise.
-    let cleaned = trimmed
-        .trim_start_matches("Error: ")
+
+    let mut cleaned = trimmed.to_string();
+    // Prefer the real application message if a stack-style prefix is present.
+    for marker in [
+        "Uncaught ConvexError: ",
+        "Uncaught Error: ",
+        "ConvexError: ",
+        "Error: ",
+    ] {
+        if let Some(idx) = cleaned.find(marker) {
+            cleaned = cleaned[idx + marker.len()..].to_string();
+            break;
+        }
+    }
+    cleaned = cleaned
         .trim_start_matches("ConvexError(")
         .trim_end_matches(')')
         .trim()
-        .trim_matches('"');
+        .trim_matches('"')
+        .to_string();
+
+    // Drop stack frames — keep the first meaningful line, not the last
+    // "at async handler (...)" which is useless in the UI.
+    if let Some(idx) = cleaned.find("\n    at ") {
+        cleaned = cleaned[..idx].to_string();
+    }
+    if let Some(idx) = cleaned.find("\nat ") {
+        cleaned = cleaned[..idx].to_string();
+    }
+    if let Some(line) = cleaned.lines().map(str::trim).find(|l| !l.is_empty()) {
+        cleaned = line.to_string();
+    }
+
+    // Strip "[Request ID: …] " when a real message follows.
+    if let Some(idx) = cleaned.find("] ") {
+        let after = cleaned[idx + 2..].trim();
+        if !after.is_empty() && !after.eq_ignore_ascii_case("server error") {
+            cleaned = after.to_string();
+        }
+    }
+
     if cleaned.contains("Failed to fetch")
         || cleaned.contains("error sending request")
         || cleaned.contains("connection")
@@ -279,14 +313,10 @@ pub(crate) fn humanize_error(raw: &str) -> String {
     if cleaned.contains("Unauthorized") || cleaned.contains("Invalid session") {
         return "Session expired — please log in again".to_string();
     }
-    // Prefer the last non-empty line (server often stacks context).
+    if cleaned.is_empty() || cleaned.eq_ignore_ascii_case("server error") {
+        return "Something went wrong".to_string();
+    }
     cleaned
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .last()
-        .unwrap_or(cleaned)
-        .to_string()
 }
 
 pub(crate) fn parse_profile_view(result: FunctionResult) -> Result<ProfileView, String> {

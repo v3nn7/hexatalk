@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use convex::{FunctionResult, Value};
+use crate::net::api::{FunctionResult, Value};
 use maplit::btreemap;
 
 use crate::net::rt::write_clipboard_text;
@@ -47,6 +47,25 @@ use crate::update_check::{UpdateOutcome, check_for_update_task, stage_exe_swap};
 /// invite code; `extract_invite_code` accepts either form pasted back in.
 fn build_invite_link(code: &str) -> String {
     format!("hexatalk://invite/{code}")
+}
+
+/// Discord-style text-channel name slug: lowercase, whitespace becomes
+/// dashes, anything outside `[a-z0-9-_]` is dropped. Applied live while
+/// typing (the UI preview is the bound input itself).
+fn format_channel_name(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch.is_whitespace() {
+            out.push('-');
+        } else {
+            for lc in ch.to_lowercase() {
+                if lc.is_ascii_alphanumeric() || lc == '-' || lc == '_' {
+                    out.push(lc);
+                }
+            }
+        }
+    }
+    out
 }
 
 fn hostname_best_effort() -> String {
@@ -133,6 +152,26 @@ fn urlencoding_lite(s: &str) -> String {
     out
 }
 
+/// Picks a filename for `client.upload_file` whose extension passes the
+/// server's `POST /files` allowlist (png/jpg/jpeg/gif/webp/mp3/mp4/webm/
+/// pdf/txt). The bytes may be E2EE ciphertext by upload time, so the
+/// extension is derived from the *original* content type and is only a
+/// server-side label — decryption never looks at it.
+fn upload_filename_for(content_type: &str, stem: &str) -> String {
+    let ext = match content_type {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "audio/mpeg" => "mp3",
+        "video/mp4" => "mp4",
+        "video/webm" => "webm",
+        "application/pdf" => "pdf",
+        _ => "txt",
+    };
+    format!("{stem}.{ext}")
+}
+
 impl App {
     fn move_channel_task(&self, conversation_id: String, direction: &'static str) -> Task<Message> {
         let Some(client) = self.client.clone() else {
@@ -164,11 +203,15 @@ impl App {
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Connected(client) => {
-                self.connect_status = "Connected to Convex".to_string();
+                self.connect_status = "Connected to server".to_string();
                 self.client = Some(client.clone());
 
                 if let Some(token) = self.pending_restore_token.take() {
-                    let mut client = client;
+                    // Restore from disk: the token rides in the Bearer header
+                    // from here on, and the WS event stream can start.
+                    client.set_session_token(Some(token.clone()));
+                    client.ensure_ws();
+                    let client = client;
                     let token_for_result = token.clone();
                     return Task::perform(
                         async move {
@@ -469,6 +512,12 @@ impl App {
                 self.email_verify_input = session.email.clone();
                 self.email_verify_code_sent = !session.email.is_empty();
                 self.session = Some(session);
+                // Token lifecycle: from now on the client authenticates every
+                // REST call with the Bearer token and keeps the WS up.
+                if let Some(client) = &self.client {
+                    client.set_session_token(Some(touch_token.clone()));
+                    client.ensure_ws();
+                }
                 self.show_toast("Signed in");
                 let touch = if let Some(client) = self.client.clone() {
                     let mut client = client;
@@ -526,6 +575,9 @@ impl App {
             }
             Message::RestoreFinished(Err(_)) => {
                 clear_session_file();
+                if let Some(client) = &self.client {
+                    client.set_session_token(None);
+                }
                 Task::none()
             }
             // Best-effort background sync; a failure here just means we'll
@@ -2302,52 +2354,30 @@ impl App {
                     return Task::none();
                 };
                 self.server_icon_busy = true;
-                let mut client = client;
+                let client = client;
                 Task::perform(
                     async move {
-                        let upload_url = client
-                            .mutation(
-                                "servers:generateIconUploadUrl",
-                                btreemap! {
-                                    "sessionToken".to_string() => Value::String(session.token.clone()),
-                                    "serverId".to_string() => Value::String(server.server_id.clone()),
-                                },
-                            )
+                        // New API: one multipart POST /files returns the key;
+                        // the public URL is derived client-side.
+                        let filename = upload_filename_for(&content_type, "icon");
+                        let key = client
+                            .upload_file(bytes, &filename)
                             .await
-                            .map_err(|e| humanize_error(&e.to_string()))
-                            .and_then(expect_string)?;
-                        let http = reqwest::Client::new();
-                        let response = http
-                            .post(&upload_url)
-                            .header("Content-Type", content_type.as_str())
-                            .body(bytes)
-                            .send()
-                            .await
-                            .map_err(|e| format!("Upload failed: {e}"))?;
-                        if !response.status().is_success() {
-                            return Err(format!("Upload failed (HTTP {})", response.status()));
-                        }
-                        #[derive(serde::Deserialize)]
-                        struct UploadResponse {
-                            #[serde(rename = "storageId")]
-                            storage_id: String,
-                        }
-                        let parsed: UploadResponse = response
-                            .json()
-                            .await
-                            .map_err(|e| format!("Upload response invalid: {e}"))?;
+                            .map_err(|e| humanize_error(&e.to_string()))?;
+                        let url = client.file_url(&key);
                         client
                             .mutation(
                                 "servers:setServerIcon",
                                 btreemap! {
                                     "sessionToken".to_string() => Value::String(session.token),
                                     "serverId".to_string() => Value::String(server.server_id),
-                                    "storageId".to_string() => Value::String(parsed.storage_id),
+                                    "iconStorageId".to_string() => Value::String(key),
                                 },
                             )
                             .await
                             .map_err(|e| humanize_error(&e.to_string()))
-                            .and_then(expect_string)
+                            .and_then(expect_null)?;
+                        Ok(url)
                     },
                     Message::ServerIconUploadFinished,
                 )
@@ -2675,10 +2705,23 @@ impl App {
             }
             Message::ToggleNewChannelInput => {
                 self.new_channel_open = !self.new_channel_open;
+                if self.new_channel_open {
+                    // Fresh modal every open: no stale name/type/error from a
+                    // previous attempt.
+                    self.new_channel_name_input.clear();
+                    self.new_channel_is_voice = false;
+                    self.server_status = None;
+                }
                 Task::none()
             }
             Message::NewChannelNameChanged(value) => {
-                self.new_channel_name_input = value;
+                // Discord-style live formatting for text channels
+                // (lowercase, spaces -> dashes); voice names stay free-form.
+                self.new_channel_name_input = if self.new_channel_is_voice {
+                    value
+                } else {
+                    format_channel_name(&value)
+                };
                 Task::none()
             }
             Message::CreateChannel => {
@@ -2691,7 +2734,15 @@ impl App {
                 let Some(server) = self.selected_server.clone() else {
                     return Task::none();
                 };
-                let name = self.new_channel_name_input.trim().to_string();
+                let name = if self.new_channel_is_voice {
+                    self.new_channel_name_input.trim().to_string()
+                } else {
+                    // No dangling separators at either end (Discord-style).
+                    self.new_channel_name_input
+                        .trim()
+                        .trim_matches('-')
+                        .to_string()
+                };
                 if name.is_empty() {
                     self.server_status = Some("Enter a channel name".to_string());
                     return Task::none();
@@ -3619,45 +3670,17 @@ impl App {
                                 }
                             };
                         self.send_busy = true;
-                        let mut client = client;
+                        let client = client;
                         let session_token = session.token.clone();
+                        let upload_name = upload_filename_for(&att.content_type, "attachment");
                         return Task::batch([
                             scroll_chat_to_bottom(),
                             Task::perform(
                                 async move {
-                                    let upload_url = client
-                                        .mutation(
-                                            "messages:generateAttachmentUploadUrl",
-                                            btreemap! {
-                                                "sessionToken".to_string() => Value::String(session_token.clone()),
-                                            },
-                                        )
+                                    let key = client
+                                        .upload_file(ct_bytes, &upload_name)
                                         .await
-                                        .map_err(|err| humanize_error(&err.to_string()))
-                                        .and_then(expect_string)?;
-                                    let http = reqwest::Client::new();
-                                    let response = http
-                                        .post(&upload_url)
-                                        .header("Content-Type", "application/octet-stream")
-                                        .body(ct_bytes)
-                                        .send()
-                                        .await
-                                        .map_err(|err| format!("Upload failed: {err}"))?;
-                                    if !response.status().is_success() {
-                                        return Err(format!(
-                                            "Upload failed (HTTP {})",
-                                            response.status()
-                                        ));
-                                    }
-                                    #[derive(serde::Deserialize)]
-                                    struct UploadResponse {
-                                        #[serde(rename = "storageId")]
-                                        storage_id: String,
-                                    }
-                                    let parsed: UploadResponse = response
-                                        .json()
-                                        .await
-                                        .map_err(|err| format!("Upload response invalid: {err}"))?;
+                                        .map_err(|err| humanize_error(&err.to_string()))?;
                                     client
                                         .mutation(
                                             "messages:send",
@@ -3665,7 +3688,7 @@ impl App {
                                                 "sessionToken".to_string() => Value::String(session_token),
                                                 "conversationId".to_string() => Value::String(conversation_id),
                                                 "body".to_string() => Value::String(body_ct),
-                                                "attachmentStorageId".to_string() => Value::String(parsed.storage_id),
+                                                "attachmentStorageId".to_string() => Value::String(key),
                                                 "encrypted".to_string() => Value::Boolean(true),
                                             },
                                         )
@@ -3841,10 +3864,6 @@ impl App {
                 let mut body_to_send = body;
                 let mut encrypted_flag = false;
                 let mut upload_bytes = attachment.as_ref().map(|a| a.bytes.clone());
-                let mut upload_content_type = attachment
-                    .as_ref()
-                    .map(|a| a.content_type.clone())
-                    .unwrap_or_else(|| "application/octet-stream".into());
 
                 if let Some((epoch, key)) = group_key {
                     encrypted_flag = true;
@@ -3854,7 +3873,6 @@ impl App {
                         payload.att_key = Some(att_key);
                         payload.att_nonce = Some(att_nonce);
                         upload_bytes = Some(ct);
-                        upload_content_type = "application/octet-stream".into();
                     }
                     match crypto::encrypt_group_message(
                         &key,
@@ -3884,46 +3902,22 @@ impl App {
                 } else {
                     Task::none()
                 };
-                let mut client = client;
+                let client = client;
+                let upload_name = attachment
+                    .as_ref()
+                    .map(|a| upload_filename_for(&a.content_type, "attachment"));
                 let send = Task::perform(
                     async move {
-                        let attachment_storage_id: Option<String> = if let Some(bytes) =
-                            upload_bytes
+                        let attachment_storage_id: Option<String> = if let (Some(bytes), Some(name)) =
+                            (upload_bytes, upload_name)
                         {
-                            let upload_url = client
-                                    .mutation(
-                                        "messages:generateAttachmentUploadUrl",
-                                        btreemap! {
-                                            "sessionToken".to_string() => Value::String(session.token.clone()),
-                                        },
-                                    )
-                                    .await
-                                    .map_err(|err| humanize_error(&err.to_string()))
-                                    .and_then(expect_string)?;
-
-                            let http = reqwest::Client::new();
-                            let response = http
-                                .post(&upload_url)
-                                .header("Content-Type", upload_content_type.as_str())
-                                .body(bytes)
-                                .send()
+                            // New API: multipart POST /files → key, passed to
+                            // messages:send as attachmentStorageId.
+                            let key = client
+                                .upload_file(bytes, &name)
                                 .await
-                                .map_err(|err| format!("Upload failed: {err}"))?;
-
-                            if !response.status().is_success() {
-                                return Err(format!("Upload failed (HTTP {})", response.status()));
-                            }
-
-                            #[derive(serde::Deserialize)]
-                            struct UploadResponse {
-                                #[serde(rename = "storageId")]
-                                storage_id: String,
-                            }
-                            let parsed: UploadResponse = response
-                                .json()
-                                .await
-                                .map_err(|err| format!("Upload response invalid: {err}"))?;
-                            Some(parsed.storage_id)
+                                .map_err(|err| humanize_error(&err.to_string()))?;
+                            Some(key)
                         } else {
                             None
                         };
@@ -4326,10 +4320,20 @@ impl App {
 
             Message::NewChannelIsVoice(v) => {
                 self.new_channel_is_voice = v;
+                if !v {
+                    // Switching a half-typed name back to Text applies the
+                    // same live formatting as typing would have.
+                    self.new_channel_name_input =
+                        format_channel_name(&self.new_channel_name_input);
+                }
                 Task::none()
             }
             Message::ToggleNewChannelIsVoice => {
                 self.new_channel_is_voice = !self.new_channel_is_voice;
+                if !self.new_channel_is_voice {
+                    self.new_channel_name_input =
+                        format_channel_name(&self.new_channel_name_input);
+                }
                 Task::none()
             }
             Message::JoinVoiceChannel => {
@@ -4473,7 +4477,16 @@ impl App {
             }
             Message::GroupKeyReady(Err(err)) => {
                 // Soft fail: chat still works in plaintext if bootstrap fails.
-                self.chat_error = Some(format!("Group encryption: {err}"));
+                // Banner tylko dla grupowych DM-ów — na kanałach serwerowych
+                // E2EE i tak wymaga kluczy WSZYSTKICH członków (a serwer nie
+                // zwraca ich jeszcze w members), więc wracamy do plaintextu
+                // po cichu zamiast straszyć czerwonym paskiem.
+                let kind = self.active_conversation_kind.as_deref().unwrap_or("");
+                if kind == "group" {
+                    self.chat_error = Some(format!("Group encryption: {err}"));
+                } else {
+                    eprintln!("group key bootstrap skipped (kind={kind}): {err}");
+                }
                 Task::none()
             }
             Message::GroupKeyReady(Ok(())) => Task::none(),
@@ -4802,9 +4815,9 @@ impl App {
                             }
                         }
                         Ok(if total == 0 {
-                            "Chat cleared (Convex + local caches)".to_string()
+                            "Chat cleared (server + local caches)".to_string()
                         } else {
-                            format!("Chat cleared · {total} messages removed from Convex")
+                            format!("Chat cleared · {total} messages removed from server")
                         })
                     },
                     Message::ClearChatFinished,
@@ -6204,48 +6217,29 @@ impl App {
                     return Task::none();
                 };
                 self.settings_profile_status = Some(("Uploading...".to_string(), false));
-                let mut client = client;
+                let client = client;
                 Task::perform(
                     async move {
-                        let upload_url = client
-                            .mutation(
-                                "profile:generateAvatarUploadUrl",
-                                btreemap! {
-                                    "sessionToken".to_string() => Value::String(session.token.clone()),
-                                },
-                            )
-                            .await
-                            .map_err(|err| err.to_string())
-                            .and_then(expect_string)?;
-
-                        let http = reqwest::Client::new();
-                        let response = http
-                            .post(&upload_url)
-                            .header("Content-Type", content_type)
-                            .body(bytes)
-                            .send()
+                        // New API: multipart POST /files → key; the public
+                        // avatar URL is derived client-side via file_url().
+                        let filename = upload_filename_for(&content_type, "avatar");
+                        let key = client
+                            .upload_file(bytes, &filename)
                             .await
                             .map_err(|err| err.to_string())?;
-
-                        #[derive(serde::Deserialize)]
-                        struct UploadResponse {
-                            #[serde(rename = "storageId")]
-                            storage_id: String,
-                        }
-                        let parsed: UploadResponse =
-                            response.json().await.map_err(|err| err.to_string())?;
-
+                        let url = client.file_url(&key);
                         client
                             .mutation(
                                 "profile:setAvatarImage",
                                 btreemap! {
                                     "sessionToken".to_string() => Value::String(session.token),
-                                    "storageId".to_string() => Value::String(parsed.storage_id),
+                                    "avatarStorageId".to_string() => Value::String(key),
                                 },
                             )
                             .await
                             .map_err(|err| err.to_string())
-                            .and_then(expect_string)
+                            .and_then(expect_null)?;
+                        Ok(url)
                     },
                     Message::AvatarUploadFinished,
                 )
@@ -6312,6 +6306,7 @@ impl App {
                     return Task::none();
                 };
                 let Some(session) = self.session.clone() else {
+                    client.set_session_token(None);
                     self.reset_session();
                     return Task::none();
                 };
@@ -6331,6 +6326,9 @@ impl App {
                 )
             }
             Message::LoggedOut => {
+                if let Some(client) = &self.client {
+                    client.set_session_token(None);
+                }
                 self.reset_session();
                 Task::none()
             }

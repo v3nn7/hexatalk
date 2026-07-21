@@ -38,10 +38,16 @@
 .PARAMETER VerifyDelta
   After generating a delta: decrypt (if HTD1) + qbspatch + byte compare.
 
+.PARAMETER SkipInstaller
+  Do not build installer\Output\HexaTalkSetup-*.exe (Inno Setup).
+
 .EXAMPLE
   $env:RELEASE_SIGNING_KEY_HEX = "<64 hex chars private seed>"
   # optional; defaults match the baked UPDATE_DELTA_KEY_B64 in build.rs
   $env:RELEASE_DELTA_KEY_HEX = "<64 hex chars AES-256 key>"
+  # optional Authenticode for the Inno installer (SmartScreen):
+  # $env:CODE_SIGN_PFX = "C:\certs\hexatalk.pfx"
+  # $env:CODE_SIGN_PFX_PASSWORD = "..."
   .\scripts\release.ps1
 
 .EXAMPLE
@@ -55,7 +61,8 @@ param(
     [switch]$AllDeltas,
     [switch]$SkipDelta,
     [switch]$SkipEncrypt,
-    [switch]$VerifyDelta
+    [switch]$VerifyDelta,
+    [switch]$SkipInstaller
 )
 
 $ErrorActionPreference = "Stop"
@@ -408,6 +415,32 @@ if (-not $SkipDelta) {
     }
 }
 
+# ---------- installer (Inno Setup + optional Authenticode) ----------
+$installerPath = $null
+if (-not $SkipInstaller) {
+    $buildInstaller = Join-Path $repoRoot "installer\build.ps1"
+    if (Test-Path $buildInstaller) {
+        Write-Host ""
+        Write-Host "Building installer (Inno Setup)..." -ForegroundColor Cyan
+        try {
+            & $buildInstaller -Version $newVersion -SkipBuildExe
+            if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) {
+                Write-Warning "installer\build.ps1 failed (exit $LASTEXITCODE) — release files are still OK."
+            } else {
+                $outInst = Join-Path $repoRoot "installer\Output"
+                $installerPath = Join-Path $outInst "HexaTalkSetup.exe"
+                if (-not (Test-Path $installerPath)) {
+                    $installerPath = Get-ChildItem $outInst -Filter "HexaTalkSetup-*.exe" -ErrorAction SilentlyContinue |
+                        Sort-Object LastWriteTime -Descending |
+                        Select-Object -First 1 -ExpandProperty FullName
+                }
+            }
+        } catch {
+            Write-Warning "Installer build skipped/failed: $_"
+        }
+    }
+}
+
 # ---------- summary ----------
 Write-Host ""
 Write-Host "========== RELEASE $newVersion READY ==========" -ForegroundColor Green
@@ -427,6 +460,12 @@ Write-Host ""
 Write-Host "Optional full-download fallback (NOT staged by default):" -ForegroundColor DarkGray
 Write-Host "  HexaTalk.exe + HexaTalk.exe.sig  — only if you want skip-version recovery"
 Write-Host "  Local archive still at: releases\HexaTalk-$newVersion.exe"
+if ($installerPath) {
+    Write-Host ""
+    Write-Host "Installer (first-time setup / vyrapp.pro download):" -ForegroundColor Cyan
+    Write-Host "  $installerPath"
+    Write-Host "  Authenticode: set CODE_SIGN_PFX + CODE_SIGN_PFX_PASSWORD (or CODE_SIGN_THUMBPRINT)" -ForegroundColor DarkGray
+}
 Write-Host ""
 Write-Host "Client expects:" -ForegroundColor DarkGray
 Write-Host "  GET .../version.txt"

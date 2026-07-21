@@ -85,44 +85,87 @@ const MAX_BACKGROUND_PEER_SESSIONS: usize = 25;
 /// unlikely.
 const DEEPLINK_PORT: u16 = 47812;
 
-/// Registers `vyrapp://` under HKCU (no admin rights needed) so Windows
-/// routes `vyrapp://join/<slug>` links to this exe. Best-effort: failures
-/// (non-Windows, sandboxed, `reg.exe` missing) are logged and swallowed --
-/// this must never block the app from starting.
+/// Registers `vyrapp://` so the OS routes join deep links to this binary.
+/// Best-effort: failures are logged and swallowed — must never block startup.
 fn register_url_protocol() {
-    if !cfg!(windows) {
-        return;
-    }
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
-    let open_command = format!("\"{}\" \"%1\"", exe.display());
-    let steps: [&[&str]; 3] = [
-        &["add", r"HKCU\Software\Classes\vyrapp", "/ve", "/d", "URL:Vyr Protocol", "/f"],
-        &["add", r"HKCU\Software\Classes\vyrapp", "/v", "URL Protocol", "/d", "", "/f"],
-        &[
-            "add",
-            r"HKCU\Software\Classes\vyrapp\shell\open\command",
-            "/ve",
-            "/d",
-            open_command.as_str(),
-            "/f",
-        ],
-    ];
-    for args in steps {
-        #[allow(unused_mut)]
-        let mut cmd = std::process::Command::new("reg.exe");
-        cmd.args(args);
-        #[cfg(windows)]
-        {
+
+    #[cfg(windows)]
+    {
+        let open_command = format!("\"{}\" \"%1\"", exe.display());
+        let steps: [&[&str]; 3] = [
+            &["add", r"HKCU\Software\Classes\vyrapp", "/ve", "/d", "URL:Vyr Protocol", "/f"],
+            &["add", r"HKCU\Software\Classes\vyrapp", "/v", "URL Protocol", "/d", "", "/f"],
+            &[
+                "add",
+                r"HKCU\Software\Classes\vyrapp\shell\open\command",
+                "/ve",
+                "/d",
+                open_command.as_str(),
+                "/f",
+            ],
+        ];
+        for args in steps {
+            let mut cmd = std::process::Command::new("reg.exe");
+            cmd.args(args);
             use std::os::windows::process::CommandExt;
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             cmd.creation_flags(CREATE_NO_WINDOW);
+            if let Err(err) = cmd.output() {
+                eprintln!("warning: failed to register vyrapp:// protocol: {err}");
+                return;
+            }
         }
-        if let Err(err) = cmd.output() {
-            eprintln!("warning: failed to register vyrapp:// protocol: {err}");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // XDG: ~/.local/share/applications/hexatalk.desktop + mime default.
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let apps = std::path::PathBuf::from(home)
+            .join(".local/share/applications");
+        if let Err(err) = std::fs::create_dir_all(&apps) {
+            eprintln!("warning: cannot create applications dir: {err}");
             return;
         }
+        let desktop_path = apps.join("hexatalk-vyrapp.desktop");
+        let exe_s = exe.display().to_string();
+        let body = format!(
+            "[Desktop Entry]\n\
+             Type=Application\n\
+             Name=HexaTalk\n\
+             Comment=Open HexaTalk deep links\n\
+             Exec=\"{exe}\" %u\n\
+             Terminal=false\n\
+             Categories=Network;InstantMessaging;\n\
+             MimeType=x-scheme-handler/vyrapp;\n\
+             NoDisplay=true\n\
+             StartupNotify=false\n",
+            exe = exe_s.replace('"', "\\\"")
+        );
+        if let Err(err) = std::fs::write(&desktop_path, body) {
+            eprintln!("warning: failed to write .desktop for vyrapp://: {err}");
+            return;
+        }
+        // Best-effort: register as default handler (needs xdg-utils).
+        let _ = std::process::Command::new("xdg-mime")
+            .args([
+                "default",
+                "hexatalk-vyrapp.desktop",
+                "x-scheme-handler/vyrapp",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let _ = std::process::Command::new("update-desktop-database")
+            .arg(&apps)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
     }
 }
 
@@ -262,15 +305,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (obfuscated, see src/obf.rs) into the binary at compile time, so a
     // standalone .exe copied somewhere with no .env file still knows where
     // to connect.
-    let deployment_url = env::var("CONVEX_URL")
+    // Production default is baked by build.rs (api.vyrapp.pro). Runtime
+    // API_URL / .env.local only override for deliberate experiments — the
+    // shipped app must talk to production.
+    let deployment_url = env::var("API_URL")
         .ok()
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| obf::convex_url().to_string());
+        .unwrap_or_else(|| obf::api_url().to_string());
 
     if deployment_url.is_empty() {
-        eprintln!("Missing CONVEX_URL (baked at compile time from .env.local). Rebuild the app.");
+        eprintln!("Missing API_URL (baked at compile time from .env.local). Rebuild the app.");
         std::process::exit(1);
     }
+    eprintln!("HexaTalk backend: {deployment_url}");
 
     // UI fonts are embedded at Slint compile time (see the `import "*.ttf"`
     // lines at the top of ui/main.slint) -- no runtime registration needed.
@@ -2692,6 +2739,11 @@ fn wire_chat_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Message>) 
         on_chat_toggle_new_channel_voice,
         Message::ToggleNewChannelIsVoice
     );
+    // Radio cards in the create-channel modal set the type explicitly
+    // (no blind toggle from the Slint side).
+    on1!(on_chat_set_new_channel_voice, |v: bool| {
+        Message::NewChannelIsVoice(v)
+    });
     on1!(on_chat_open_channel, |id: slint::SharedString| {
         Message::OpenChannel(id.to_string())
     });

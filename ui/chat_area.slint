@@ -231,8 +231,10 @@ export component ChatArea inherits Rectangle {
                     background: Theme.accent;
                     border-width: 1px;
                     border-color: Theme.accent;
-                    drop-shadow-offset-x: Theme.shadow-offset;
+                    border-radius: Theme.radius-lg;
+                    drop-shadow-offset-x: 0px;
                     drop-shadow-offset-y: Theme.shadow-offset;
+                    drop-shadow-blur: Theme.shadow-blur-lg;
                     drop-shadow-color: Theme.shadow-color;
                     Text {
                         text: ">_";
@@ -515,21 +517,50 @@ export component ChatArea inherits Rectangle {
             }
             // History fetch in flight (set on conversation open, cleared on
             // the first MessagesUpdated) -- show a quiet indicator instead
-            // of a blank pane.
-            if root.loading && root.messages.length == 0: Text {
-                text: "Loading…";
-                font-size: Theme.text-md;
-                color: Theme.text-muted;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            // of a blank pane. Absolutely positioned like the welcome
+            // screen: a fill-parent centered layout would propagate bounded
+            // size constraints upward and clamp the window scene.
+            if root.loading && root.messages.length == 0: VerticalLayout {
+                x: (parent.width - self.preferred-width) / 2;
+                y: (parent.height - self.preferred-height) / 2;
+                width: self.preferred-width;
+                height: self.preferred-height;
+                spacing: 6px;
+                Text {
+                    text: "Loading…";
+                    font-size: Theme.text-md;
+                    font-family: Theme.font-medium;
+                    color: Theme.text-muted;
+                    horizontal-alignment: center;
+                    opacity: 0.65 + 0.35 * Math.sin((animation-tick() / 420ms) * 1deg);
+                }
             }
-            // Loaded, genuinely empty conversation.
-            if !root.loading && root.messages.length == 0: Text {
-                text: "No messages yet. Say hi!";
-                font-size: Theme.text-md;
-                color: Theme.text-muted;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            // Loaded, genuinely empty conversation -- friendly empty state
+            // instead of a bare one-liner.
+            if !root.loading && root.messages.length == 0: VerticalLayout {
+                x: (parent.width - self.preferred-width) / 2;
+                y: (parent.height - self.preferred-height) / 2;
+                width: self.preferred-width;
+                height: self.preferred-height;
+                spacing: 6px;
+                Text {
+                    text: "💬";
+                    font-size: 26px;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "No messages yet";
+                    font-size: Theme.text-md;
+                    font-family: Theme.font-medium;
+                    color: Theme.text-primary;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "Say hi and break the ice.";
+                    font-size: Theme.text-sm;
+                    color: Theme.text-muted;
+                    horizontal-alignment: center;
+                }
             }
         }
 
@@ -614,29 +645,51 @@ export component ChatArea inherits Rectangle {
                 if root.chat_error != "": Rectangle {
                     background: Theme.danger-soft;
                     border-width: 1px;
-                    border-color: Theme.danger;
-                    border-radius: 6px;
-                    height: 34px;
+                    border-color: Theme.danger-dim;
+                    border-radius: Theme.radius-md;
+                    height: 36px;
+                    // Danger spine on the left edge, matching the auth /
+                    // email-verify alert style.
+                    Rectangle {
+                        x: 0;
+                        y: 0;
+                        width: 3px;
+                        height: parent.height;
+                        border-radius: 2px;
+                        background: Theme.danger;
+                    }
                     Text {
-                        x: 10px;
-                        text: root.chat_error;
+                        x: 14px;
+                        width: parent.width - 26px;
+                        text: "⚠  " + root.chat_error;
                         font-size: Theme.text-sm;
                         color: Theme.danger;
                         vertical-alignment: center;
+                        overflow: elide;
                     }
                 }
                 if root.chat_error == "" && root.warning_line != "": Rectangle {
                     background: Theme.warning-soft;
                     border-width: 1px;
                     border-color: Theme.warning-border;
-                    border-radius: 6px;
-                    height: 34px;
+                    border-radius: Theme.radius-md;
+                    height: 36px;
+                    Rectangle {
+                        x: 0;
+                        y: 0;
+                        width: 3px;
+                        height: parent.height;
+                        border-radius: 2px;
+                        background: Theme.warning;
+                    }
                     Text {
-                        x: 10px;
+                        x: 14px;
+                        width: parent.width - 26px;
                         text: root.warning_line;
                         font-size: Theme.text-sm;
                         color: Theme.warning;
                         vertical-alignment: center;
+                        overflow: elide;
                     }
                 }
 
@@ -667,7 +720,7 @@ export component ChatArea inherits Rectangle {
                                     vertical-alignment: center;
                                 }
                             }
-                            mention_touch := TouchArea { clicked => { root.mention_pick(name); } }
+                            mention_touch := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.mention_pick(name); } }
                         }
                     }
                 }
@@ -694,7 +747,7 @@ export component ChatArea inherits Rectangle {
                     composer_box := Rectangle {
                         horizontal-stretch: 1;
                         height: 44px;
-                        border-radius: 8px;
+                        border-radius: Theme.radius-lg;
                         background: composer_input.has-focus ? Theme.bg-elevated : Theme.bg-tertiary;
                         border-width: 1px;
                         border-color: composer_input.has-focus ? Theme.border-strong : Theme.border;
@@ -720,7 +773,7 @@ export component ChatArea inherits Rectangle {
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
-                            att_touch := TouchArea { clicked => { root.pick_attachment(); } }
+                            att_touch := TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.pick_attachment(); } }
                         }
 
                         composer_input := TextInput {
@@ -787,6 +840,7 @@ export component ChatArea inherits Rectangle {
                                 fg: emoji_touch.has-hover ? Theme.text-primary : Theme.text-muted;
                             }
                             emoji_touch := TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
                                 clicked => {
                                     root.message_input = root.message_input
                                         + (root.quick_emojis.length > 0 ? root.quick_emojis[0] : "😊");
@@ -821,6 +875,7 @@ export component ChatArea inherits Rectangle {
                             }
                             send_touch := TouchArea {
                                 enabled: send_btn.can_send;
+                                mouse-cursor: MouseCursor.pointer;
                                 clicked => { root.send(); }
                             }
                         }

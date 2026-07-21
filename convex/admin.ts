@@ -1,5 +1,9 @@
 import { v } from "convex/values";
-import { mutation, query } from "./_generated/server";
+import {
+  internalMutation,
+  mutation,
+  query,
+} from "./_generated/server";
 import {
   requireAdmin,
   requireStaff,
@@ -12,6 +16,29 @@ import {
 // Same online window the friends/presence queries use, so "online now" in
 // the admin dashboard matches what users see elsewhere.
 const ONLINE_MS = 90_000;
+
+/**
+ * CLI-only batch wipe of Convex file storage blobs left after a table wipe
+ * (`npx convex import --replace-all` clears documents but not `_storage`).
+ *
+ *   npx convex run internal.admin.wipeAllStorage '{"confirm":"WIPE_ALL_STORAGE"}' --prod
+ *   # re-run until { deleted: 0, done: true }
+ */
+export const wipeAllStorage = internalMutation({
+  args: { confirm: v.string() },
+  handler: async (ctx, args) => {
+    if (args.confirm !== "WIPE_ALL_STORAGE") {
+      throw new Error('Pass confirm: "WIPE_ALL_STORAGE"');
+    }
+    const batch = await ctx.db.system.query("_storage").take(100);
+    let deleted = 0;
+    for (const file of batch) {
+      await ctx.storage.delete(file._id);
+      deleted += 1;
+    }
+    return { deleted, done: batch.length < 100 };
+  },
+});
 
 export const listUsers = query({
   args: { sessionToken: v.string() },

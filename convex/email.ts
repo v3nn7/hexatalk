@@ -1,4 +1,4 @@
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import {
   action,
   internalAction,
@@ -20,6 +20,11 @@ const MAX_ATTEMPTS = 5;
 /** Min wait between verification-code emails for one user. */
 const MIN_RESEND_INTERVAL_MS = 60 * 1000;
 
+/** User-facing errors survive the public HTTP API (unlike plain Error). */
+function emailError(message: string): never {
+  throw new ConvexError(message);
+}
+
 function generateCode(): string {
   const bytes = new Uint8Array(4);
   crypto.getRandomValues(bytes);
@@ -27,36 +32,95 @@ function generateCode(): string {
   return num.toString().padStart(6, "0");
 }
 
+/**
+ * Send via Resend. Requires Convex dashboard env:
+ *   RESEND_API_KEY      — re_... from https://resend.com/api-keys
+ *   RESEND_FROM_EMAIL   — e.g. "HexaTalk <noreply@yourdomain.com>"
+ *                         Domain must be verified in Resend. The default
+ *                         onboarding@resend.dev only delivers to the Resend
+ *                         account owner's address (not arbitrary users).
+ */
 async function sendResendEmail(
   email: string,
   subject: string,
   text: string,
   html: string,
 ): Promise<void> {
-  const apiKey = process.env.RESEND_API_KEY;
+  const apiKey = process.env.RESEND_API_KEY?.trim();
   if (!apiKey) {
-    throw new Error("Email sending is not configured (missing RESEND_API_KEY)");
+    emailError(
+      "Email is not configured on the server (missing RESEND_API_KEY). Add it in the Convex dashboard.",
+    );
   }
-  const from = process.env.RESEND_FROM_EMAIL ?? "HexaTalk <onboarding@resend.dev>";
+  const from =
+    process.env.RESEND_FROM_EMAIL?.trim() ||
+    "HexaTalk <onboarding@resend.dev>";
 
-  const res = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      from,
-      to: [email],
-      subject,
-      text,
-      html,
-    }),
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`Could not send email (${res.status}): ${body}`);
+  let res: Response;
+  try {
+    res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from,
+        to: [email],
+        subject,
+        text,
+        html,
+      }),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    emailError(`Could not reach the mail provider: ${msg}`);
   }
+
+  if (res.ok) {
+    return;
+  }
+
+  const body = await res.text().catch(() => "");
+  let detail = body;
+  try {
+    const parsed = JSON.parse(body) as {
+      message?: string;
+      name?: string;
+      statusCode?: number;
+    };
+    if (parsed.message) {
+      detail = parsed.message;
+    }
+  } catch {
+    /* keep raw body */
+  }
+
+  const lower = `${detail} ${from}`.toLowerCase();
+  if (res.status === 401 || res.status === 403) {
+    emailError(
+      "Mail provider rejected the API key. Check RESEND_API_KEY in Convex.",
+    );
+  }
+  if (
+    lower.includes("domain") ||
+    lower.includes("not verified") ||
+    lower.includes("from") ||
+    lower.includes("invalid")
+  ) {
+    emailError(
+      "Mail “from” address is not allowed. Verify your domain in Resend and set RESEND_FROM_EMAIL (e.g. HexaTalk <noreply@yourdomain.com>).",
+    );
+  }
+  if (res.status === 429) {
+    emailError("Too many emails sent — wait a minute and try again.");
+  }
+  emailError(
+    `Could not send email (${res.status}). ${detail || "Try again later."}`.slice(
+      0,
+      280,
+    ),
+  );
 }
 
 async function sendVerificationEmail(email: string, code: string): Promise<void> {
@@ -109,7 +173,7 @@ export const requestEmailVerification = action({
   handler: async (ctx, args) => {
     const email = args.email.trim().toLowerCase();
     if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      throw new Error("Enter a valid email address");
+      emailError("Enter a valid email address");
     }
 
     const user: Doc<"users"> = await ctx.runQuery(internal.auth.resolveSessionUser, {
@@ -125,12 +189,12 @@ export const requestEmailVerification = action({
     const sinceLast = Date.now() - codeState.lastSentAt;
     if (codeState.lastSentAt > 0 && sinceLast < MIN_RESEND_INTERVAL_MS) {
       const waitSeconds = Math.ceil((MIN_RESEND_INTERVAL_MS - sinceLast) / 1000);
-      throw new Error(`Please wait ${waitSeconds}s before requesting another code`);
+      emailError(`Please wait ${waitSeconds}s before requesting another code`);
     }
 
     const existing = await ctx.runQuery(internal.email.getUserByEmail, { email });
     if (existing && existing._id !== user._id) {
-      throw new Error("This email is already in use");
+      emailError("This email is already in use");
     }
 
     await ctx.runAction(internal.email.issueCodeForUser, { userId: user._id, email });
@@ -147,15 +211,15 @@ export const verifyEmailCode = mutation({
       .withIndex("by_userId", (q) => q.eq("userId", user._id))
       .unique();
     if (!row) {
-      throw new Error("No verification code pending — request a new one");
+      emailError("No verification code pending — request a new one");
     }
     if (row.expiresAt < Date.now()) {
       await ctx.db.delete("emailVerificationCodes", row._id);
-      throw new Error("Code expired — request a new one");
+      emailError("Code expired — request a new one");
     }
     if (row.attempts >= MAX_ATTEMPTS) {
       await ctx.db.delete("emailVerificationCodes", row._id);
-      throw new Error("Too many attempts — request a new code");
+      emailError("Too many attempts — request a new code");
     }
 
     const attemptHash = await hashSessionToken(args.code.trim());
@@ -163,7 +227,7 @@ export const verifyEmailCode = mutation({
       await ctx.db.patch("emailVerificationCodes", row._id, {
         attempts: row.attempts + 1,
       });
-      throw new Error("Incorrect code");
+      emailError("Incorrect code");
     }
 
     // Make sure nobody else claimed this email while the code was pending.
@@ -173,7 +237,7 @@ export const verifyEmailCode = mutation({
       .unique();
     if (existing && existing._id !== user._id) {
       await ctx.db.delete("emailVerificationCodes", row._id);
-      throw new Error("This email is already in use");
+      emailError("This email is already in use");
     }
 
     await ctx.db.patch("users", user._id, {

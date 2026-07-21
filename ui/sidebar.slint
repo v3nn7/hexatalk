@@ -332,9 +332,6 @@ export component Sidebar inherits Rectangle {
     in property <bool> can_manage_server: false;
     in property <string> invite_code;
     in property <bool> can_manage_channels: false;
-    in property <bool> new_channel_open: false;
-    in-out property <string> new_channel_name;
-    in property <bool> new_channel_is_voice: false;
     in property <[ChannelRow]> text_channels: [];
     in property <[ChannelRow]> voice_channels: [];
 
@@ -409,9 +406,6 @@ export component Sidebar inherits Rectangle {
     callback toggle_server_settings;
     callback copy_invite_link(string);
     callback toggle_new_channel;
-    callback new_channel_name_changed(string);
-    callback create_channel;
-    callback toggle_new_channel_voice;
     callback open_channel(string);
 
     callback admin_search_changed(string);
@@ -765,16 +759,9 @@ export component Sidebar inherits Rectangle {
                             if root.can_manage_server: SmallButton { text: "Settings"; clicked => { root.toggle_server_settings(); } }
                             if root.invite_code != "": SmallButton { text: "Copy invite link"; clicked => { root.copy_invite_link(root.invite_code); } }
                         }
-                        if root.can_manage_channels: SmallButton { text: root.new_channel_open ? "Cancel" : "+ New channel"; clicked => { root.toggle_new_channel(); } }
-                        if root.can_manage_channels && root.new_channel_open: VerticalLayout {
-                            spacing: 8px;
-                            HorizontalLayout {
-                                spacing: 8px;
-                                TextInputField { placeholder: "channel-name"; value <=> root.new_channel_name; edited(t) => { root.new_channel_name_changed(t); } submitted => { root.create_channel(); } }
-                                PrimaryButton { text: "Create"; width: 70px; clicked => { root.create_channel(); } }
-                            }
-                            SmallButton { text: root.new_channel_is_voice ? "Type: Voice" : "Type: Text"; clicked => { root.toggle_new_channel_voice(); } }
-                        }
+                        // Opens the window-level create-channel modal (see
+                        // main.slint); no inline form here anymore.
+                        if root.can_manage_channels: SmallButton { text: "+ New channel"; clicked => { root.toggle_new_channel(); } }
                         if root.server_status != "": Text { text: root.server_status; font-size: 11px; color: Theme.text-muted; }
                         list_channels := Flickable {
                             vertical-stretch: 1;

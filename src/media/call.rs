@@ -18,10 +18,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use convex::{ConvexClient, FunctionResult, Value};
+use crate::net::api::{ApiClient, FunctionResult, Value};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use futures::channel::mpsc::Sender as EventSender;
-use futures::{SinkExt, StreamExt};
+use futures::SinkExt;
 use maplit::btreemap;
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
@@ -293,7 +293,7 @@ pub(crate) enum CallEvent {
 }
 
 pub(crate) struct CallParams {
-    pub(crate) client: ConvexClient,
+    pub(crate) client: ApiClient,
     pub(crate) session_token: String,
     pub(crate) is_caller: bool,
     /// Required for the callee (the call already exists on the server).
@@ -1198,6 +1198,19 @@ pub(super) fn spawn_playback_thread(
     }
 }
 
+/// Reads the first present non-empty string field from a WS event payload,
+/// accepting both the server's snake_case and the legacy camelCase spellings.
+fn j_str(payload: &serde_json::Value, keys: &[&str]) -> String {
+    for key in keys {
+        if let Some(s) = payload.get(*key).and_then(|v| v.as_str()) {
+            if !s.is_empty() {
+                return s.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
 async fn fail(output: &mut EventSender<CallEvent>, message: impl Into<String>) {
     let _ = output.send(CallEvent::Failed(message.into())).await;
 }
@@ -1332,7 +1345,7 @@ async fn wait_for_data_channel_open(dc: &RTCDataChannel, timeout: Duration) -> b
 
 pub(crate) async fn run_call(params: CallParams, mut output: EventSender<CallEvent>) {
     let CallParams {
-        mut client,
+        client,
         session_token,
         is_caller,
         call_id,
@@ -1574,7 +1587,7 @@ pub(crate) async fn run_call(params: CallParams, mut output: EventSender<CallEve
     }));
     let (call_id_tx, call_id_rx) = tokio::sync::oneshot::channel::<String>();
     {
-        let mut client_for_candidates = client.clone();
+        let client_for_candidates = client.clone();
         let session_token_for_candidates = session_token.clone();
         tokio::spawn(async move {
             let Ok(call_id) = call_id_rx.await else {
@@ -1809,97 +1822,118 @@ pub(crate) async fn run_call(params: CallParams, mut output: EventSender<CallEve
         answer_applied = true;
     }
 
-    let sub = client
-        .subscribe(
-            "calls:myCall",
-            btreemap! { "sessionToken".to_string() => Value::String(session_token.clone()) },
-        )
-        .await;
-    // The peer's half of trickle ICE: a reactive list of candidates they've
-    // discovered so far. Delivered as a full snapshot each time (not a
-    // diff), so `applied_candidates` tracks which rows have already been
-    // handed to `add_ice_candidate` to avoid re-adding the same one.
-    let candidate_sub = client
-        .subscribe(
-            "calls:listPeerIceCandidates",
-            btreemap! {
-                "sessionToken".to_string() => Value::String(session_token.clone()),
-                "callId".to_string() => Value::String(resolved_call_id.clone()),
-            },
-        )
-        .await;
+    // Signaling on the new API: call lifecycle events (`call.answered` /
+    // `call.declined` / `call.ended` / `call.ice`) arrive over the shared WS
+    // connection; there is no "watch my call" endpoint anymore. The peer's
+    // half of trickle ICE is additionally polled as a full snapshot on a
+    // tick (deduped via `applied_candidates`), so a dropped WS event can't
+    // stall the connection.
+    client.ensure_ws();
+    let mut ws_events = client.subscribe_events();
+    let mut ice_tick = tokio::time::interval(Duration::from_millis(800));
+    ice_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let mut share_stop_flag: Option<Arc<AtomicBool>> = None;
     let mut share_sys_audio_flag: Option<Arc<AtomicBool>> = None;
     let mut applied_candidates: HashSet<String> = HashSet::new();
 
-    if let (Ok(mut sub), Ok(mut candidate_sub)) = (sub, candidate_sub) {
-        'watch: loop {
-            tokio::select! {
-                next = sub.next() => {
-                    let Some(result) = next else { break 'watch; };
-                    let obj = match result {
-                        FunctionResult::Value(Value::Object(obj)) => obj,
-                        _ => break 'watch,
-                    };
-
-                    let this_call_id = match obj.get("callId") {
-                        Some(Value::String(s)) => s.clone(),
-                        _ => String::new(),
-                    };
-                    if this_call_id != resolved_call_id {
-                        break 'watch;
+    'watch: loop {
+        tokio::select! {
+            event = ws_events.recv() => {
+                let event = match event {
+                    Ok(event) => event,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        // WS task restarted or gone — re-subscribe; the ICE
+                        // snapshot poll keeps working in the meantime.
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        client.ensure_ws();
+                        ws_events = client.subscribe_events();
+                        continue;
                     }
-
-                    let status = match obj.get("status") {
-                        Some(Value::String(s)) => s.clone(),
-                        _ => String::new(),
-                    };
-
-                    if !answer_applied {
-                        if let Some(Value::String(answer_json)) = obj.get("answerSdp") {
-                            if let Ok(answer) =
-                                serde_json::from_str::<RTCSessionDescription>(answer_json)
-                            {
-                                if pc.set_remote_description(answer).await.is_ok() {
-                                    answer_applied = true;
+                };
+                if !event.kind.starts_with("call.") {
+                    continue;
+                }
+                let payload = &event.payload;
+                let this_call_id = j_str(payload, &["call_id", "callId", "id"]);
+                if !this_call_id.is_empty() && this_call_id != resolved_call_id {
+                    continue;
+                }
+                match event.kind.as_str() {
+                    "call.answered" => {
+                        if !answer_applied {
+                            let answer_json = j_str(payload, &["answer_sdp", "answerSdp"]);
+                            if !answer_json.is_empty() {
+                                if let Ok(answer) =
+                                    serde_json::from_str::<RTCSessionDescription>(&answer_json)
+                                {
+                                    if pc.set_remote_description(answer).await.is_ok() {
+                                        answer_applied = true;
+                                    }
                                 }
                             }
                         }
                     }
-
-                    if status == "ended" || status == "declined" {
-                        break 'watch;
-                    }
-                }
-                next = candidate_sub.next() => {
-                    let Some(result) = next else { break 'watch; };
-                    let rows = match result {
-                        FunctionResult::Value(Value::Array(items)) => items,
-                        _ => continue,
-                    };
-                    for item in rows {
-                        let Value::Object(row) = item else { continue; };
-                        let row_id = match row.get("id") {
-                            Some(Value::String(s)) => s.clone(),
-                            _ => continue,
-                        };
-                        if !applied_candidates.insert(row_id) {
-                            continue;
-                        }
-                        let Some(Value::String(candidate_json)) = row.get("candidate") else {
-                            continue;
-                        };
-                        if let Ok(init) =
-                            serde_json::from_str::<RTCIceCandidateInit>(candidate_json)
+                    "call.ice" => {
+                        // Live trickle from the peer; the snapshot poll below
+                        // dedups against these via the candidate string.
+                        let candidate_json = j_str(payload, &["candidate"]);
+                        if !candidate_json.is_empty()
+                            && applied_candidates.insert(format!("ws:{candidate_json}"))
                         {
-                            if pc.add_ice_candidate(init).await.is_ok() {
-                                remote_candidate_count.fetch_add(1, Ordering::Relaxed);
+                            if let Ok(init) =
+                                serde_json::from_str::<RTCIceCandidateInit>(&candidate_json)
+                            {
+                                if pc.add_ice_candidate(init).await.is_ok() {
+                                    remote_candidate_count.fetch_add(1, Ordering::Relaxed);
+                                }
                             }
                         }
                     }
+                    "call.declined" | "call.ended" => break 'watch,
+                    _ => {}
                 }
-                cmd = share_rx.recv() => {
+            }
+            _ = ice_tick.tick() => {
+                // The peer's trickle ICE as a full snapshot (not a diff), so
+                // `applied_candidates` tracks which rows have already been
+                // handed to `add_ice_candidate` to avoid re-adding one.
+                let result = client
+                    .query(
+                        "calls:listPeerIceCandidates",
+                        btreemap! {
+                            "sessionToken".to_string() => Value::String(session_token.clone()),
+                            "callId".to_string() => Value::String(resolved_call_id.clone()),
+                        },
+                    )
+                    .await;
+                let rows = match result {
+                    Ok(FunctionResult::Value(Value::Array(items))) => items,
+                    _ => continue,
+                };
+                for item in rows {
+                    let Value::Object(row) = item else { continue; };
+                    let row_id = match row.get("id") {
+                        Some(Value::String(s)) => s.clone(),
+                        _ => continue,
+                    };
+                    if !applied_candidates.insert(row_id) {
+                        continue;
+                    }
+                    let Some(Value::String(candidate_json)) = row.get("candidate") else {
+                        continue;
+                    };
+                    if let Ok(init) =
+                        serde_json::from_str::<RTCIceCandidateInit>(candidate_json)
+                    {
+                        if pc.add_ice_candidate(init).await.is_ok() {
+                            remote_candidate_count.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+            cmd = share_rx.recv() => {
                     match cmd {
                         Some(ShareCommand::Start {
                             target,
@@ -2031,16 +2065,6 @@ pub(crate) async fn run_call(params: CallParams, mut output: EventSender<CallEve
                 }
             }
         }
-    } else {
-        // Both signaling subscriptions failed to even open -- without
-        // this the engine just tears down silently and the banner
-        // vanishes with no explanation.
-        fail(
-            &mut output,
-            "Could not watch call signaling -- check your connection.",
-        )
-        .await;
-    }
 
     if let Some(flag) = share_stop_flag.take() {
         flag.store(true, Ordering::Relaxed);

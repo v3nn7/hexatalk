@@ -5,7 +5,7 @@
 //! so splitting this further would just scatter match arms without any
 //! real decoupling benefit.
 
-use convex::ConvexClient;
+use crate::net::api::ApiClient;
 
 use crate::media::call;
 use crate::media::screenshare;
@@ -24,7 +24,7 @@ use crate::update_check::UpdateOutcome;
 
 #[derive(Clone)]
 pub(crate) enum Message {
-    Connected(ConvexClient),
+    Connected(ApiClient),
     ConnectFailed(String),
 
     SwitchAuthMode(AuthMode),

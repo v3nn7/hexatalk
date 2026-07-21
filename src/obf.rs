@@ -1,5 +1,5 @@
 //! Runtime side of the baked-in-secret obfuscation (see `build.rs`:
-//! `emit_obfuscated_secrets`). Deployment values — Convex URL, TURN
+//! `emit_obfuscated_secrets`). Deployment values — API URL, TURN
 //! credentials, peerseal relay, update endpoints, release public key — are
 //! compiled into the exe as XOR-obfuscated byte arrays so they don't show
 //! up as plain strings in the binary. This is obfuscation, not encryption:
@@ -33,7 +33,7 @@ macro_rules! baked {
     };
 }
 
-baked!(convex_url, OBF_CONVEX_URL);
+baked!(api_url, OBF_API_URL);
 baked!(turn_url, OBF_TURN_URL);
 baked!(turn_username, OBF_TURN_USERNAME);
 baked!(turn_credential, OBF_TURN_CREDENTIAL);

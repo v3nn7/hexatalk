@@ -8,7 +8,7 @@
 import "../assets/fonts/Roboto-Regular.ttf";
 import "../assets/fonts/Roboto-Medium.ttf";
 import { Theme } from "theme.slint";
-import { TextInputField, Tooltip, PrimaryButton, SecondaryButton } from "widgets.slint";
+import { TextInputField, Tooltip, PrimaryButton, SecondaryButton, FieldLabel } from "widgets.slint";
 import { AuthScreen, AuthMode } from "auth.slint";
 import { EmailVerifyScreen } from "email_verify.slint";
 import { ServerRail } from "rail.slint";
@@ -697,6 +697,9 @@ export component AppWindow inherits Window {
     callback chat_new_channel_name_changed(string);
     callback chat_create_channel;
     callback chat_toggle_new_channel_voice;
+    // Explicit type pick from the modal's radio cards (unlike the blind
+    // toggle above, kept for the server-settings inline form).
+    callback chat_set_new_channel_voice(bool);
     callback chat_open_channel(string);
     callback chat_admin_search_changed(string);
     callback chat_admin_set_role(string, string);
@@ -927,9 +930,6 @@ export component AppWindow inherits Window {
                 can_manage_server: root.chat_can_manage_server;
                 invite_code: root.chat_invite_code;
                 can_manage_channels: root.chat_can_manage_channels;
-                new_channel_open: root.chat_new_channel_open;
-                new_channel_name <=> root.chat_new_channel_name;
-                new_channel_is_voice: root.chat_new_channel_is_voice;
                 text_channels: root.chat_text_channels;
                 voice_channels: root.chat_voice_channels;
                 admin_search <=> root.chat_admin_search;
@@ -985,9 +985,6 @@ export component AppWindow inherits Window {
                 toggle_server_settings => { root.chat_toggle_server_settings(); }
                 copy_invite_link(code) => { root.chat_copy_invite_link(code); }
                 toggle_new_channel => { root.chat_toggle_new_channel(); }
-                new_channel_name_changed(t) => { root.chat_new_channel_name_changed(t); }
-                create_channel => { root.chat_create_channel(); }
-                toggle_new_channel_voice => { root.chat_toggle_new_channel_voice(); }
                 open_channel(id) => { root.chat_open_channel(id); }
                 admin_search_changed(t) => { root.chat_admin_search_changed(t); }
                 admin_set_role(id, role) => { root.chat_admin_set_role(id, role); }
@@ -1262,6 +1259,115 @@ export component AppWindow inherits Window {
                 SecondaryButton { text: "Join"; clicked => { root.chat_join_server(); } }
                 if root.chat_server_status != "": Text { text: root.chat_server_status; font-size: 11px; color: Theme.text-muted; wrap: word-wrap; }
                 SmallButton { text: "Close"; clicked => { root.chat_toggle_add_menu(); } }
+            }
+        }
+    }
+
+    // Create-channel modal (Discord-style): window-level dim overlay like
+    // the add/join-server popup above. Channel type is a pair of radio
+    // cards; the name field shows a "#" prefix for text channels and the
+    // input itself is already Discord-formatted live by the Rust side
+    // (lowercase, spaces -> dashes). Enter submits, Escape closes (global
+    // Escape handler), click-away cancels.
+    if root.chat_new_channel_open: Rectangle {
+        width: size_ref.width;
+        height: size_ref.height;
+        background: #00000088;
+        TouchArea { clicked => { root.chat_toggle_new_channel(); } }
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(400px, parent.width - 48px);
+            height: new_channel_col.preferred-height + 32px;
+            background: Theme.bg-elevated;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            border-radius: Theme.radius-md;
+            new_channel_col := VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+                Text { text: "CREATE CHANNEL"; font-size: Theme.text-xs; font-family: Theme.font-medium; letter-spacing: 1px; color: Theme.text-link; }
+
+                FieldLabel { text: "CHANNEL TYPE"; }
+                // Text radio card.
+                Rectangle {
+                    height: text_card_col.preferred-height + 20px;
+                    border-radius: Theme.radius-md;
+                    border-width: 1px;
+                    border-color: !root.chat_new_channel_is_voice ? Theme.accent : Theme.border;
+                    background: !root.chat_new_channel_is_voice ? Theme.accent-soft : Theme.bg-control;
+                    animate border-color { duration: 120ms; }
+                    animate background { duration: 120ms; }
+                    TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.chat_set_new_channel_voice(false); } }
+                    text_card_col := HorizontalLayout {
+                        padding: 10px;
+                        spacing: 12px;
+                        Text { text: "#"; font-size: 20px; font-family: Theme.font-medium; color: !root.chat_new_channel_is_voice ? Theme.accent : Theme.text-muted; vertical-alignment: center; horizontal-stretch: 0; }
+                        VerticalLayout {
+                            spacing: 2px;
+                            alignment: center;
+                            Text { text: "Text"; font-size: Theme.text-md; font-family: Theme.font-medium; color: Theme.text-bright; }
+                            Text { text: "Send messages, images, GIFs, emoji, opinions and puns"; font-size: Theme.text-sm; color: Theme.text-muted; wrap: word-wrap; }
+                        }
+                    }
+                }
+                // Voice radio card.
+                Rectangle {
+                    height: voice_card_col.preferred-height + 20px;
+                    border-radius: Theme.radius-md;
+                    border-width: 1px;
+                    border-color: root.chat_new_channel_is_voice ? Theme.accent : Theme.border;
+                    background: root.chat_new_channel_is_voice ? Theme.accent-soft : Theme.bg-control;
+                    animate border-color { duration: 120ms; }
+                    animate background { duration: 120ms; }
+                    TouchArea { mouse-cursor: MouseCursor.pointer; clicked => { root.chat_set_new_channel_voice(true); } }
+                    voice_card_col := HorizontalLayout {
+                        padding: 10px;
+                        spacing: 12px;
+                        Text { text: "🔊"; font-size: 18px; vertical-alignment: center; horizontal-stretch: 0; }
+                        VerticalLayout {
+                            spacing: 2px;
+                            alignment: center;
+                            Text { text: "Voice"; font-size: Theme.text-md; font-family: Theme.font-medium; color: Theme.text-bright; }
+                            Text { text: "Hang out together with voice and video"; font-size: Theme.text-sm; color: Theme.text-muted; wrap: word-wrap; }
+                        }
+                    }
+                }
+
+                FieldLabel { text: "CHANNEL NAME"; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    // "#" prefix for text channels; speaker glyph for voice.
+                    Text {
+                        text: root.chat_new_channel_is_voice ? "🔊" : "#";
+                        font-size: Theme.text-md;
+                        font-family: Theme.font-medium;
+                        color: Theme.text-muted;
+                        vertical-alignment: center;
+                        horizontal-stretch: 0;
+                    }
+                    TextInputField {
+                        placeholder: root.chat_new_channel_is_voice ? "Voice Lounge" : "new-channel";
+                        value <=> root.chat_new_channel_name;
+                        edited(t) => { root.chat_new_channel_name_changed(t); }
+                        submitted => { if (root.chat_new_channel_name != "") { root.chat_create_channel(); } }
+                    }
+                }
+                // Live preview of the final (formatted) name.
+                Text {
+                    text: root.chat_new_channel_name == "" ? (root.chat_new_channel_is_voice ? "🔊 Voice Lounge" : "# new-channel") : (root.chat_new_channel_is_voice ? "🔊 " + root.chat_new_channel_name : "# " + root.chat_new_channel_name);
+                    font-size: 11px;
+                    color: Theme.text-muted;
+                }
+
+                if root.chat_server_status != "": Text { text: root.chat_server_status; font-size: 11px; color: Theme.danger; wrap: word-wrap; }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    SecondaryButton { text: "Cancel"; width: 90px; clicked => { root.chat_toggle_new_channel(); } }
+                    PrimaryButton { text: "Create"; width: 110px; enabled: root.chat_new_channel_name != ""; clicked => { root.chat_create_channel(); } }
+                }
             }
         }
     }

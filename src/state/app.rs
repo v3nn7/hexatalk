@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::time::{Duration, Instant};
 
-use convex::{ConvexClient, FunctionResult, Value};
+use crate::net::api::{ApiClient, FunctionResult, Value};
 use maplit::btreemap;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -53,7 +53,7 @@ use crate::{
 
 pub(crate) struct App {
     pub(crate) deployment_url: String,
-    pub(crate) client: Option<ConvexClient>,
+    pub(crate) client: Option<ApiClient>,
     pub(crate) connect_status: String,
     pub(crate) pending_restore_token: Option<String>,
 
@@ -369,7 +369,7 @@ impl App {
             Self {
                 deployment_url,
                 client: None,
-                connect_status: "Connecting to Convex...".to_string(),
+                connect_status: "Connecting to server...".to_string(),
                 pending_restore_token,
                 auth_mode: AuthMode::Login,
                 username_input: String::new(),
@@ -907,6 +907,9 @@ impl App {
         &self,
         jobs: impl IntoIterator<Item = (String, Option<String>, Option<String>)>,
     ) -> Task<Message> {
+        // `GET /files/:key` on the new API requires the Bearer session token,
+        // so authenticated downloads go through a client that carries it.
+        let auth_token = self.client.as_ref().and_then(|c| c.session_token());
         let mut tasks = Vec::new();
         for (url, att_key, att_nonce) in jobs {
             if url.is_empty()
@@ -916,9 +919,15 @@ impl App {
                 continue;
             }
             let url_for_result = url.clone();
+            let auth_token = auth_token.clone();
             tasks.push(Task::perform(
                 async move {
-                    let result = reqwest::get(&url).await;
+                    let http = reqwest::Client::new();
+                    let mut request = http.get(&url);
+                    if let Some(token) = auth_token {
+                        request = request.header("Authorization", format!("Bearer {token}"));
+                    }
+                    let result = request.send().await;
                     match result {
                         Ok(response) => {
                             let bytes = response
@@ -1623,12 +1632,12 @@ impl App {
 
 /// Fetch my sealed package or bootstrap a new group key for all members.
 async fn ensure_group_key_async(
-    mut client: ConvexClient,
+    mut client: ApiClient,
     token: String,
     conversation_id: String,
     identity: crypto::IdentityKeyPair,
 ) -> Result<(u32, [u8; 32]), String> {
-    use convex::{FunctionResult, Value};
+    use crate::net::api::{FunctionResult, Value};
     use maplit::btreemap;
 
     // 1) Existing package for me?
@@ -1852,12 +1861,12 @@ async fn ensure_group_key_async(
 /// Errors are swallowed -- this never blocks the caller, who already has a
 /// valid key in hand regardless of whether this succeeds.
 async fn reshare_group_key(
-    mut client: ConvexClient,
+    mut client: ApiClient,
     token: String,
     conversation_id: String,
     key: [u8; 32],
 ) {
-    use convex::{FunctionResult, Value};
+    use crate::net::api::{FunctionResult, Value};
     use maplit::btreemap;
 
     let Ok(members_result) = client

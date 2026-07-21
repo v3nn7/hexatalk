@@ -87,32 +87,66 @@ python .\scripts\encrypt_delta.py decrypt out.delta plain2.delta
 
 ## Upload to R2 / astrakit.pro (delta-only)
 
+### Windows (`scripts/release.ps1`)
+
 After the script finishes, upload **contents of** `releases\upload\`:
 
 ```
-version.txt                           # just "1.2.3"
-deltas/HexaTalk-1.0.0-1.2.3.delta     # HTD1 + trailing ed25519
+version.txt                           # just "1.2.3" (shared)
+deltas/HexaTalk-1.0.0-1.2.3.delta     # HTD1 [+ optional ed25519 trailer]
 deltas/HexaTalk-1.1.0-1.2.3.delta     # if -AllDeltas
+HexaTalk.exe                          # optional full fallback
+HexaTalk.exe.sig                      # optional
 ```
 
-**You do not need to upload `HexaTalk.exe`.** The 64-byte release signature
-rides inside each delta. Full exe stays only in local `releases\` for the
-next patch base.
+### Linux AppImage (`scripts/release-linux.sh`)
 
-### When to still host the full exe
+Portable build for most distros (libs bundled by linuxdeploy):
 
-| Situation | Need full `HexaTalk.exe` + `.sig`? |
+```bash
+chmod +x scripts/release-linux.sh scripts/package-appimage.sh
+./scripts/release-linux.sh            # patch +1 + AppImage + deltas
+ALL_DELTAS=1 ./scripts/release-linux.sh
+./scripts/package-appimage.sh         # AppImage only, no version bump
+```
+
+Upload:
+
+```
+version.txt                                                 # shared with Windows
+HexaTalk-linux-x86_64.AppImage
+HexaTalk-linux-x86_64.AppImage.sig                          # optional
+deltas/HexaTalk-linux-x86_64.AppImage-1.0.0-1.2.3.delta
+```
+
+Users:
+
+```bash
+chmod +x HexaTalk-linux-x86_64.AppImage
+./HexaTalk-linux-x86_64.AppImage
+```
+
+Linux notes:
+- **Sounds**: rodio + embedded MP3 (notify + ringtone) — works in AppImage.
+- **Self-update**: replaces `$APPIMAGE` when running as AppImage.
+- **Tray**: StatusNotifier (KDE/XFCE OK; GNOME needs AppIndicator extension).
+- **Deep links**: `~/.local/share/applications/hexatalk-vyrapp.desktop` on start.
+- Build deps: `libgtk-3-dev`, `libasound2-dev`, `libxcb-*`, `curl`, `fuse3`/`libfuse2`.
+
+### When to still host the full binary
+
+| Situation | Need full binary + optional `.sig`? |
 |-----------|-------------------------------------|
 | Users on last version, you ship one delta | **No** |
-| Users may skip versions (0.1.0 → 0.1.3) | Yes, or ship `-AllDeltas` for every old archive |
-| First install / reinstall from web | Yes (or a separate download page) |
-| Corrupt / missing delta for a pair | Yes (fallback), otherwise update fails |
+| Users may skip versions | Yes, or ship `ALL_DELTAS` / `-AllDeltas` |
+| First install from web | Yes (exe / AppImage on download page) |
+| Corrupt / missing delta | Yes (fallback) |
 
 URLs the client hits:
 
 - `https://astrakit.pro/version.txt` **(required)**
-- `https://astrakit.pro/deltas/HexaTalk-<from>-<to>.delta` **(required for delta-only)**
-- `https://astrakit.pro/HexaTalk.exe` + `.sig` *(optional fallback)*
+- Windows: `deltas/HexaTalk-<from>-<to>.delta`, `HexaTalk.exe`
+- Linux: `deltas/HexaTalk-linux-x86_64.AppImage-<from>-<to>.delta`, `HexaTalk-linux-x86_64.AppImage`
 
 ## Safety
 

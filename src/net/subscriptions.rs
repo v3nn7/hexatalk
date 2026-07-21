@@ -1,28 +1,40 @@
-//! Background jobs: one per Convex live query (friends, servers, channels,
-//! members, conversations, calls, ...), plus the tray-icon bridge and a
-//! couple of one-shot background `Task`s (`mark_read_task`,
-//! `typing_ping_task`). Each Convex job follows the same shape: open a
-//! `client.subscribe(...)` (via [`run_subscription`], which owns the
-//! reconnect/backoff policy), loop over pushes, parse into a domain type,
-//! forward as a `Message` into the update loop via `tx`.
+//! Background jobs: one per server-backed live view (friends, servers,
+//! channels, members, conversations, calls, ...), plus the tray-icon bridge
+//! and a couple of one-shot background `Task`s (`mark_read_task`,
+//! `typing_ping_task`).
+//!
+//! Post-migration model (see MIGRATION_API.md, section "Subskrypcje"): each
+//! job (1) ensures the shared WebSocket is up via `client.ensure_ws()`,
+//! (2) does an initial fetch through `client.query(<same Convex path>)` --
+//! the dispatch layer translates that path into the matching REST GET -- and
+//! (3) loops on a `tokio::select!` over the shared
+//! `broadcast::Receiver<WsEvent>` (filtered per subscription: conversation
+//! events match on `event.channel == conversationId`, personal server-scope
+//! events fail open) plus a 30 s tick as a reconnect/missed-event fallback.
+//! A matching event triggers a refetch -> parse -> emit cycle, so the UI
+//! converges exactly like it did under Convex live queries.
+//!
+//! `typing:whoIsTyping` and `calls:myCall` have no REST GET: `typing` keeps a
+//! local map fed by `typing` events with a 5 s expiry, and `my_call`
+//! reconstructs the active call from `call.*` events.
 //!
 //! Ported from iced's `Subscription`-returning functions to plain
 //! `crate::rt::Job`s (see src/rt.rs) driven by `App::subscription`'s
 //! `SubscriptionRegistry::reconcile` call every update cycle -- same
 //! dedup-by-id semantics `Subscription::run_with_id` had, just explicit.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use convex::{ConvexClient, FunctionResult, Value};
 use futures::StreamExt;
 use maplit::btreemap;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::crypto;
 use crate::media::call;
+use crate::net::api::{ApiClient, FunctionResult, Value, WsEvent};
 use crate::net::convex_parse::{
     expect_null, obj_array_ref, obj_bool, obj_f64, obj_ms, obj_object_ref, obj_opt_str, obj_str,
     obj_str_list, parse_object_array, value_as_bool,
@@ -37,96 +49,216 @@ use crate::state::types::{
 };
 use crate::tray;
 
-// ---------- Resilient subscription runner ----------
+// ---------- Polling/event subscription runner ----------
 
-/// Runs one Convex live query *resiliently*: subscribe, forward each value
-/// push to `on_result` (which returns `false` when the update loop is gone
-/// and the job should stop), and when the stream ends or the subscribe
-/// call itself fails (websocket drop, backend deploy, flaky network) wait
-/// with exponential backoff and resubscribe instead of dying.
-///
-/// Before this helper, a failed `subscribe` returned immediately and
-/// `SubscriptionRegistry::reconcile` respawned the job on the next update
-/// cycle -- a tight reconnect hot-loop against an unreachable backend,
-/// with no backoff at all.
-///
-/// Error pushes (`ErrorMessage`/`ConvexError`) are logged and skipped
-/// rather than forwarded: every parser used to map them to an
-/// empty/default snapshot, so a single transient server error briefly
-/// blanked the friends/servers/messages lists, zeroed the caller's
-/// permissions, or dropped the active-call card.
-async fn run_subscription<F>(
-    mut client: ConvexClient,
-    name: &'static str,
-    args: BTreeMap<String, Value>,
-    mut on_result: F,
-) where
-    F: FnMut(FunctionResult) -> bool + Send,
-{
-    let mut failures: u32 = 0;
-    loop {
-        match client.subscribe(name, args.clone()).await {
-            Ok(mut sub) => {
-                failures = 0;
-                while let Some(result) = sub.next().await {
-                    match result {
-                        FunctionResult::Value(_) => {
-                            if !on_result(result) {
-                                return;
-                            }
-                        }
-                        FunctionResult::ErrorMessage(err) => {
-                            eprintln!("[net] {name} pushed an error (state kept): {err}");
-                        }
-                        FunctionResult::ConvexError(err) => {
-                            eprintln!("[net] {name} pushed an error (state kept): {err:?}");
-                        }
-                    }
-                }
-                // The stream ended (server closed it / websocket dropped).
-                // Fall through to the backoff + resubscribe below; Convex
-                // re-pushes the full current result on resubscribe, so the
-                // UI state converges back without any gap handling.
-            }
-            Err(err) => {
-                failures = failures.saturating_add(1);
-                eprintln!("[net] subscribe {name} failed (failure #{failures}): {err}");
-            }
+/// Fallback refetch cadence for every subscription (WS events drive the
+/// fast path; the tick covers reconnects and anything the server missed).
+const DEFAULT_TICK: Duration = Duration::from_secs(30);
+/// Peer invites have no WS event at all, so polling is the only channel --
+/// keep it tighter than the default to not stall Peerseal session setup.
+const PEER_INVITE_TICK: Duration = Duration::from_secs(10);
+/// Typing indicators expire server-side after ~5 s; mirror that locally.
+const TYPING_TTL: Duration = Duration::from_secs(5);
+/// How often the typing map is swept for expired entries.
+const TYPING_SWEEP: Duration = Duration::from_secs(1);
+/// Trailing debounce for WS-event-triggered refetches: a burst of matching
+/// events (message.new + reaction.add + member.* in the same second) sets a
+/// dirty flag and the refetch only runs once the burst goes quiet for this
+/// long. Without it every event fired a full REST refetch per subscription.
+const EVENT_DEBOUNCE: Duration = Duration::from_millis(400);
+/// Upper bound on how long a dirty flag may sit unrefreshed while events
+/// keep arriving (a busy channel would otherwise starve the refetch).
+const EVENT_MAX_WAIT: Duration = Duration::from_secs(1);
+
+/// Pending debounce state: `(first_event_at, last_event_at)` while a matching
+/// WS event has been seen but the refetch has not run yet.
+type PendingRefresh = Option<(Instant, Instant)>;
+
+/// Resolves once the debounce window for `pending` closes: 400 ms after the
+/// last event, capped at 1 s from the first. Pends forever when clean, so
+/// the `select!` branch simply never wins until an event marks us dirty.
+async fn debounce_due(pending: PendingRefresh) {
+    match pending {
+        Some((first, last)) => {
+            let due = (last + EVENT_DEBOUNCE).min(first + EVENT_MAX_WAIT);
+            tokio::time::sleep_until(tokio::time::Instant::from_std(due)).await;
         }
-        backoff_sleep(failures).await;
+        None => std::future::pending::<()>().await,
     }
 }
 
-/// Exponential reconnect backoff: 1 s after a cleanly-ended stream, then
-/// 2/4/8 s for consecutive subscribe failures, capped at 30 s. The job is
-/// aborted (not blocked) if the registry cancels it -- `tokio::time::sleep`
-/// is cancellation-safe.
-async fn backoff_sleep(failures: u32) {
-    let secs = match failures {
-        0 => 1,
-        1 => 2,
-        2 => 4,
-        3 => 8,
-        _ => 30,
-    };
-    tokio::time::sleep(Duration::from_secs(secs)).await;
+/// Forwards one fetched `FunctionResult` into `on_result` (which returns
+/// `false` when the update loop is gone and the job should stop). Error
+/// results are logged and skipped rather than forwarded: every parser maps
+/// them to an empty/default snapshot, so a single transient server error
+/// would briefly blank the friends/servers/messages lists, zero the caller's
+/// permissions, or drop the active-call card.
+fn deliver<F>(name: &'static str, result: FunctionResult, on_result: &mut F) -> bool
+where
+    F: FnMut(FunctionResult) -> bool + Send,
+{
+    match result {
+        FunctionResult::Value(_) => on_result(result),
+        FunctionResult::ErrorMessage(err) => {
+            eprintln!("[net] {name} returned an error (state kept): {err}");
+            true
+        }
+        FunctionResult::ConvexError(err) => {
+            eprintln!("[net] {name} returned an error (state kept): {err:?}");
+            true
+        }
+    }
+}
+
+/// Runs one REST-backed "live query": initial fetch + refetch on matching
+/// WS events (coalesced through the trailing `EVENT_DEBOUNCE` window, capped
+/// by `EVENT_MAX_WAIT`) + refetch every `tick`. Fetch failures are logged
+/// and skipped (state kept) -- the next event or tick retries. A lagged
+/// broadcast receiver forces an immediate refetch; a closed one (WS task
+/// restarted on reconnect) is re-attached via `client.subscribe_events()`.
+async fn run_query_subscription<F, M>(
+    client: ApiClient,
+    name: &'static str,
+    args: BTreeMap<String, Value>,
+    tick: Duration,
+    matches: M,
+    mut on_result: F,
+) where
+    F: FnMut(FunctionResult) -> bool + Send,
+    M: Fn(&WsEvent) -> bool + Send,
+{
+    client.ensure_ws();
+    let mut rx = client.subscribe_events();
+    // The first interval tick completes immediately, so the loop below also
+    // performs the initial fetch.
+    let mut ticker = tokio::time::interval(tick);
+    // Dirty flag for the trailing debounce: matching events only arm it,
+    // the refetch fires once the burst goes quiet.
+    let mut pending: PendingRefresh = None;
+    loop {
+        let refresh = tokio::select! {
+            _ = ticker.tick() => {
+                pending = None;
+                true
+            }
+            event = rx.recv() => match event {
+                Ok(event) => {
+                    if matches(&event) {
+                        let now = Instant::now();
+                        match pending {
+                            Some((_, ref mut last)) => *last = now,
+                            None => pending = Some((now, now)),
+                        }
+                    }
+                    false
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    // Events were lost, so coalescing is unsafe -- refetch
+                    // immediately instead of waiting out the quiet window.
+                    eprintln!("[net] {name}: dropped {n} WS events; refreshing");
+                    pending = None;
+                    true
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    // The WS task was restarted (reconnect); re-attach to the
+                    // new broadcast channel and force a refresh.
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    client.ensure_ws();
+                    rx = client.subscribe_events();
+                    pending = None;
+                    true
+                }
+            },
+            _ = debounce_due(pending) => {
+                pending = None;
+                true
+            }
+        };
+        if !refresh {
+            continue;
+        }
+        match client.query(name, args.clone()).await {
+            Ok(result) => {
+                if !deliver(name, result, &mut on_result) {
+                    return;
+                }
+            }
+            Err(err) => eprintln!("[net] {name} fetch failed (state kept): {err}"),
+        }
+    }
+}
+
+/// Server-scope personal events (`member.*`, `channel.*`, `server.updated`)
+/// carry the *user* id in `channel`; the server id lives in the payload.
+/// When the payload names a server we filter on it, otherwise we fail open
+/// (a refetch is cheap and the UI just repaints the same data).
+fn payload_matches_server(event: &WsEvent, server_id: &str) -> bool {
+    match event
+        .payload
+        .get("server_id")
+        .or_else(|| event.payload.get("serverId"))
+        .and_then(|v| v.as_str())
+    {
+        Some(id) => id == server_id,
+        None => true,
+    }
+}
+
+fn is_server_scope_event(kind: &str) -> bool {
+    kind.starts_with("channel.") || kind.starts_with("member.") || kind == "server.updated"
+}
+
+/// First string value found under any of `keys` (snake_case first, camelCase
+/// fallback) -- WS payload shapes are server-owned, so read defensively.
+fn json_str(payload: &serde_json::Value, keys: &[&str]) -> String {
+    keys.iter()
+        .find_map(|k| payload.get(*k).and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Extracts (user id, display name) from a `typing` event payload, accepting
+/// both a flat `{user_id, display_name}` and a nested `{user: {...}}` shape.
+fn typing_event_user(payload: &serde_json::Value) -> Option<(String, String)> {
+    let user = payload.get("user").unwrap_or(payload);
+    let id = ["user_id", "userId", "id"]
+        .iter()
+        .find_map(|k| user.get(*k).and_then(|v| v.as_str()))?;
+    let name = ["display_name", "displayName", "username", "name"]
+        .iter()
+        .find_map(|k| user.get(*k).and_then(|v| v.as_str()))
+        .unwrap_or(id);
+    Some((id.to_string(), name.to_string()))
+}
+
+/// Sorted, deduped display names of everyone currently typing.
+fn typing_names(typers: &HashMap<String, (String, Instant)>) -> Vec<String> {
+    let mut names: Vec<String> = typers.values().map(|(name, _)| name.clone()).collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 // ---------- Subscriptions ----------
 
 pub(crate) fn roles_subscription(
-    client: ConvexClient,
+    client: ApiClient,
     token: String,
     server_id: String,
     tx: UnboundedSender<Message>,
 ) -> Job {
     job(format!("roles-subscription:{server_id}"), async move {
-        run_subscription(
+        let _ = token; // auth rides in the Bearer header now
+        let watch = server_id.clone();
+        run_query_subscription(
             client,
             "roles:listRoles",
             btreemap! {
-                "sessionToken".to_string() => Value::String(token),
                 "serverId".to_string() => Value::String(server_id),
+            },
+            DEFAULT_TICK,
+            move |event: &WsEvent| {
+                is_server_scope_event(&event.kind) && payload_matches_server(event, &watch)
             },
             move |result| {
                 let roles = parse_object_array(result)
@@ -147,18 +279,23 @@ pub(crate) fn roles_subscription(
 }
 
 pub(crate) fn my_perms_subscription(
-    client: ConvexClient,
+    client: ApiClient,
     token: String,
     server_id: String,
     tx: UnboundedSender<Message>,
 ) -> Job {
     job(format!("my-perms-subscription:{server_id}"), async move {
-        run_subscription(
+        let _ = token;
+        let watch = server_id.clone();
+        run_query_subscription(
             client,
             "roles:myPermissions",
             btreemap! {
-                "sessionToken".to_string() => Value::String(token),
                 "serverId".to_string() => Value::String(server_id),
+            },
+            DEFAULT_TICK,
+            move |event: &WsEvent| {
+                is_server_scope_event(&event.kind) && payload_matches_server(event, &watch)
             },
             move |result| {
                 let perms = match result {
@@ -178,7 +315,7 @@ pub(crate) fn my_perms_subscription(
 
 pub(crate) fn room_voice_subscription(
     key: String,
-    client: ConvexClient,
+    client: ApiClient,
     token: String,
     user_id: String,
     conversation_id: String,
@@ -220,7 +357,7 @@ pub(crate) fn room_voice_subscription(
 }
 
 pub(crate) fn voice_users_subscription(
-    client: ConvexClient,
+    client: ApiClient,
     token: String,
     conversation_id: String,
     tx: UnboundedSender<Message>,
@@ -228,12 +365,18 @@ pub(crate) fn voice_users_subscription(
     job(
         format!("voice-users-subscription:{conversation_id}"),
         async move {
-            run_subscription(
+            let _ = token;
+            let conv = conversation_id.clone();
+            run_query_subscription(
                 client,
                 "voice:listInChannel",
                 btreemap! {
-                    "sessionToken".to_string() => Value::String(token),
                     "conversationId".to_string() => Value::String(conversation_id),
+                },
+                DEFAULT_TICK,
+                move |event: &WsEvent| {
+                    (event.kind == "voice.join" || event.kind == "voice.leave")
+                        && event.channel == conv
                 },
                 move |result| {
                     let users = parse_object_array(result)
@@ -252,21 +395,20 @@ pub(crate) fn voice_users_subscription(
 }
 
 pub(crate) fn mark_read_task(
-    client: &Option<ConvexClient>,
+    client: &Option<ApiClient>,
     session: &Option<Session>,
     conversation_id: String,
 ) -> Task<Message> {
-    let (Some(client), Some(session)) = (client.clone(), session.clone()) else {
+    let _ = session; // token travels in the Bearer header via `client`
+    let Some(client) = client.clone() else {
         return Task::none();
     };
-    let mut client = client;
     Task::perform(
         async move {
             client
                 .mutation(
                     "conversations:markRead",
                     btreemap! {
-                        "sessionToken".to_string() => Value::String(session.token),
                         "conversationId".to_string() => Value::String(conversation_id),
                     },
                 )
@@ -279,22 +421,21 @@ pub(crate) fn mark_read_task(
 }
 
 pub(crate) fn typing_ping_task(
-    client: &Option<ConvexClient>,
+    client: &Option<ApiClient>,
     session: &Option<Session>,
     conversation_id: String,
     typing: bool,
 ) -> Task<Message> {
-    let (Some(client), Some(session)) = (client.clone(), session.clone()) else {
+    let _ = session;
+    let Some(client) = client.clone() else {
         return Task::none();
     };
-    let mut client = client;
     Task::perform(
         async move {
             client
                 .mutation(
                     "typing:setTyping",
                     btreemap! {
-                        "sessionToken".to_string() => Value::String(session.token),
                         "conversationId".to_string() => Value::String(conversation_id),
                         "typing".to_string() => Value::Boolean(typing),
                     },
@@ -308,15 +449,18 @@ pub(crate) fn typing_ping_task(
 }
 
 pub(crate) fn friends_subscription(
-    client: ConvexClient,
+    client: ApiClient,
     token: String,
     tx: UnboundedSender<Message>,
 ) -> Job {
     job("friends-subscription", async move {
-        run_subscription(
+        let _ = token;
+        run_query_subscription(
             client,
             "friends:listFriends",
-            btreemap! { "sessionToken".to_string() => Value::String(token) },
+            BTreeMap::new(),
+            DEFAULT_TICK,
+            |event: &WsEvent| event.kind.starts_with("friend_request."),
             move |result| {
                 let friends = parse_object_array(result)
                     .into_iter()
@@ -349,15 +493,21 @@ pub(crate) fn friends_subscription(
 }
 
 pub(crate) fn servers_subscription(
-    client: ConvexClient,
+    client: ApiClient,
     token: String,
     tx: UnboundedSender<Message>,
 ) -> Job {
     job("servers-subscription", async move {
-        run_subscription(
+        let _ = token;
+        run_query_subscription(
             client,
             "servers:listMyServers",
-            btreemap! { "sessionToken".to_string() => Value::String(token) },
+            BTreeMap::new(),
+            DEFAULT_TICK,
+            |event: &WsEvent| {
+                event.kind == "server.updated"
+                    || matches!(event.kind.as_str(), "member.join" | "member.leave" | "member.kick")
+            },
             move |result| {
                 let servers = parse_object_array(result)
                     .into_iter()
@@ -382,18 +532,23 @@ pub(crate) fn servers_subscription(
 }
 
 pub(crate) fn channels_subscription(
-    client: ConvexClient,
+    client: ApiClient,
     token: String,
     server_id: String,
     tx: UnboundedSender<Message>,
 ) -> Job {
     job(format!("channels-subscription:{server_id}"), async move {
-        run_subscription(
+        let _ = token;
+        let watch = server_id.clone();
+        run_query_subscription(
             client,
             "servers:listChannels",
             btreemap! {
-                "sessionToken".to_string() => Value::String(token),
                 "serverId".to_string() => Value::String(server_id),
+            },
+            DEFAULT_TICK,
+            move |event: &WsEvent| {
+                is_server_scope_event(&event.kind) && payload_matches_server(event, &watch)
             },
             move |result| {
                 let channels = parse_object_array(result)
@@ -428,18 +583,23 @@ pub(crate) fn channels_subscription(
 }
 
 pub(crate) fn members_subscription(
-    client: ConvexClient,
+    client: ApiClient,
     token: String,
     server_id: String,
     tx: UnboundedSender<Message>,
 ) -> Job {
     job(format!("members-subscription:{server_id}"), async move {
-        run_subscription(
+        let _ = token;
+        let watch = server_id.clone();
+        run_query_subscription(
             client,
             "servers:listMembers",
             btreemap! {
-                "sessionToken".to_string() => Value::String(token),
                 "serverId".to_string() => Value::String(server_id),
+            },
+            DEFAULT_TICK,
+            move |event: &WsEvent| {
+                is_server_scope_event(&event.kind) && payload_matches_server(event, &watch)
             },
             move |result| {
                 let members = parse_object_array(result)
@@ -492,15 +652,18 @@ pub(crate) fn tray_subscription(tx: UnboundedSender<Message>) -> Job {
 }
 
 pub(crate) fn requests_subscription(
-    client: ConvexClient,
+    client: ApiClient,
     token: String,
     tx: UnboundedSender<Message>,
 ) -> Job {
     job("requests-subscription", async move {
-        run_subscription(
+        let _ = token;
+        run_query_subscription(
             client,
             "friends:listIncomingRequests",
-            btreemap! { "sessionToken".to_string() => Value::String(token) },
+            BTreeMap::new(),
+            DEFAULT_TICK,
+            |event: &WsEvent| event.kind.starts_with("friend_request."),
             move |result| {
                 let requests = parse_object_array(result)
                     .into_iter()
@@ -530,15 +693,18 @@ pub(crate) fn requests_subscription(
 }
 
 pub(crate) fn outgoing_requests_subscription(
-    client: ConvexClient,
+    client: ApiClient,
     token: String,
     tx: UnboundedSender<Message>,
 ) -> Job {
     job("outgoing-requests-subscription", async move {
-        run_subscription(
+        let _ = token;
+        run_query_subscription(
             client,
             "friends:listOutgoingRequests",
-            btreemap! { "sessionToken".to_string() => Value::String(token) },
+            BTreeMap::new(),
+            DEFAULT_TICK,
+            |event: &WsEvent| event.kind.starts_with("friend_request."),
             move |result| {
                 let requests = parse_object_array(result)
                     .into_iter()
@@ -561,15 +727,18 @@ pub(crate) fn outgoing_requests_subscription(
 }
 
 pub(crate) fn social_stats_subscription(
-    client: ConvexClient,
+    client: ApiClient,
     token: String,
     tx: UnboundedSender<Message>,
 ) -> Job {
     job("social-stats-subscription", async move {
-        run_subscription(
+        let _ = token;
+        run_query_subscription(
             client,
             "friends:socialStats",
-            btreemap! { "sessionToken".to_string() => Value::String(token) },
+            BTreeMap::new(),
+            DEFAULT_TICK,
+            |event: &WsEvent| event.kind.starts_with("friend_request."),
             move |result| {
                 if let FunctionResult::Value(Value::Object(obj)) = result {
                     let stats = SocialStats {
@@ -588,15 +757,18 @@ pub(crate) fn social_stats_subscription(
 }
 
 pub(crate) fn suggestions_subscription(
-    client: ConvexClient,
+    client: ApiClient,
     token: String,
     tx: UnboundedSender<Message>,
 ) -> Job {
     job("suggestions-subscription", async move {
-        run_subscription(
+        let _ = token;
+        run_query_subscription(
             client,
             "friends:suggestPeople",
-            btreemap! { "sessionToken".to_string() => Value::String(token) },
+            BTreeMap::new(),
+            DEFAULT_TICK,
+            |event: &WsEvent| event.kind.starts_with("friend_request."),
             move |result| {
                 let list = parse_object_array(result)
                     .into_iter()
@@ -622,15 +794,18 @@ pub(crate) fn suggestions_subscription(
 }
 
 pub(crate) fn blocked_subscription(
-    client: ConvexClient,
+    client: ApiClient,
     token: String,
     tx: UnboundedSender<Message>,
 ) -> Job {
     job("blocked-subscription", async move {
-        run_subscription(
+        let _ = token;
+        run_query_subscription(
             client,
             "friends:listBlocked",
-            btreemap! { "sessionToken".to_string() => Value::String(token) },
+            BTreeMap::new(),
+            DEFAULT_TICK,
+            |event: &WsEvent| event.kind.starts_with("friend_request."),
             move |result| {
                 let blocked = parse_object_array(result)
                     .into_iter()
@@ -647,15 +822,22 @@ pub(crate) fn blocked_subscription(
 }
 
 pub(crate) fn conversations_subscription(
-    client: ConvexClient,
+    client: ApiClient,
     token: String,
     tx: UnboundedSender<Message>,
 ) -> Job {
     job("conversations-subscription", async move {
-        run_subscription(
+        let _ = token;
+        run_query_subscription(
             client,
             "conversations:listMyConversations",
-            btreemap! { "sessionToken".to_string() => Value::String(token) },
+            BTreeMap::new(),
+            DEFAULT_TICK,
+            |event: &WsEvent| {
+                event.kind == "message.new"
+                    || event.kind.starts_with("member.")
+                    || event.kind.starts_with("channel.")
+            },
             move |result| {
                 let conversations = parse_object_array(result)
                     .into_iter()
@@ -678,15 +860,18 @@ pub(crate) fn conversations_subscription(
 }
 
 pub(crate) fn admin_users_subscription(
-    client: ConvexClient,
+    client: ApiClient,
     token: String,
     tx: UnboundedSender<Message>,
 ) -> Job {
     job("admin-users-subscription", async move {
-        run_subscription(
+        let _ = token;
+        run_query_subscription(
             client,
             "admin:listUsers",
-            btreemap! { "sessionToken".to_string() => Value::String(token) },
+            BTreeMap::new(),
+            DEFAULT_TICK,
+            |_: &WsEvent| false, // no WS events for the admin panel
             move |result| {
                 let users = parse_object_array(result)
                     .into_iter()
@@ -706,40 +891,103 @@ pub(crate) fn admin_users_subscription(
 }
 
 pub(crate) fn my_call_subscription(
-    client: ConvexClient,
+    client: ApiClient,
     token: String,
     tx: UnboundedSender<Message>,
 ) -> Job {
     job("my-call-subscription", async move {
-        run_subscription(
-            client,
-            "calls:myCall",
-            btreemap! { "sessionToken".to_string() => Value::String(token) },
-            move |result| {
-                // Error pushes are filtered by run_subscription, so a
-                // non-object value here really means "no active call"
-                // (Value::Null) -- previously a transient error also mapped
-                // to None and made the active call card vanish.
-                let info = match result {
-                    FunctionResult::Value(Value::Object(obj)) => Some(MyCallInfo {
-                        call_id: obj_str(&obj, "callId"),
-                        is_caller: obj_bool(&obj, "isCaller"),
-                        status: obj_str(&obj, "status"),
-                        peer_display_name: obj_str(&obj, "peerDisplayName"),
-                        offer_sdp: obj_str(&obj, "offerSdp"),
-                    }),
-                    _ => None,
-                };
-                tx.send(Message::MyCallUpdated(info)).is_ok()
-            },
-        )
-        .await;
+        let _ = token;
+        client.ensure_ws();
+        let mut rx = client.subscribe_events();
+        let mut ticker = tokio::time::interval(DEFAULT_TICK);
+        // `calls:myCall` has no REST GET (degradation table: dispatch
+        // returns null), so the active call is reconstructed locally from
+        // `call.*` events. The tick is only a best-effort reconciliation for
+        // the day the endpoint exists -- a null result never wipes the
+        // event-built state.
+        let mut current: Option<MyCallInfo> = None;
+        loop {
+            let dirty = tokio::select! {
+                _ = ticker.tick() => {
+                    match client.query("calls:myCall", BTreeMap::new()).await {
+                        Ok(FunctionResult::Value(Value::Object(obj))) => {
+                            current = Some(MyCallInfo {
+                                call_id: obj_str(&obj, "callId"),
+                                is_caller: obj_bool(&obj, "isCaller"),
+                                status: obj_str(&obj, "status"),
+                                peer_display_name: obj_str(&obj, "peerDisplayName"),
+                                offer_sdp: obj_str(&obj, "offerSdp"),
+                            });
+                            true
+                        }
+                        Ok(_) => false,
+                        Err(err) => {
+                            eprintln!("[net] calls:myCall fetch failed (state kept): {err}");
+                            false
+                        }
+                    }
+                }
+                event = rx.recv() => match event {
+                    Ok(event) => match event.kind.as_str() {
+                        "call.incoming" => {
+                            current = Some(MyCallInfo {
+                                call_id: json_str(&event.payload, &["call_id", "callId"]),
+                                is_caller: false,
+                                status: "ringing".to_string(),
+                                peer_display_name: json_str(
+                                    &event.payload,
+                                    &[
+                                        "caller_display_name",
+                                        "callerDisplayName",
+                                        "peer_display_name",
+                                        "peerDisplayName",
+                                        "display_name",
+                                    ],
+                                ),
+                                offer_sdp: json_str(&event.payload, &["offer_sdp", "offerSdp"]),
+                            });
+                            true
+                        }
+                        "call.answered" => {
+                            if let Some(call) = current.as_mut() {
+                                call.status = "active".to_string();
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        "call.declined" | "call.ended" => {
+                            if current.is_some() {
+                                current = None;
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        _ => false,
+                    },
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        eprintln!("[net] calls:myCall dropped {n} WS events");
+                        false
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        client.ensure_ws();
+                        rx = client.subscribe_events();
+                        false
+                    }
+                },
+            };
+            if dirty && tx.send(Message::MyCallUpdated(current.clone())).is_err() {
+                return;
+            }
+        }
     })
 }
 
 pub(crate) fn call_subscription(
     key: String,
-    client: ConvexClient,
+    client: ApiClient,
     token: String,
     role: CallRole,
     input_device: Option<String>,
@@ -818,7 +1066,7 @@ pub(crate) fn apply_decrypted_payload(msg: &mut ChatMessage, raw: &str) {
 }
 
 pub(crate) fn messages_subscription(
-    client: ConvexClient,
+    client: ApiClient,
     token: String,
     conversation_id: String,
     tx: UnboundedSender<Message>,
@@ -826,12 +1074,18 @@ pub(crate) fn messages_subscription(
     job(
         format!("messages-subscription:{conversation_id}"),
         async move {
-            run_subscription(
+            let _ = token;
+            let conv = conversation_id.clone();
+            run_query_subscription(
                 client,
                 "messages:list",
                 btreemap! {
-                    "sessionToken".to_string() => Value::String(token),
                     "conversationId".to_string() => Value::String(conversation_id),
+                },
+                DEFAULT_TICK,
+                move |event: &WsEvent| {
+                    (event.kind.starts_with("message.") || event.kind.starts_with("reaction."))
+                        && event.channel == conv
                 },
                 move |result| {
                     // Ciphertext is left intact here; `decrypt_incoming_messages`
@@ -894,18 +1148,24 @@ pub(crate) fn messages_subscription(
 /// `ChatMessage`s (body = snippet; encrypted blobs stay ciphertext for the
 /// update loop to decrypt, same convention as `messages_subscription`).
 pub(crate) fn pins_subscription(
-    client: ConvexClient,
+    client: ApiClient,
     token: String,
     conversation_id: String,
     tx: UnboundedSender<Message>,
 ) -> Job {
     job(format!("pins-subscription:{conversation_id}"), async move {
-        run_subscription(
+        let _ = token;
+        let conv = conversation_id.clone();
+        run_query_subscription(
             client,
             "messages:listPinned",
             btreemap! {
-                "sessionToken".to_string() => Value::String(token),
                 "conversationId".to_string() => Value::String(conversation_id),
+            },
+            DEFAULT_TICK,
+            move |event: &WsEvent| {
+                (event.kind.starts_with("message.") || event.kind.starts_with("reaction."))
+                    && event.channel == conv
             },
             move |result| {
                 let pinned = parse_object_array(result)
@@ -940,7 +1200,7 @@ pub(crate) fn pins_subscription(
 }
 
 pub(crate) fn typing_subscription(
-    client: ConvexClient,
+    client: ApiClient,
     token: String,
     conversation_id: String,
     tx: UnboundedSender<Message>,
@@ -948,28 +1208,55 @@ pub(crate) fn typing_subscription(
     job(
         format!("typing-subscription:{conversation_id}"),
         async move {
-            run_subscription(
-                client,
-                "typing:whoIsTyping",
-                btreemap! {
-                    "sessionToken".to_string() => Value::String(token),
-                    "conversationId".to_string() => Value::String(conversation_id),
-                },
-                move |result| {
-                    let names = match result {
-                        FunctionResult::Value(Value::Array(items)) => items
-                            .into_iter()
-                            .filter_map(|item| match item {
-                                Value::String(s) => Some(s),
-                                _ => None,
-                            })
-                            .collect(),
-                        _ => Vec::new(),
-                    };
-                    tx.send(Message::TypingUpdated(names)).is_ok()
-                },
-            )
-            .await;
+            let _ = token;
+            client.ensure_ws();
+            let mut rx = client.subscribe_events();
+            let mut sweep = tokio::time::interval(TYPING_SWEEP);
+            // There is no REST GET for "who is typing" -- rebuild the list
+            // locally from `typing` events (channel == conversationId) and
+            // expire entries after the server's ~5 s TTL.
+            let mut typers: HashMap<String, (String, Instant)> = HashMap::new();
+            let mut emitted: Vec<String> = Vec::new();
+            loop {
+                tokio::select! {
+                    _ = sweep.tick() => {
+                        let before = typers.len();
+                        typers.retain(|_, (_, last)| last.elapsed() < TYPING_TTL);
+                        if typers.len() == before {
+                            continue;
+                        }
+                    }
+                    event = rx.recv() => match event {
+                        Ok(event) => {
+                            if event.kind != "typing" || event.channel != conversation_id {
+                                continue;
+                            }
+                            match typing_event_user(&event.payload) {
+                                Some((user_id, name)) => {
+                                    typers.insert(user_id, (name, Instant::now()));
+                                }
+                                None => continue,
+                            }
+                        }
+                        // Typing state is transient -- a lagged/closed
+                        // receiver needs no catch-up, the TTL converges it.
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            client.ensure_ws();
+                            rx = client.subscribe_events();
+                            continue;
+                        }
+                    },
+                }
+                let names = typing_names(&typers);
+                if names != emitted {
+                    emitted = names.clone();
+                    if tx.send(Message::TypingUpdated(names)).is_err() {
+                        return;
+                    }
+                }
+            }
         },
     )
 }
@@ -1009,24 +1296,26 @@ pub(crate) fn peer_session_subscription(
 }
 
 pub(crate) fn peer_invite_subscription(
-    client: ConvexClient,
+    client: ApiClient,
     token: String,
     peer_user_id: String,
     conversation_id: String,
     tx: UnboundedSender<Message>,
 ) -> Job {
     job(format!("peerseal-invite:{peer_user_id}"), async move {
-        // Last forwarded payload: dedups Convex re-pushes of the same
-        // invite, while still delivering a *changed* payload (host
-        // republish after a relay drop).
+        let _ = token;
+        // Last forwarded payload: dedups re-fetches of the same invite,
+        // while still delivering a *changed* payload (host republish after
+        // a relay drop).
         let mut last_payload = String::new();
-        run_subscription(
+        run_query_subscription(
             client,
             "peer:getInvite",
             btreemap! {
-                "sessionToken".to_string() => Value::String(token),
                 "conversationId".to_string() => Value::String(conversation_id),
             },
+            PEER_INVITE_TICK,
+            |_: &WsEvent| false, // no WS event for peer invites -- tick only
             move |result| {
                 let payload = match result {
                     FunctionResult::Value(Value::Object(obj)) => {

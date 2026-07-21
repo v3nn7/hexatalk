@@ -45,6 +45,7 @@ component MemberEntry inherits Rectangle {
     property <color> nick-color: m.roles.length > 0 && m.roles[0].color.alpha > 0 ? m.roles[0].color : Theme.text-primary;
 
     height: content.preferred-height + Theme.space-2;
+    border-radius: Theme.radius-sm;
     background: touch.has-hover ? Theme.bg-hover : transparent;
     animate background { duration: 120ms; }
     touch := TouchArea {
@@ -159,6 +160,7 @@ export component MembersDrawer inherits HorizontalLayout {
             // which clamps the whole window scene (see ResizeHandle).
             collapse-btn := Rectangle {
                 height: 24px;
+                border-radius: Theme.radius-sm;
                 background: collapse-touch.has-hover ? Theme.bg-hover : transparent;
                 animate background { duration: 120ms; }
                 Text { text: "›"; font-size: 14px; color: collapse-touch.has-hover ? Theme.accent : Theme.text-muted; horizontal-alignment: center; }
@@ -190,6 +192,7 @@ export component MembersDrawer inherits HorizontalLayout {
                 Rectangle {
                     width: 20px;
                     height: 20px;
+                    border-radius: Theme.radius-sm;
                     background: expand-touch.has-hover ? Theme.bg-hover : transparent;
                     animate background { duration: 120ms; }
                     Text { text: "«"; font-size: 14px; color: expand-touch.has-hover ? Theme.accent : Theme.text-muted; horizontal-alignment: center; vertical-alignment: center; }
