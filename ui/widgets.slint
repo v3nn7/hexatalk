@@ -137,8 +137,9 @@ export component PrimaryButton inherits Rectangle {
     // Filled button: violet, no border; hover brightens one step,
     // pressed drops one step below the rest state.
     background: touch.pressed ? Theme.accent-pressed : (touch.has-hover ? Theme.accent : Theme.accent-dim);
-    opacity: root.enabled ? 1.0 : 0.5;
-    animate background { duration: 140ms; }
+    opacity: root.enabled ? 1.0 : 0.45;
+    animate background { duration: 140ms; easing: ease-out; }
+    animate opacity { duration: 140ms; easing: ease-out; }
 
     touch := TouchArea {
         enabled: root.enabled && !root.busy;
@@ -167,8 +168,9 @@ export component SecondaryButton inherits Rectangle {
     // "Secondary" grey button: solid control grey, no border,
     // lighter on hover, darker on press.
     background: touch.pressed ? Theme.bg-control-pressed : (touch.has-hover ? Theme.bg-control-hover : Theme.bg-control);
-    opacity: root.enabled ? 1.0 : 0.5;
-    animate background { duration: 140ms; }
+    opacity: root.enabled ? 1.0 : 0.45;
+    animate background { duration: 140ms; easing: ease-out; }
+    animate opacity { duration: 140ms; easing: ease-out; }
 
     touch := TouchArea {
         enabled: root.enabled;
@@ -198,9 +200,10 @@ export component DangerButton inherits Rectangle {
     // hover, darker red when pressed.
     background: touch.pressed ? Theme.danger-pressed : (touch.has-hover ? Theme.danger : transparent);
     border-color: touch.has-hover || touch.pressed ? transparent : Theme.danger-dim;
-    opacity: root.enabled ? 1.0 : 0.5;
-    animate background { duration: 140ms; }
-    animate border-color { duration: 140ms; }
+    opacity: root.enabled ? 1.0 : 0.45;
+    animate background { duration: 140ms; easing: ease-out; }
+    animate border-color { duration: 140ms; easing: ease-out; }
+    animate opacity { duration: 140ms; easing: ease-out; }
 
     touch := TouchArea {
         enabled: root.enabled;
@@ -269,9 +272,17 @@ export component TextInputField inherits Rectangle {
     background: Theme.bg-tertiary;
     border-width: 1px;
     border-color: root.error ? Theme.danger : (inner.has-focus ? Theme.accent : transparent);
+    // Soft focus glow: a tight, faint violet halo that fades in with the
+    // ring -- reads as a modern focus state without moving the layout.
+    drop-shadow-offset-x: 0px;
+    drop-shadow-offset-y: 0px;
+    drop-shadow-blur: inner.has-focus && !root.error ? 8px : 0px;
+    drop-shadow-color: Theme.accent-soft-strong;
     // Dim like the shared buttons do when disabled (e.g. while auth is busy).
-    opacity: root.enabled ? 1.0 : 0.5;
-    animate border-color { duration: 140ms; }
+    opacity: root.enabled ? 1.0 : 0.45;
+    animate border-color { duration: 140ms; easing: ease-out; }
+    animate drop-shadow-blur { duration: 160ms; easing: ease-out; }
+    animate opacity { duration: 140ms; easing: ease-out; }
 
     inner := TextInput {
         x: 10px;

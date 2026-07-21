@@ -36,7 +36,47 @@ pub async fn dispatch(
         // ---------- queries ----------
         ("friends", "listFriends") => {
             let resp = c.rest(Method::GET, "/friends", None).await?;
-            let rows = list_from(&resp, &["friends", "items", "data"]);
+            let mut rows = list_from(&resp, &["friends", "items", "data"]);
+            // API nie zwraca presence w /friends — dociągamy per friend
+            // z GET /presence/:userId (best-effort, równolegle). Gdy serwer
+            // zacznie zwracać presence w liście, fan-out sam się wyłączy.
+            if rows.iter().any(|r| {
+                jstr_any(person_part(r, &["user", "friend"]), &["presence", "status"]).is_empty()
+            }) {
+                let fetches: Vec<_> = rows
+                    .iter()
+                    .map(|r| {
+                        let uid = friend_user_id(r);
+                        async move {
+                            if uid.is_empty() {
+                                return None;
+                            }
+                            c.rest(Method::GET, &format!("/presence/{uid}"), None)
+                                .await
+                                .ok()
+                        }
+                    })
+                    .collect();
+                let presences = futures::future::join_all(fetches).await;
+                for (row, pres) in rows.iter_mut().zip(presences) {
+                    let Some(p) = pres else { continue };
+                    // Wstrzykuj tam, skąd czyta person_part: zagnieżdżony
+                    // user/friend jeśli jest, inaczej top-level wiersza.
+                    let target = if row.get("user").is_some_and(|x| x.is_object()) {
+                        row.get_mut("user")
+                    } else if row.get("friend").is_some_and(|x| x.is_object()) {
+                        row.get_mut("friend")
+                    } else {
+                        Some(row)
+                    };
+                    let Some(serde_json::Value::Object(map)) = target else { continue };
+                    map.entry("presence".to_string())
+                        .or_insert_with(|| p.get("status").cloned().unwrap_or(serde_json::Value::Null));
+                    map.entry("last_seen_at".to_string()).or_insert_with(|| {
+                        p.get("last_seen_at").cloned().unwrap_or(serde_json::Value::Null)
+                    });
+                }
+            }
             ok(Value::Array(
                 rows.iter().map(|row| friend_object(c, row)).collect(),
             ))

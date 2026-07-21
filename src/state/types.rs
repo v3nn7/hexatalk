@@ -485,6 +485,7 @@ pub(crate) enum SettingsCategory {
     Plus,
     Bots,
     Voice,
+    Appearance,
     About,
 }
 

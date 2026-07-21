@@ -6155,6 +6155,11 @@ impl App {
                 self.persist_settings();
                 Task::none()
             }
+            Message::UiScaleChanged(value) => {
+                self.ui_scale = value.clamp(0.8, 1.4);
+                self.persist_settings();
+                Task::none()
+            }
 
             Message::AvatarImageLoaded(url, Ok(bytes)) => {
                 self.avatar_image_failed.remove(&url);

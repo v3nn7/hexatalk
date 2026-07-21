@@ -566,6 +566,7 @@ struct SettingsRaw {
     bot_status: Option<(String, bool)>,
     bot_token_reveal: Option<String>,
     noise_gate: f32,
+    ui_scale: f32,
     update_check_status: Option<String>,
     update_ready: bool,
     ping_status: Option<String>,
@@ -756,6 +757,7 @@ impl UiSnapshot {
             bot_status: app.bot_status.clone(),
             bot_token_reveal: app.bot_token_reveal.clone(),
             noise_gate: f32::from_bits(app.noise_gate.load(Ordering::Relaxed)),
+            ui_scale: app.ui_scale,
             update_check_status: app.update_check_status.clone(),
             update_ready: app.pending_update_path.is_some(),
             ping_status: app.ping_status.clone(),
@@ -1275,6 +1277,7 @@ fn apply_settings(
         SettingsCategory::Plus => slint_ui::SettingsCategory::Plus,
         SettingsCategory::Bots => slint_ui::SettingsCategory::Bots,
         SettingsCategory::Voice => slint_ui::SettingsCategory::Voice,
+        SettingsCategory::Appearance => slint_ui::SettingsCategory::Appearance,
         SettingsCategory::About => slint_ui::SettingsCategory::About,
     });
     ui.set_settings_avatar_initial(viewmodel::initial(&session.display_name));
@@ -1390,6 +1393,7 @@ fn apply_settings(
         }
         .into(),
     );
+    ui.set_settings_ui_scale(s.ui_scale);
     ui.set_settings_version_line(format!("HexaTalk v{CURRENT_APP_VERSION}").into());
     ui.set_settings_vault_hint(history::vault_root_display(&session.user_id).into());
     ui.set_settings_update_check_status(s.update_check_status.clone().unwrap_or_default().into());
@@ -2959,6 +2963,7 @@ fn wire_settings_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Messag
                 slint_ui::SettingsCategory::Plus => SettingsCategory::Plus,
                 slint_ui::SettingsCategory::Bots => SettingsCategory::Bots,
                 slint_ui::SettingsCategory::Voice => SettingsCategory::Voice,
+                slint_ui::SettingsCategory::Appearance => SettingsCategory::Appearance,
                 slint_ui::SettingsCategory::About => SettingsCategory::About,
             };
             let _ = t.send(Message::SettingsCategoryChanged(cat));
@@ -3043,6 +3048,9 @@ fn wire_settings_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Messag
     );
     on1!(on_settings_noise_gate_changed, |v: f32| {
         Message::NoiseGateChanged(v)
+    });
+    on1!(on_settings_ui_scale_changed, |v: f32| {
+        Message::UiScaleChanged(v)
     });
     on0!(on_settings_check_for_update, Message::CheckForUpdate);
     on0!(on_settings_restart_update, Message::RestartAndUpdate);

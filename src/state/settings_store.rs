@@ -22,6 +22,8 @@ pub(super) struct PersistedSettings {
     /// Mic noise gate threshold (linear amplitude 0..1). `None` = app default
     /// (`call::DEFAULT_NOISE_GATE`).
     pub(super) noise_gate: Option<f32>,
+    /// Global UI scale multiplier (0.8..=1.4). `None` = 1.0.
+    pub(super) ui_scale: Option<f32>,
     /// Per-peer voice volume gains (peer user_id -> gain, 0.0..=5.0). The
     /// 1:1 call remote uses the special key "*".
     pub(super) voice_gains: HashMap<String, f32>,

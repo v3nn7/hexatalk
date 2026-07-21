@@ -270,6 +270,13 @@ export component AppWindow inherits Window {
     in property <[DeviceRow]> settings_input_devices: [];
     in property <[DeviceRow]> settings_output_devices: [];
     in property <float> settings_noise_gate: 0;
+    in property <float> settings_ui_scale: 1;
+    // Persisted zoom drives the Theme global (radius/spacing/font tokens
+    // all derive from ui-scale). The settings slider writes the global
+    // directly for live preview; this binding restores it at startup and
+    // on every state sync.
+    changed settings_ui_scale => { Theme.ui-scale = root.settings_ui_scale; }
+    init => { Theme.ui-scale = root.settings_ui_scale; }
     in property <string> settings_noise_gate_label;
     in property <string> settings_version_line;
     in property <string> settings_vault_hint;
@@ -317,6 +324,7 @@ export component AppWindow inherits Window {
     callback settings_input_device_selected(string);
     callback settings_output_device_selected(string);
     callback settings_noise_gate_changed(float);
+    callback settings_ui_scale_changed(float);
     callback settings_check_for_update;
     callback settings_restart_update;
     callback settings_measure_ping;
@@ -361,6 +369,7 @@ export component AppWindow inherits Window {
         output_devices: root.settings_output_devices;
         noise_gate: root.settings_noise_gate;
         noise_gate_label: root.settings_noise_gate_label;
+        ui_scale: root.settings_ui_scale;
         version_line: root.settings_version_line;
         vault_hint: root.settings_vault_hint;
         update_check_status: root.settings_update_check_status;
@@ -407,6 +416,7 @@ export component AppWindow inherits Window {
         input_device_selected(d) => { root.settings_input_device_selected(d); }
         output_device_selected(d) => { root.settings_output_device_selected(d); }
         noise_gate_changed(v) => { root.settings_noise_gate_changed(v); }
+        ui_scale_changed(v) => { root.settings_ui_scale_changed(v); }
         check_for_update => { root.settings_check_for_update(); }
         restart_update => { root.settings_restart_update(); }
         measure_ping => { root.settings_measure_ping(); }

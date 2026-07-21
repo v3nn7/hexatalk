@@ -8,7 +8,7 @@ import { Slider } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Avatar, SecondaryButton, PrimaryButton, DangerButton, TextInputField, FieldLabel, SectionTitle, Badge, Divider, BotTag } from "widgets.slint";
 
-export enum SettingsCategory { Account, Privacy, Plus, Bots, Voice, About }
+export enum SettingsCategory { Account, Privacy, Plus, Bots, Voice, Appearance, About }
 
 export struct BotRow {
     bot_id: string,
@@ -168,6 +168,10 @@ export component SettingsScreen inherits Rectangle {
     in property <[DeviceRow]> output_devices: [];
     in property <float> noise_gate: 0;
     in property <string> noise_gate_label;
+    // Global UI scale (0.8–1.4), synced from Rust on screen open / after
+    // the debounced persist round-trip. The slider edits a local pending
+    // copy instead (same anti-jitter pattern as the noise gate).
+    in property <float> ui_scale: 1;
 
     // About
     in property <string> version_line;
@@ -222,6 +226,7 @@ export component SettingsScreen inherits Rectangle {
     callback input_device_selected(string);
     callback output_device_selected(string);
     callback noise_gate_changed(float);
+    callback ui_scale_changed(float);
 
     callback check_for_update;
     callback restart_update;
@@ -247,6 +252,22 @@ export component SettingsScreen inherits Rectangle {
         triggered => {
             self.running = false;
             root.noise_gate_changed(root.pending_noise_gate);
+        }
+    }
+
+    // UI scale: live zoom applied straight to the Theme global while
+    // dragging; Rust persists 400ms after the drag stops.
+    property <float> pending_ui_scale: root.ui_scale;
+    property <int> ui_scale_kick: 0;
+    changed ui_scale_kick => {
+        ui_scale_timer.running = false;
+        ui_scale_timer.running = true;
+    }
+    ui_scale_timer := Timer {
+        interval: 400ms;
+        triggered => {
+            self.running = false;
+            root.ui_scale_changed(root.pending_ui_scale);
         }
     }
 
@@ -294,6 +315,7 @@ export component SettingsScreen inherits Rectangle {
                 SidebarItem { text: "HexaTalk Plus"; active: root.category == SettingsCategory.Plus; clicked => { root.category_changed(SettingsCategory.Plus); } }
                 SidebarItem { text: "Bots"; active: root.category == SettingsCategory.Bots; clicked => { root.category_changed(SettingsCategory.Bots); } }
                 SidebarItem { text: "Voice & Video"; active: root.category == SettingsCategory.Voice; clicked => { root.category_changed(SettingsCategory.Voice); } }
+                SidebarItem { text: "Appearance"; active: root.category == SettingsCategory.Appearance; clicked => { root.category_changed(SettingsCategory.Appearance); } }
                 Rectangle { height: Theme.space-2; }
                 Divider {}
                 Rectangle { height: Theme.space-2; }
@@ -332,6 +354,7 @@ export component SettingsScreen inherits Rectangle {
                                     : root.category == SettingsCategory.Plus ? "HexaTalk Plus"
                                     : root.category == SettingsCategory.Bots ? "Bots"
                                     : root.category == SettingsCategory.Voice ? "Voice & Video"
+                                    : root.category == SettingsCategory.Appearance ? "Appearance"
                                     : "About";
                                 font-size: Theme.text-lg;
                                 font-family: Theme.font-medium;
@@ -638,6 +661,37 @@ export component SettingsScreen inherits Rectangle {
                                 Text {
                                     text: "Local DSP (on-device, free): soft noise gate + high-pass rumble cut + AGC (auto gain) + deharsh LPF. No cloud processing, low CPU.";
                                     font-size: 11px;
+                                    color: Theme.text-muted;
+                                    wrap: word-wrap;
+                                }
+                            }
+
+                            if root.category == SettingsCategory.Appearance: SectionCard {
+                                SectionTitle { text: "Appearance"; }
+                                FieldLabel { text: "UI scale"; }
+                                HorizontalLayout {
+                                    spacing: Theme.space-3;
+                                    Slider {
+                                        horizontal-stretch: 1;
+                                        minimum: 0.8;
+                                        maximum: 1.4;
+                                        value <=> root.pending_ui_scale;
+                                        changed(v) => {
+                                            Theme.ui-scale = v;
+                                            root.ui_scale_kick += 1;
+                                        }
+                                    }
+                                    Text {
+                                        text: Math.round(root.pending_ui_scale * 100) + "%";
+                                        font-size: Theme.text-sm;
+                                        color: Theme.text-muted;
+                                        width: 44px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                Text {
+                                    text: "Zoom the whole interface — text, spacing and corners scale together. Applies instantly, saved automatically.";
+                                    font-size: Theme.text-sm;
                                     color: Theme.text-muted;
                                     wrap: word-wrap;
                                 }

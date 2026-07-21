@@ -166,7 +166,37 @@ impl ApiClient {
     }
 
     /// POST /files (multipart field "file") → storage key.
+    ///
+    /// Client-side guards run before any bytes hit the network so the user
+    /// gets a clear, immediate error instead of a server 413/415 after a
+    /// long upload: a 25 MB size cap and an extension whitelist matching the
+    /// media types the app actually sends (avatars, icons, chat
+    /// attachments). The server enforces its own limits too — these checks
+    /// only improve UX and block obviously-bogus uploads early.
     pub async fn upload_file(&self, bytes: Vec<u8>, filename: &str) -> Result<String, ApiError> {
+        const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
+        const ALLOWED_EXTENSIONS: &[&str] = &[
+            "png", "jpg", "jpeg", "gif", "webp", "mp3", "mp4", "webm", "pdf", "txt",
+        ];
+        if bytes.len() > MAX_UPLOAD_BYTES {
+            return Err(ApiError(format!(
+                "File is too large ({:.1} MB) — the maximum upload size is 25 MB",
+                bytes.len() as f64 / (1024.0 * 1024.0),
+            )));
+        }
+        let ext = filename
+            .rsplit('.')
+            .next()
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        // `rsplit('.').next()` returns the whole name when there is no dot —
+        // treat "no extension" and unknown extensions the same: rejected.
+        if !filename.contains('.') || !ALLOWED_EXTENSIONS.contains(&ext.as_str()) {
+            return Err(ApiError(format!(
+                "Unsupported file type \".{ext}\" — allowed: {}",
+                ALLOWED_EXTENSIONS.join(", ")
+            )));
+        }
         let part = reqwest::multipart::Part::bytes(bytes).file_name(filename.to_string());
         let form = reqwest::multipart::Form::new().part("file", part);
         let url = format!("{}/files", self.inner.base_url);

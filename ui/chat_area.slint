@@ -226,19 +226,22 @@ export component ChatArea inherits Rectangle {
             HorizontalLayout {
                 alignment: center;
                 Rectangle {
-                    width: 72px;
-                    height: 72px;
+                    property <float> breathe: 0.5 + 0.5 * Math.sin(animation-tick() / 2600ms * 360deg);
+                    width: 76px;
+                    height: 76px;
                     background: Theme.accent;
                     border-width: 1px;
-                    border-color: Theme.accent;
-                    border-radius: Theme.radius-lg;
+                    border-color: Theme.accent-hover;
+                    border-radius: Theme.radius-lg + 4px;
                     drop-shadow-offset-x: 0px;
-                    drop-shadow-offset-y: Theme.shadow-offset;
-                    drop-shadow-blur: Theme.shadow-blur-lg;
-                    drop-shadow-color: Theme.shadow-color;
+                    drop-shadow-offset-y: 2px;
+                    drop-shadow-blur: 14px + self.breathe * 10px;
+                    drop-shadow-color: Theme.accent-soft-strong;
+                    animate drop-shadow-blur { duration: 200ms; }
                     Text {
                         text: ">_";
-                        font-size: 26px;
+                        font-size: 28px;
+                        font-family: Theme.font-medium;
                         color: Theme.text-on-accent;
                         horizontal-alignment: center;
                         vertical-alignment: center;
@@ -247,8 +250,9 @@ export component ChatArea inherits Rectangle {
             }
             Text {
                 text: "Welcome to HexaTalk";
-                font-size: 28px;
-                color: Theme.text-primary;
+                font-size: 30px;
+                font-family: Theme.font-medium;
+                color: Theme.text-bright;
                 horizontal-alignment: center;
             }
             Text {
@@ -288,6 +292,11 @@ export component ChatArea inherits Rectangle {
             background: Theme.bg-secondary;
             border-width: 1px;
             border-color: Theme.border;
+            // Delikatny cień pod paskiem kanału — głębia zamiast płaskiego szwu.
+            drop-shadow-offset-x: 0px;
+            drop-shadow-offset-y: 2px;
+            drop-shadow-blur: 6px;
+            drop-shadow-color: #00000033;
             HorizontalLayout {
                 padding-left: 16px;
                 padding-right: 12px;
@@ -573,11 +582,31 @@ export component ChatArea inherits Rectangle {
                 padding: 14px;
                 spacing: 8px;
 
-                if root.typing_line != "": Text {
-                    text: "▌ " + root.typing_line;
-                    font-size: 11px;
-                    font-family: Theme.font-medium;
-                    color: Theme.accent;
+                if root.typing_line != "": HorizontalLayout {
+                    spacing: 6px;
+                    // Animated 3-dot typing indicator, Discord-style.
+                    Rectangle {
+                        width: 26px;
+                        height: 14px;
+                        vertical-stretch: 0;
+                        for i in 3: Rectangle {
+                            property <float> phase: Math.mod(animation-tick() / 1ms, 1200) / 1200;
+                            x: 2px + i * 8px;
+                            y: (parent.height - self.height) / 2 - (Math.sin((self.phase * 360deg) - (i * 40deg)) > 0.35 ? 2.5px : 0px);
+                            width: 5px;
+                            height: 5px;
+                            border-radius: 2.5px;
+                            background: Theme.accent;
+                            opacity: Math.sin((self.phase * 360deg) - (i * 40deg)) > 0.35 ? 1 : 0.35;
+                        }
+                    }
+                    Text {
+                        text: root.typing_line;
+                        font-size: 11px;
+                        font-family: Theme.font-medium;
+                        color: Theme.accent;
+                        vertical-alignment: center;
+                    }
                 }
 
                 if root.is_editing: Text {
@@ -750,9 +779,15 @@ export component ChatArea inherits Rectangle {
                         border-radius: Theme.radius-lg;
                         background: composer_input.has-focus ? Theme.bg-elevated : Theme.bg-tertiary;
                         border-width: 1px;
-                        border-color: composer_input.has-focus ? Theme.border-strong : Theme.border;
+                        border-color: composer_input.has-focus ? Theme.accent : Theme.border;
+                        // Focus glow jak w TextInputField + lekki cień pill'a.
+                        drop-shadow-offset-x: 0px;
+                        drop-shadow-offset-y: 0px;
+                        drop-shadow-blur: composer_input.has-focus ? 10px : 0px;
+                        drop-shadow-color: Theme.accent-soft-strong;
                         animate background { duration: 120ms; }
                         animate border-color { duration: 120ms; }
+                        animate drop-shadow-blur { duration: 160ms; easing: ease-out; }
 
                         // Circular attach button on the left edge.
                         if !root.is_editing && root.crypto_ready: Rectangle {

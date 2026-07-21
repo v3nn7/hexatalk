@@ -5,6 +5,13 @@
 // tokens are purely additive (status idle/dnd, radius scale, soft-shadow
 // blur, control greys, warning washes).
 export global Theme {
+    // ---------- UI scale (globalny zoom jak na Discordzie) ----------
+    // Mnożnik dla typografii, spacingu i promieni. Ustawiany z ustawień
+    // (Settings → Appearance) i persistowany w settings.json. Wartości
+    // zakodowane na sztywno (px literalami) nie skalują się — dlatego nowy
+    // kod powinien używać tokenów, nie magic numbers.
+    in-out property <float> ui-scale: 1.0;
+
     // ---------- Backgrounds ----------
     // Main chat surface.
     out property <color> bg-primary: #221d2c;
@@ -99,28 +106,29 @@ export global Theme {
     // ---------- Shape ----------
     // Rounded, friendly geometry: small controls ~4-6px, cards/popovers
     // ~12px. `radius` is the historical single token -- now the default
-    // control radius; prefer the scale below for new code.
-    out property <length> radius: 6px;
-    out property <length> radius-sm: 4px;
-    out property <length> radius-md: 8px;
-    out property <length> radius-lg: 12px;
+    // control radius; prefer the scale below for new code. All scaled by
+    // ui-scale.
+    out property <length> radius: 6px * root.ui-scale;
+    out property <length> radius-sm: 4px * root.ui-scale;
+    out property <length> radius-md: 8px * root.ui-scale;
+    out property <length> radius-lg: 12px * root.ui-scale;
 
     // ---------- Spacing scale ----------
-    out property <length> space-1: 4px;
-    out property <length> space-2: 8px;
-    out property <length> space-3: 12px;
-    out property <length> space-4: 16px;
-    out property <length> space-5: 24px;
-    out property <length> space-6: 32px;
+    out property <length> space-1: 4px * root.ui-scale;
+    out property <length> space-2: 8px * root.ui-scale;
+    out property <length> space-3: 12px * root.ui-scale;
+    out property <length> space-4: 16px * root.ui-scale;
+    out property <length> space-5: 24px * root.ui-scale;
+    out property <length> space-6: 32px * root.ui-scale;
 
     // ---------- Typography ----------
     out property <string> font-body: "Roboto";
     out property <string> font-medium: "Roboto Medium";
-    out property <length> text-xs: 10px;
-    out property <length> text-sm: 12px;
-    out property <length> text-md: 14px;
-    out property <length> text-lg: 18px;
-    out property <length> text-xl: 24px;
+    out property <length> text-xs: 10px * root.ui-scale;
+    out property <length> text-sm: 12px * root.ui-scale;
+    out property <length> text-md: 14px * root.ui-scale;
+    out property <length> text-lg: 18px * root.ui-scale;
+    out property <length> text-xl: 24px * root.ui-scale;
 
     // ---------- Shadows (soft: low offset + blur) ----------
     out property <brush> shadow-color: #00000059;

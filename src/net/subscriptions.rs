@@ -460,7 +460,11 @@ pub(crate) fn friends_subscription(
             "friends:listFriends",
             BTreeMap::new(),
             DEFAULT_TICK,
-            |event: &WsEvent| event.kind.starts_with("friend_request."),
+            // friend_request.* dla zmian relacji + presence dla aktywności
+            // (oba eventy przychodzą na kanale = moje userId).
+            |event: &WsEvent| {
+                event.kind.starts_with("friend_request.") || event.kind == "presence"
+            },
             move |result| {
                 let friends = parse_object_array(result)
                     .into_iter()
@@ -663,7 +667,11 @@ pub(crate) fn requests_subscription(
             "friends:listIncomingRequests",
             BTreeMap::new(),
             DEFAULT_TICK,
-            |event: &WsEvent| event.kind.starts_with("friend_request."),
+            // friend_request.* dla zmian relacji + presence dla aktywności
+            // (oba eventy przychodzą na kanale = moje userId).
+            |event: &WsEvent| {
+                event.kind.starts_with("friend_request.") || event.kind == "presence"
+            },
             move |result| {
                 let requests = parse_object_array(result)
                     .into_iter()
@@ -704,7 +712,11 @@ pub(crate) fn outgoing_requests_subscription(
             "friends:listOutgoingRequests",
             BTreeMap::new(),
             DEFAULT_TICK,
-            |event: &WsEvent| event.kind.starts_with("friend_request."),
+            // friend_request.* dla zmian relacji + presence dla aktywności
+            // (oba eventy przychodzą na kanale = moje userId).
+            |event: &WsEvent| {
+                event.kind.starts_with("friend_request.") || event.kind == "presence"
+            },
             move |result| {
                 let requests = parse_object_array(result)
                     .into_iter()
@@ -738,7 +750,11 @@ pub(crate) fn social_stats_subscription(
             "friends:socialStats",
             BTreeMap::new(),
             DEFAULT_TICK,
-            |event: &WsEvent| event.kind.starts_with("friend_request."),
+            // friend_request.* dla zmian relacji + presence dla aktywności
+            // (oba eventy przychodzą na kanale = moje userId).
+            |event: &WsEvent| {
+                event.kind.starts_with("friend_request.") || event.kind == "presence"
+            },
             move |result| {
                 if let FunctionResult::Value(Value::Object(obj)) = result {
                     let stats = SocialStats {
@@ -768,7 +784,11 @@ pub(crate) fn suggestions_subscription(
             "friends:suggestPeople",
             BTreeMap::new(),
             DEFAULT_TICK,
-            |event: &WsEvent| event.kind.starts_with("friend_request."),
+            // friend_request.* dla zmian relacji + presence dla aktywności
+            // (oba eventy przychodzą na kanale = moje userId).
+            |event: &WsEvent| {
+                event.kind.starts_with("friend_request.") || event.kind == "presence"
+            },
             move |result| {
                 let list = parse_object_array(result)
                     .into_iter()
@@ -805,7 +825,11 @@ pub(crate) fn blocked_subscription(
             "friends:listBlocked",
             BTreeMap::new(),
             DEFAULT_TICK,
-            |event: &WsEvent| event.kind.starts_with("friend_request."),
+            // friend_request.* dla zmian relacji + presence dla aktywności
+            // (oba eventy przychodzą na kanale = moje userId).
+            |event: &WsEvent| {
+                event.kind.starts_with("friend_request.") || event.kind == "presence"
+            },
             move |result| {
                 let blocked = parse_object_array(result)
                     .into_iter()

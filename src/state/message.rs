@@ -430,6 +430,7 @@ pub(crate) enum Message {
     SettingsInputDeviceSelected(String),
     SettingsOutputDeviceSelected(String),
     NoiseGateChanged(f32),
+    UiScaleChanged(f32),
 
     /// HexaTalk Plus — Stripe checkout / portal / refresh status.
     PlusSubscribe,

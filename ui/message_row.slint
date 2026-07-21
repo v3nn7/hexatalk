@@ -269,11 +269,28 @@ export component MessageRow inherits Rectangle {
                 color: Theme.warning;
             }
 
-            if msg.reply_line != "": Text {
-                text: msg.reply_line;
-                font-size: 11px;
-                color: Theme.text-muted;
-                wrap: word-wrap;
+            if msg.reply_line != "": Rectangle {
+                // Discord-style quoted reply: accent spine + tinted chip
+                // instead of a bare gray line.
+                height: reply_inner.preferred-height + 6px;
+                background: Theme.bg-tertiary;
+                border-radius: Theme.radius-sm;
+                Rectangle {
+                    x: 0; y: 0;
+                    width: 3px;
+                    height: parent.height;
+                    border-radius: 2px;
+                    background: Theme.accent-dim;
+                }
+                reply_inner := Text {
+                    x: 10px;
+                    y: 3px;
+                    width: parent.width - 16px;
+                    text: msg.reply_line;
+                    font-size: 11px;
+                    color: Theme.text-muted;
+                    wrap: word-wrap;
+                }
             }
 
             if msg.body != "": Text {
@@ -289,7 +306,9 @@ export component MessageRow inherits Rectangle {
                 background: Theme.bg-tertiary;
                 border-width: 1px;
                 border-radius: Theme.radius-md;
-                border-color: att_touch.has-hover ? Theme.border-strong : Theme.border;
+                border-color: att_touch.has-hover ? Theme.accent : Theme.border;
+                // Zaokrąglenia obcinają też rogi obrazka, nie tylko ramki.
+                clip: true;
                 animate border-color { duration: 120ms; }
                 VerticalLayout {
                     padding: 4px;

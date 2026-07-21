@@ -282,6 +282,9 @@ pub(crate) struct App {
     pub(crate) settings_input_device: Option<String>,
     pub(crate) settings_output_device: Option<String>,
     pub(crate) noise_gate: Arc<AtomicU32>,
+    /// Global UI scale (1.0 = 100%). Persisted in settings.json; applied to
+    /// the Slint `Theme.ui-scale` global at startup.
+    pub(crate) ui_scale: f32,
     /// Per-peer voice volume gains (peer user_id -> gain, 0.0..=5.0). The
     /// 1:1 call remote uses the special key "*". Applied live to decoded
     /// remote audio in call.rs / room_voice.rs.
@@ -529,6 +532,10 @@ impl App {
                         .unwrap_or(call::DEFAULT_NOISE_GATE)
                         .to_bits(),
                 )),
+                ui_scale: persisted_settings
+                    .ui_scale
+                    .unwrap_or(1.0)
+                    .clamp(0.8, 1.4),
                 voice_gains: Arc::new(std::sync::Mutex::new(
                     persisted_settings.voice_gains.clone(),
                 )),
@@ -703,6 +710,7 @@ impl App {
             noise_gate: Some(f32::from_bits(
                 self.noise_gate.load(std::sync::atomic::Ordering::Relaxed),
             )),
+            ui_scale: Some(self.ui_scale),
             voice_gains: self
                 .voice_gains
                 .lock()

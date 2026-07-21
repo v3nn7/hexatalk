@@ -165,23 +165,41 @@ async fn run_update_check() -> UpdateOutcome {
                     return UpdateOutcome::Failed(hint);
                 }
             };
-            // Optional ed25519: verify when .sig matches the baked public key.
-            // Missing or non-verifying sig → still stage (unsigned path). A
-            // signed CDN must not brick clients that ship without / with a
-            // different public key.
-            let sig_bytes = match download_bounded(
+            // ed25519 is enforced whenever this build carries a usable
+            // release public key (every shipped build does — it is baked in
+            // via build.rs/obf.rs):
+            // - .sig present (64 bytes) but fails verification → hard reject
+            //   (a tampered or mismatched exe must never be staged);
+            // - .sig missing/unfetchable → reject too, because an unsigned
+            //   full download has no other authentication (unlike deltas,
+            //   which are AEAD-protected by the baked HTD1 key);
+            // - only a build WITHOUT a decodable baked key (local/dev builds
+            //   with a placeholder) may stage an unsigned download, matching
+            //   the previous fail-open behavior there.
+            let sig_result = download_bounded(
                 crate::obf::update_signature_url(),
                 MAX_SIGNATURE_BYTES,
                 30,
             )
-            .await
-            {
-                Ok(sig)
-                    if sig.len() == ED25519_SIG_LEN && verify_bytes(&bytes, &sig).is_ok() =>
-                {
-                    sig
+            .await;
+            let sig_bytes = match sig_result {
+                Ok(sig) if sig.len() == ED25519_SIG_LEN => match verify_bytes(&bytes, &sig) {
+                    Ok(()) => sig,
+                    Err(err) => {
+                        return UpdateOutcome::Failed(format!(
+                            "Refusing update v{remote_version_str}: {err}"
+                        ));
+                    }
+                },
+                _ => {
+                    if release_key_available() {
+                        return UpdateOutcome::Failed(format!(
+                            "Refusing update v{remote_version_str}: no valid signature file \
+                             on the server and this build requires signed releases"
+                        ));
+                    }
+                    Vec::new()
                 }
-                _ => Vec::new(),
             };
             (bytes, sig_bytes)
         }
@@ -258,34 +276,60 @@ async fn try_delta_patch(remote_version: &str) -> Option<(Vec<u8>, Vec<u8>)> {
     let mut patched = Vec::with_capacity(patcher.hint_target_size() as usize);
     patcher.apply(&current_exe, std::io::Cursor::new(&mut patched)).ok()?;
 
-    // ed25519 is best-effort:
-    // - verifies when the client has the matching public key
-    // - if the release is signed but this client can't verify (no/wrong key),
-    //   still accept the patch: HTD1 AES-GCM already authenticated the bytes
-    //   with the baked delta key
+    // ed25519 for the delta path:
+    // - an embedded or remote 64-byte sig that does NOT verify rejects the
+    //   patch outright (caller falls back to the full-download path, which
+    //   enforces signatures strictly);
+    // - no sig at all → still accept the patch: the HTD1 AES-GCM frame
+    //   already authenticated the bytes with the baked delta key.
     let sig_bytes = match resolve_optional_sig(&patched, embedded_sig).await {
-        Some(sig) => sig,
-        None => Vec::new(),
+        Ok(sig) => sig.unwrap_or_default(),
+        // Tampered delta — refuse it and let the caller try the full
+        // download (which will hard-fail if the sig there is also bad).
+        Err(_) => return None,
     };
 
     Some((patched, sig_bytes))
 }
 
-/// Returns a verified 64-byte ed25519 sig when available, else `None`
-/// (caller installs as unsigned). Never fails the update solely because
-/// a signature is present but not verifiable by this build.
-async fn resolve_optional_sig(exe: &[u8], embedded: Option<Vec<u8>>) -> Option<Vec<u8>> {
+/// Resolves the optional ed25519 sig for a delta-patched exe:
+/// - `Ok(Some(sig))` — a 64-byte sig was found and verified;
+/// - `Ok(None)` — no sig exists (embedded nor remote); the caller relies on
+///   HTD1 AEAD authentication instead;
+/// - `Err(())` — a sig EXISTS but does not verify: the payload must be
+///   rejected, never silently downgraded to "unsigned".
+async fn resolve_optional_sig(
+    exe: &[u8],
+    embedded: Option<Vec<u8>>,
+) -> Result<Option<Vec<u8>>, ()> {
     if let Some(sig) = embedded {
-        if sig.len() == ED25519_SIG_LEN && verify_bytes(exe, &sig).is_ok() {
-            return Some(sig);
+        if sig.len() == ED25519_SIG_LEN {
+            return match verify_bytes(exe, &sig) {
+                Ok(()) => Ok(Some(sig)),
+                Err(_) => Err(()),
+            };
         }
     }
     match download_bounded(crate::obf::update_signature_url(), MAX_SIGNATURE_BYTES, 30).await {
-        Ok(remote) if remote.len() == ED25519_SIG_LEN && verify_bytes(exe, &remote).is_ok() => {
-            Some(remote)
-        }
-        _ => None,
+        Ok(remote) if remote.len() == ED25519_SIG_LEN => match verify_bytes(exe, &remote) {
+            Ok(()) => Ok(Some(remote)),
+            Err(_) => Err(()),
+        },
+        _ => Ok(None),
     }
+}
+
+/// True when this build carries a decodable baked ed25519 release key.
+/// Shipped builds always do (build.rs bakes `UPDATE_PUBLIC_KEY_B64`); only
+/// a corrupt/local placeholder build doesn't, and there unsigned staging
+/// stays fail-open so dev builds aren't bricked.
+fn release_key_available() -> bool {
+    BASE64_STANDARD
+        .decode(crate::obf::update_public_key_b64())
+        .ok()
+        .and_then(|raw| <[u8; 32]>::try_from(raw.as_slice()).ok())
+        .and_then(|arr| VerifyingKey::from_bytes(&arr).ok())
+        .is_some()
 }
 
 struct DecryptedDelta {
