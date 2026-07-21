@@ -3,7 +3,7 @@ name = "hexatalk-relay"
 version = "0.1.0"
 edition = "2021"
 description = "Standalone peerseal-compatible WebSocket relay server for HexaTalk"
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-only OR Apache-2.0"
 publish = false
 
 # Standalone crate: NOT a member of the HexaTalk root workspace

@@ -7,6 +7,7 @@ resolver = "2"
 name = "HexaTalk"
 version = "0.1.17"
 edition = "2024"
+license = "GPL-3.0-only"
 
 [dependencies]
 # GUI toolkit: Slint (see ui/*.slint + src/rt.rs). The old iced frontend

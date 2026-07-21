@@ -6,6 +6,7 @@ name = "hexatalk-mobile"
 version = "0.3.0"
 edition = "2021"
 description = "HexaTalk mobile — Rust + Slint (native IME / long-press paste), same Convex backend"
+license = "GPL-3.0-only"
 publish = false
 
 [lib]

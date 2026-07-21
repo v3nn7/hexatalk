@@ -3,7 +3,7 @@ name = "hexatalk-bot"
 version = "0.1.0"
 edition = "2021"
 description = "Headless HexaTalk bot SDK (Convex-backed)"
-license = "MIT"
+license = "Apache-2.0"
 
 [dependencies]
 convex = "0.10"
