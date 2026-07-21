@@ -289,54 +289,43 @@ fn process_stem(name: &str) -> String {
 
 // ---------- OS process listing ----------
 
+/// Enumerate process image names via Toolhelp — **no** `tasklist.exe`.
+/// Spawning `tasklist` every tick flashed a console window under the GUI app.
 #[cfg(windows)]
 fn list_process_names() -> Vec<String> {
-    let output = std::process::Command::new("tasklist")
-        .args(["/FO", "CSV", "/NH"])
-        .output()
-        .ok();
-    let Some(output) = output else {
-        return Vec::new();
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
     };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut names = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Some(name) = csv_first_field(line) {
-            names.push(name);
-        }
-    }
-    names
-}
 
-#[cfg(windows)]
-fn csv_first_field(line: &str) -> Option<String> {
-    let mut chars = line.chars().peekable();
-    if chars.peek() != Some(&'"') {
-        let field = line.split(',').next()?.trim();
-        return (!field.is_empty()).then(|| field.to_string());
-    }
-    chars.next();
-    let mut out = String::new();
-    while let Some(c) = chars.next() {
-        if c == '"' {
-            if chars.peek() == Some(&'"') {
-                chars.next();
-                out.push('"');
-            } else {
-                break;
-            }
-        } else {
-            out.push(c);
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE || snap.is_null() {
+            return Vec::new();
         }
+        let mut entry = std::mem::zeroed::<PROCESSENTRY32W>();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut names = Vec::new();
+        if Process32FirstW(snap, &mut entry) != 0 {
+            loop {
+                let len = entry
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
+                if !name.is_empty() {
+                    names.push(name);
+                }
+                if Process32NextW(snap, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snap);
+        names
     }
-    (!out.is_empty()).then_some(out)
 }
 
 /// Foreground window → process image name (stem).

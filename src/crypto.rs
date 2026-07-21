@@ -326,7 +326,17 @@ pub(crate) struct MessagePayload {
     /// GCM nonce for the attachment blob (base64), if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) att_nonce: Option<String>,
+    /// Random padding (base64) so ciphertext length does not leak body size
+    /// to the server / anyone reading the encrypted history store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pad: Option<String>,
+    /// Envelope version: 2 = length-padded hardened payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) v: Option<u8>,
 }
+
+/// Size buckets for padded E2EE envelopes (bytes of JSON UTF-8).
+const PAD_BUCKETS: &[usize] = &[64, 128, 256, 512, 1024, 2048, 4096, 8192];
 
 impl MessagePayload {
     pub(crate) fn text_only(text: impl Into<String>) -> Self {
@@ -334,16 +344,55 @@ impl MessagePayload {
             text: text.into(),
             att_key: None,
             att_nonce: None,
+            pad: None,
+            v: None,
         }
     }
 
+    /// Legacy unpadded encode (tests / compatibility).
     pub(crate) fn encode(&self) -> String {
         serde_json::to_string(self).expect("MessagePayload serializes")
     }
 
-    pub(crate) fn decode(raw: &str) -> Option<Self> {
-        serde_json::from_str(raw).ok()
+    /// Hardened encode: random pad + size buckets so an observer who only
+    /// sees TKR3/TGK1 ciphertext lengths learns almost nothing about the
+    /// message (short "ok" vs long paragraph look the same up to a bucket).
+    pub(crate) fn encode_hardened(&self) -> String {
+        let mut payload = self.clone();
+        payload.v = Some(2);
+        // Start with 16–48 random bytes; grow until JSON hits the next bucket.
+        let mut pad_bytes = 16 + (OsRng.next_u32() as usize % 33);
+        loop {
+            let mut rnd = vec![0u8; pad_bytes];
+            OsRng.fill_bytes(&mut rnd);
+            payload.pad = Some(BASE64_STANDARD.encode(&rnd));
+            let s = serde_json::to_string(&payload).expect("MessagePayload serializes");
+            let target = next_pad_bucket(s.len());
+            if s.len() >= target || pad_bytes > 16_384 {
+                return s;
+            }
+            // Grow pad so the serialized form reaches the bucket (base64 ~4/3).
+            let need = target.saturating_sub(s.len());
+            pad_bytes += need.div_ceil(3) * 2 + 8;
+        }
     }
+
+    pub(crate) fn decode(raw: &str) -> Option<Self> {
+        let mut p: Self = serde_json::from_str(raw).ok()?;
+        // Never surface padding to the UI / history vault.
+        p.pad = None;
+        Some(p)
+    }
+}
+
+fn next_pad_bucket(len: usize) -> usize {
+    for &b in PAD_BUCKETS {
+        if len <= b {
+            return b;
+        }
+    }
+    // Beyond largest bucket: round up to next 4 KiB.
+    len.div_ceil(4096) * 4096
 }
 
 /// Encrypt raw attachment bytes. Returns (ciphertext, key_b64, nonce_b64).
@@ -1206,6 +1255,17 @@ mod tests {
         assert!(!looks_like_ratchet_blob("hello world"));
         assert!(!looks_like_ratchet_blob("zażółć gęślą jaźń 🐍"));
         assert!(MessagePayload::decode("hello world").is_none());
+    }
+
+    #[test]
+    fn hardened_payload_pads_and_roundtrips() {
+        let p = MessagePayload::text_only("ok");
+        let hard = p.encode_hardened();
+        assert!(hard.len() >= 64, "expected bucket padding, got {}", hard.len());
+        let back = MessagePayload::decode(&hard).unwrap();
+        assert_eq!(back.text, "ok");
+        assert!(back.pad.is_none(), "pad must be stripped after decode");
+        assert_eq!(back.v, Some(2));
     }
 
     #[test]

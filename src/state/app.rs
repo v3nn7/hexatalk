@@ -346,6 +346,8 @@ pub(crate) struct App {
     pub(crate) plus_busy_status: Option<String>,
     pub(crate) plus_checkout_busy: bool,
 
+    /// Pad E2EE message envelopes to fixed size buckets (hides body length).
+    pub(crate) e2ee_pad_messages: bool,
     /// Share detected app activity (Playing Minecraft / Active in …) with others.
     pub(crate) share_activity: bool,
     /// Last locally detected activity label (empty = nothing known).
@@ -594,6 +596,7 @@ impl App {
                 avatar_upload_busy: false,
                 plus_busy_status: None,
                 plus_checkout_busy: false,
+                e2ee_pad_messages: persisted_settings.e2ee_pad_messages.unwrap_or(true),
                 share_activity: persisted_settings.share_activity.unwrap_or(true),
                 current_activity: String::new(),
                 current_activity_icon: String::new(),
@@ -742,6 +745,7 @@ impl App {
                 .map(|gains| gains.clone())
                 .unwrap_or_default(),
             share_activity: Some(self.share_activity),
+            e2ee_pad_messages: Some(self.e2ee_pad_messages),
         });
     }
 
@@ -1505,13 +1509,20 @@ impl App {
                 .to_string()
         })?;
         let aad = crypto::dm_aad(conversation_id, &session.user_id, peer_id);
-        let plain = payload.encode();
+        // Length-padded envelope so ciphertext size does not leak body length.
+        let plain = if self.e2ee_pad_messages {
+            payload.encode_hardened()
+        } else {
+            payload.encode()
+        };
+        // Cache the *semantic* plaintext (no pad) so the UI vault stays clean.
+        let plain_for_cache = payload.encode();
         let ct = ratchet
             .encrypt(&plain, &aad)
             .ok_or_else(|| "Could not encrypt message".to_string())?;
         let data_dir = hexatalk_data_dir();
         let mut cache = crypto::DecryptCache::load(&data_dir, &session.user_id, peer_id);
-        cache.put("", &ct, plain);
+        cache.put("", &ct, plain_for_cache);
         cache.save(&data_dir, &session.user_id, peer_id);
         Ok(ct)
     }

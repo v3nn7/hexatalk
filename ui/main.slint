@@ -269,6 +269,7 @@ export component AppWindow inherits Window {
     in property <bool> settings_hide_online_status: false;
     in property <bool> settings_share_activity: true;
     in property <string> settings_current_activity;
+    in property <bool> settings_e2ee_pad_messages: true;
     in property <bool> settings_friends_only_dms: false;
     in property <bool> settings_discoverable: true;
     in property <string> settings_friend_request_privacy_label;
@@ -321,6 +322,7 @@ export component AppWindow inherits Window {
     callback settings_toggle_store_history;
     callback settings_toggle_hide_online;
     callback settings_toggle_share_activity;
+    callback settings_toggle_e2ee_pad_messages;
     callback settings_toggle_friends_only_dms;
     callback settings_toggle_discoverable;
     callback settings_cycle_friend_request_privacy;
@@ -370,6 +372,7 @@ export component AppWindow inherits Window {
         hide_online_status: root.settings_hide_online_status;
         share_activity: root.settings_share_activity;
         current_activity: root.settings_current_activity;
+        e2ee_pad_messages: root.settings_e2ee_pad_messages;
         friends_only_dms: root.settings_friends_only_dms;
         discoverable: root.settings_discoverable;
         friend_request_privacy_label: root.settings_friend_request_privacy_label;
@@ -416,6 +419,7 @@ export component AppWindow inherits Window {
         toggle_store_history => { root.settings_toggle_store_history(); }
         toggle_hide_online => { root.settings_toggle_hide_online(); }
         toggle_share_activity => { root.settings_toggle_share_activity(); }
+        toggle_e2ee_pad_messages => { root.settings_toggle_e2ee_pad_messages(); }
         toggle_friends_only_dms => { root.settings_toggle_friends_only_dms(); }
         toggle_discoverable => { root.settings_toggle_discoverable(); }
         cycle_friend_request_privacy => { root.settings_cycle_friend_request_privacy(); }

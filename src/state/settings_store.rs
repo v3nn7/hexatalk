@@ -30,6 +30,9 @@ pub(super) struct PersistedSettings {
     /// When true (default), scan local processes and share a Discord-style
     /// "Playing / Active in …" activity on the presence heartbeat + profile.
     pub(super) share_activity: Option<bool>,
+    /// When true (default), pad E2EE payloads to size buckets so the server
+    /// cannot infer message length from ciphertext size.
+    pub(super) e2ee_pad_messages: Option<bool>,
 }
 
 fn settings_file_path() -> std::path::PathBuf {

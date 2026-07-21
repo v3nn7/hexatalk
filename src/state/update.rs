@@ -3888,11 +3888,16 @@ impl App {
                                 self.group_key_store.as_ref().and_then(|s| s.get(&conv))
                             {
                                 let payload = crypto::MessagePayload::text_only(body_to_send);
+                                let wire = if self.e2ee_pad_messages {
+                                    payload.encode_hardened()
+                                } else {
+                                    payload.encode()
+                                };
                                 match crypto::encrypt_group_message(
                                     &key,
                                     epoch,
                                     &conv,
-                                    &payload.encode(),
+                                    &wire,
                                 ) {
                                     Some(ct) => body_to_send = ct,
                                     None => {
@@ -3997,11 +4002,16 @@ impl App {
                         payload.att_nonce = Some(att_nonce);
                         upload_bytes = Some(ct);
                     }
+                    let wire = if self.e2ee_pad_messages {
+                        payload.encode_hardened()
+                    } else {
+                        payload.encode()
+                    };
                     match crypto::encrypt_group_message(
                         &key,
                         epoch,
                         &conversation_id,
-                        &payload.encode(),
+                        &wire,
                     ) {
                         Some(ct) => body_to_send = ct,
                         None => {
@@ -4265,6 +4275,16 @@ impl App {
                     "App activity sharing on"
                 } else {
                     "App activity sharing off"
+                });
+                Task::none()
+            }
+            Message::ToggleE2eePadMessages => {
+                self.e2ee_pad_messages = !self.e2ee_pad_messages;
+                self.persist_settings();
+                self.show_toast(if self.e2ee_pad_messages {
+                    "Hardened E2EE padding on — message lengths hidden"
+                } else {
+                    "E2EE padding off"
                 });
                 Task::none()
             }
@@ -5306,11 +5326,39 @@ impl App {
             }
             Message::AdminStatsUpdated(Ok(stats)) => {
                 self.admin_stats = Some(stats);
-                self.admin_status = None;
+                // Clear stale "loading" noise if the previous error was KPI-related.
+                if self
+                    .admin_status
+                    .as_ref()
+                    .is_some_and(|s| s.contains("admin stats") || s.contains("Could not read"))
+                {
+                    self.admin_status = None;
+                }
                 Task::none()
             }
             Message::AdminStatsUpdated(Err(err)) => {
-                self.admin_status = Some(err);
+                // Fall back to counting the live user list so the KPI bar is
+                // never empty zeros while the list is already populated.
+                if !self.admin_users.is_empty() {
+                    let users = &self.admin_users;
+                    self.admin_stats = Some(crate::state::types::AdminStats {
+                        total_users: users.len() as i64,
+                        online: 0,
+                        banned: users.iter().filter(|u| u.banned).count() as i64,
+                        staff: users
+                            .iter()
+                            .filter(|u| {
+                                matches!(u.role.as_str(), "admin" | "moderator" | "owner")
+                            })
+                            .count() as i64,
+                        bots: 0,
+                        servers: self.servers.len() as i64,
+                    });
+                    self.admin_status =
+                        Some(format!("Stats API: {err} — showing counts from user list"));
+                } else {
+                    self.admin_status = Some(err);
+                }
                 Task::none()
             }
             Message::AdminGrantPlus { user_id, days } => {

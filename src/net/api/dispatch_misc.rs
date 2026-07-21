@@ -53,33 +53,48 @@ pub async fn dispatch(
                 .get("stats")
                 .filter(|s| s.is_object())
                 .unwrap_or(&resp);
+            // IMPORTANT: use jcount (not jf64) — jf64 used to mis-scale small
+            // integers as if they were unix-seconds timestamps (×1000), which
+            // made the admin KPI cards show inflated "fake" numbers.
             ok(Value::Object(BTreeMap::from([
                 (
                     "totalUsers".to_string(),
-                    Value::Float64(jf64(
+                    Value::Float64(jcount(
                         src,
                         &["total_users", "totalUsers", "users", "user_count"],
                     )),
                 ),
                 (
                     "online".to_string(),
-                    Value::Float64(jf64(src, &["online", "online_users", "onlineUsers"])),
+                    Value::Float64(jcount(
+                        src,
+                        &["online", "online_users", "onlineUsers"],
+                    )),
                 ),
                 (
                     "banned".to_string(),
-                    Value::Float64(jf64(src, &["banned", "banned_users", "bannedUsers"])),
+                    Value::Float64(jcount(
+                        src,
+                        &["banned", "banned_users", "bannedUsers"],
+                    )),
                 ),
                 (
                     "staff".to_string(),
-                    Value::Float64(jf64(src, &["staff", "staff_count", "staffCount"])),
+                    Value::Float64(jcount(
+                        src,
+                        &["staff", "staff_count", "staffCount"],
+                    )),
                 ),
                 (
                     "bots".to_string(),
-                    Value::Float64(jf64(src, &["bots", "bot_count", "botCount"])),
+                    Value::Float64(jcount(src, &["bots", "bot_count", "botCount"])),
                 ),
                 (
                     "servers".to_string(),
-                    Value::Float64(jf64(src, &["servers", "server_count", "serverCount"])),
+                    Value::Float64(jcount(
+                        src,
+                        &["servers", "server_count", "serverCount"],
+                    )),
                 ),
             ])))
         }
@@ -467,8 +482,8 @@ pub async fn dispatch(
                     ])));
                 }
             };
-            let expires = jf64(&resp, &["expires_at", "expiresAt"]);
-            let active = jbool(&resp, "active", false) || expires > 0.0;
+            let expires = jtimestamp_ms(&resp, &["expires_at", "expiresAt"]);
+            let active = jbool(&resp, "active", false) || expires > chrono_now_ms();
             ok(Value::Object(BTreeMap::from([
                 ("active".to_string(), Value::Boolean(active)),
                 ("expiresAt".to_string(), Value::Float64(expires)),
@@ -729,7 +744,7 @@ fn admin_user_row(row: &serde_json::Value) -> Value {
     // Temporary ban expiry (ms). Missing / null → 0 (treated as permanent).
     obj.insert(
         "banExpiresAt".to_string(),
-        Value::Float64(jf64(
+        Value::Float64(jtimestamp_ms(
             row,
             &[
                 "ban_expires_at",
@@ -745,12 +760,12 @@ fn admin_user_row(row: &serde_json::Value) -> Value {
     );
     obj.insert(
         "muteExpiresAt".to_string(),
-        Value::Float64(jf64(
+        Value::Float64(jtimestamp_ms(
             row,
             &["mute_expires_at", "muteExpiresAt", "muted_until", "mutedUntil"],
         )),
     );
-    let plus_exp = jf64(
+    let plus_exp = jtimestamp_ms(
         row,
         &["plus_expires_at", "plusExpiresAt", "plus_expires"],
     );
@@ -771,8 +786,12 @@ fn chrono_now_ms() -> f64 {
 
 fn admin_user_detail(c: &ApiClient, user: &serde_json::Value) -> Value {
     let presence = jstr(user, &["presence_status", "presence", "status"]);
-    let last_seen = jf64(user, &["last_seen_at", "lastSeenAt"]);
-    let online = presence == "online" || presence == "Online";
+    let last_seen = jtimestamp_ms(user, &["last_seen_at", "lastSeenAt"]);
+    let online = presence == "online"
+        || presence == "Online"
+        || presence == "idle"
+        || presence == "dnd"
+        || (last_seen > 0.0 && chrono_now_ms() - last_seen < 90_000.0);
 
     let avatar_key = jstr(user, &["avatar_storage_key", "avatarStorageKey"]);
     let avatar_url = if !avatar_key.is_empty() {
@@ -810,7 +829,7 @@ fn admin_user_detail(c: &ApiClient, user: &serde_json::Value) -> Value {
     );
     obj.insert(
         "banExpiresAt".to_string(),
-        Value::Float64(jf64(
+        Value::Float64(jtimestamp_ms(
             user,
             &[
                 "ban_expires_at",
@@ -826,7 +845,7 @@ fn admin_user_detail(c: &ApiClient, user: &serde_json::Value) -> Value {
     );
     obj.insert(
         "muteExpiresAt".to_string(),
-        Value::Float64(jf64(
+        Value::Float64(jtimestamp_ms(
             user,
             &["mute_expires_at", "muteExpiresAt", "muted_until", "mutedUntil"],
         )),
@@ -847,14 +866,17 @@ fn admin_user_detail(c: &ApiClient, user: &serde_json::Value) -> Value {
     obj.insert("avatarImageUrl".to_string(), Value::String(avatar_url));
     obj.insert(
         "createdAt".to_string(),
-        Value::Float64(jf64(user, &["created_at", "createdAt"])),
+        Value::Float64(jtimestamp_ms(user, &["created_at", "createdAt"])),
     );
     obj.insert("online".to_string(), Value::Boolean(online));
     obj.insert("lastSeenAt".to_string(), Value::Float64(last_seen));
     obj.insert("serverNames".to_string(), Value::Array(server_names));
     obj.insert(
         "friendCount".to_string(),
-        Value::Float64(jf64(user, &["friends_count", "friend_count", "friendCount"])),
+        Value::Float64(jcount(
+            user,
+            &["friends_count", "friend_count", "friendCount"],
+        )),
     );
     Value::Object(obj)
 }
@@ -985,7 +1007,7 @@ fn report_row(row: &serde_json::Value) -> Value {
     );
     obj.insert(
         "createdAt".to_string(),
-        Value::Float64(jf64(row, &["created_at", "createdAt"])),
+        Value::Float64(jtimestamp_ms(row, &["created_at", "createdAt"])),
     );
     Value::Object(obj)
 }
@@ -1077,7 +1099,8 @@ fn jbool(v: &serde_json::Value, key: &str, default: bool) -> bool {
     v.get(key).and_then(|x| x.as_bool()).unwrap_or(default)
 }
 
-fn jf64(v: &serde_json::Value, keys: &[&str]) -> f64 {
+/// Raw numeric field (counts, durations, …). Never applies time-unit scaling.
+fn jcount(v: &serde_json::Value, keys: &[&str]) -> f64 {
     for key in keys {
         if let Some(x) = v.get(*key) {
             if let Some(n) = x
@@ -1086,12 +1109,25 @@ fn jf64(v: &serde_json::Value, keys: &[&str]) -> f64 {
                 .or_else(|| x.as_u64().map(|n| n as f64))
                 .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
             {
-                if n > 0.0 && n < 1e11 {
-                    return (n * 1000.0).round();
-                }
                 return n;
             }
         }
     }
     0.0
+}
+
+/// Epoch timestamp as **milliseconds**. Values in the unix-seconds range
+/// (~1e9…1e11) are scaled ×1000; already-ms values (~1e12) pass through.
+fn jtimestamp_ms(v: &serde_json::Value, keys: &[&str]) -> f64 {
+    let n = jcount(v, keys);
+    if n > 1_000_000_000.0 && n < 100_000_000_000.0 {
+        (n * 1000.0).round()
+    } else {
+        n
+    }
+}
+
+/// Alias kept for call sites that want a generic float (counts / non-time).
+fn jf64(v: &serde_json::Value, keys: &[&str]) -> f64 {
+    jcount(v, keys)
 }

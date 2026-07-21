@@ -5,7 +5,7 @@ resolver = "2"
 
 [package]
 name = "HexaTalk"
-version = "0.1.15"
+version = "0.1.16"
 edition = "2024"
 
 [dependencies]
@@ -65,6 +65,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_Media_Multimedia",
     "Win32_Security_Cryptography",
     "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
 ] }
 
 # The tray icon needs a live event loop on whatever thread owns it: a Win32

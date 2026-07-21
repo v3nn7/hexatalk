@@ -590,6 +590,7 @@ struct SettingsRaw {
     plus_checkout_busy: bool,
     share_activity: bool,
     current_activity: String,
+    e2ee_pad_messages: bool,
 }
 
 struct ProfileRaw {
@@ -613,6 +614,8 @@ struct ChatRaw {
     my_avatar_url: String,
     peer_avatar_url: String,
     pending_attachment_preview: Option<std::sync::Arc<[u8]>>,
+    /// When true, DM history uses length-padded TKR3 envelopes.
+    e2ee_pad_messages: bool,
     servers: Vec<ServerSummary>,
     selected_server: Option<ServerSummary>,
     channels: Vec<ChannelSummary>,
@@ -789,6 +792,7 @@ impl UiSnapshot {
             plus_checkout_busy: app.plus_checkout_busy,
             share_activity: app.share_activity,
             current_activity: app.current_activity.clone(),
+            e2ee_pad_messages: app.e2ee_pad_messages,
         });
         let profile = app.session.as_ref().map(|session| ProfileRaw {
             avatar_url: app
@@ -825,6 +829,7 @@ impl UiSnapshot {
                 .pending_attachment
                 .as_ref()
                 .map(|p| Arc::from(p.bytes.clone())),
+            e2ee_pad_messages: app.e2ee_pad_messages,
             servers: app.servers.clone(),
             selected_server: app.selected_server.clone(),
             channels: app.channels.clone(),
@@ -1364,6 +1369,7 @@ fn apply_settings(
     ui.set_settings_hide_online_status(session.hide_online_status);
     ui.set_settings_share_activity(s.share_activity);
     ui.set_settings_current_activity(s.current_activity.clone().into());
+    ui.set_settings_e2ee_pad_messages(s.e2ee_pad_messages);
     ui.set_settings_friends_only_dms(session.friends_only_dms);
     ui.set_settings_discoverable(session.discoverable);
     ui.set_settings_friend_request_privacy_label(
@@ -1954,7 +1960,23 @@ fn apply_chat(
             .as_slice()
             .into(),
     );
-    let stats = c.admin_stats.clone().unwrap_or_default();
+    // Prefer live API stats; if not loaded yet, derive rough KPIs from the
+    // filtered admin user list so the bar never shows stale "fake" zeros
+    // while real users are already on screen.
+    let stats = c.admin_stats.clone().unwrap_or_else(|| {
+        let users = &c.admin_users;
+        crate::state::types::AdminStats {
+            total_users: users.len() as i64,
+            online: 0,
+            banned: users.iter().filter(|u| u.banned).count() as i64,
+            staff: users
+                .iter()
+                .filter(|u| matches!(u.role.as_str(), "admin" | "moderator" | "owner"))
+                .count() as i64,
+            bots: 0,
+            servers: c.servers.len() as i64,
+        }
+    });
     ui.set_chat_admin_total_users(stats.total_users as i32);
     ui.set_chat_admin_online(stats.online as i32);
     ui.set_chat_admin_staff(stats.staff as i32);
@@ -2051,7 +2073,12 @@ fn apply_chat(
                 .and_then(|id| c.peer_transport.get(id))
                 .map(String::as_str)
                 .unwrap_or("?");
-            format!("peerseal · {tr} · {fp}")
+            // Live path is Noise peerseal; history is TKR3 (+ optional pad).
+            if c.e2ee_pad_messages {
+                format!("E2EE · pad · peerseal · {tr} · {fp}")
+            } else {
+                format!("E2EE · peerseal · {tr} · {fp}")
+            }
         } else {
             cur_peer_id
                 .and_then(|id| c.peer_status.get(id))
@@ -3141,6 +3168,10 @@ fn wire_settings_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Messag
     );
     on0!(on_settings_toggle_hide_online, Message::ToggleHideOnline);
     on0!(on_settings_toggle_share_activity, Message::ToggleShareActivity);
+    on0!(
+        on_settings_toggle_e2ee_pad_messages,
+        Message::ToggleE2eePadMessages
+    );
     on0!(
         on_settings_toggle_friends_only_dms,
         Message::ToggleFriendsOnlyDms

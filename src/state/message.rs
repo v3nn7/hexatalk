@@ -291,6 +291,8 @@ pub(crate) enum Message {
     ToggleDiscoverable,
     /// Local-only: share detected app activity (Minecraft / RustRover / …).
     ToggleShareActivity,
+    /// Local-only: pad E2EE payloads to hide message length from the server.
+    ToggleE2eePadMessages,
     PrivacyFlagFinished(Result<(), String>),
     SignOutOtherSessions,
     SignOutOthersFinished(Result<u32, String>),

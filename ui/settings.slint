@@ -151,6 +151,7 @@ export component SettingsScreen inherits Rectangle {
     in property <bool> hide_online_status: false;
     in property <bool> share_activity: true;
     in property <string> current_activity;
+    in property <bool> e2ee_pad_messages: true;
     in property <bool> friends_only_dms: false;
     in property <bool> discoverable: true;
     in property <string> friend_request_privacy_label;
@@ -210,6 +211,7 @@ export component SettingsScreen inherits Rectangle {
     callback toggle_store_history;
     callback toggle_hide_online;
     callback toggle_share_activity;
+    callback toggle_e2ee_pad_messages;
     callback toggle_friends_only_dms;
     callback toggle_discoverable;
     callback cycle_friend_request_privacy;
@@ -456,7 +458,13 @@ export component SettingsScreen inherits Rectangle {
                                     if root.my_badge_text == "": Text { text: "none"; font-size: 11px; color: Theme.text-muted; vertical-alignment: center; }
                                 }
                                 Divider {}
-                                ToggleRow { title: "Chat history storage"; description: "Off = live-only (peerseal); nothing saved on Convex for chats you're in."; value: root.store_chat_history; toggled => { root.toggle_store_history(); } }
+                                ToggleRow { title: "Chat history storage"; description: "Off = live-only (peerseal); nothing saved on the server for chats you're in."; value: root.store_chat_history; toggled => { root.toggle_store_history(); } }
+                                ToggleRow {
+                                    title: "Hardened E2EE padding";
+                                    description: "Pad encrypted messages to fixed size buckets so the server cannot guess message length from ciphertext size. On by default.";
+                                    value: root.e2ee_pad_messages;
+                                    toggled => { root.toggle_e2ee_pad_messages(); }
+                                }
                                 ToggleRow { title: "Hide online status"; description: "Others see you as offline (you still receive messages)."; value: root.hide_online_status; toggled => { root.toggle_hide_online(); } }
                                 ToggleRow {
                                     title: "Share detected app activity";
