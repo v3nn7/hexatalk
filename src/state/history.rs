@@ -61,8 +61,9 @@ where
 }
 
 fn hexatalk_dir() -> PathBuf {
-    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(base).join("HexaTalk")
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("HexaTalk")
 }
 
 fn vault_dir(owner_user_id: &str) -> PathBuf {

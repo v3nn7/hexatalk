@@ -92,8 +92,8 @@ pub(crate) fn is_peerseal_host(local_user_id: &str, peer_user_id: &str) -> bool 
 }
 
 fn peerseal_identity_path(user_id: &str) -> PathBuf {
-    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(base)
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
         .join("HexaTalk")
         .join(format!("peerseal_{user_id}.key"))
 }

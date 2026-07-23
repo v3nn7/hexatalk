@@ -3,26 +3,27 @@
 //! restart), and the on-disk E2EE identity keypair (generated once per
 //! account, never uploaded).
 
-use std::env;
-
 use crate::crypto;
 use crate::net::api::ApiClient;
 use crate::net::rt::Task;
 use crate::state::message::Message;
 use crate::state::types::Session;
 
+pub(super) fn hexatalk_data_dir() -> std::path::PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("HexaTalk")
+}
+
+fn session_file_path() -> std::path::PathBuf {
+    hexatalk_data_dir().join("session.txt")
+}
+
 pub(super) fn connect_task(deployment_url: String) -> Task<Message> {
     Task::perform(
         async move { ApiClient::new(&deployment_url) },
         Message::Connected,
     )
-}
-
-fn session_file_path() -> std::path::PathBuf {
-    let base = env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-    std::path::Path::new(&base)
-        .join("HexaTalk")
-        .join("session.txt")
 }
 
 pub(super) fn save_session_to_disk(session: &Session) {
@@ -44,11 +45,6 @@ pub(super) fn load_session_token_from_disk() -> Option<String> {
 
 pub(super) fn clear_session_file() {
     let _ = std::fs::remove_file(session_file_path());
-}
-
-pub(super) fn hexatalk_data_dir() -> std::path::PathBuf {
-    let base = env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-    std::path::Path::new(&base).join("HexaTalk")
 }
 
 fn identity_key_path(user_id: &str) -> std::path::PathBuf {
