@@ -196,6 +196,16 @@ setx PEERSEAL_RELAY "wss://relay.twojadomena.pl"
 
 (Uwaga: `is_transient_relay_error` w aplikacji traktuje m.in. `close_notify` / `unexpected EOF` jako retryable — częste przy proxy zrywających idle WSS; nasz serwer wysyła ping co 25 s, co temu zapobiega.)
 
+## Inwariant bezpieczeństwa: relay nigdy nie widzi treści
+
+Relay jest **ślepy na treść** (ciphertext-blind) — to nie jest opis "na oko", tylko sprawdzana testem właściwość:
+
+- Każda ramka `Binary` od jednego peera trafia do pozostałych **bez żadnego parsowania/deserializacji** — patrz `broadcast()` w `main.rs`, wywoływane bezpośrednio z pętli odczytu.
+- Ramki `Text` **od klienta** są zawsze odrzucane (licznik `text_dropped`), więc złośliwy peer nie może wstrzyknąć fałszywej linii statusu (`✅`/`⏳`/`❌`) do cudzej sesji — jedyny tekst na kablu generuje sam serwer.
+- Logi (`debug!`/`info!`/`warn!`) niosą wyłącznie metadane — `peer_id`, `room_id`, liczniki (`count`, `bytes_in`, `remaining`, `text_dropped`) — **nigdy treść ramki**. Żadne wywołanie logujące nie formatuje bajtów payloadu.
+
+Test `tests::relay_forwards_binary_verbatim_drops_client_text_never_logs_payload` (`src/main.rs`) to weryfikuje end-to-end na realnym listenerze i dwóch klientach WebSocket: wstrzykuje unikalny "kanarek" w ramkę binarną (musi dotrzeć 1:1 do drugiego peera) i w ramkę tekstową (nie może dotrzeć wcale), po czym przechwytuje cały output `tracing` z tego przebiegu i asercjonuje, że kanarek nigdze w logach się nie pojawił. Uruchom: `cargo test` w tym katalogu.
+
 ## Szybki test po wdrożeniu
 
 ```bash

@@ -33,6 +33,14 @@ pub(super) struct PersistedSettings {
     /// When true (default), pad E2EE payloads to size buckets so the server
     /// cannot infer message length from ciphertext size.
     pub(super) e2ee_pad_messages: Option<bool>,
+    /// Per-conversation disappearing-messages TTL, in seconds (conversation
+    /// id -> seconds; absent or 0 = off). Enforced locally and
+    /// best-effort: whichever client has the conversation open with a
+    /// running session issues the delete once a message ages past this,
+    /// via the same `messages:remove` mutation manual deletion uses -- the
+    /// wire protocol (`crates/reprotocol`, frozen) has no TTL field to
+    /// enforce this any other way.
+    pub(super) chat_ttl_seconds: HashMap<String, i64>,
 }
 
 fn settings_file_path() -> std::path::PathBuf {

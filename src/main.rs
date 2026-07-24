@@ -76,10 +76,34 @@ const QUICK_REACT_EMOJIS: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢",
 /// versions, so it keeps the pre-rebrand name on purpose.
 const PEER_CLEAR_HISTORY_CTRL: &str = "\u{001e}TALKYSS_CLEAR_HISTORY\u{001e}";
 
+/// Marks a message body as a voice note. The `messages:list` REST shape
+/// (see `net/api/dispatch_conv.rs` module doc) has no attachment
+/// content-type field at all -- only `attachmentUrl` -- so there is no
+/// backend-provided way to tell a voice note apart from any other
+/// attachment on the receiving end. Same trick as
+/// `PEER_CLEAR_HISTORY_CTRL` above: encode it in the one field that *is*
+/// guaranteed to round-trip end-to-end, wrapped in a control character so
+/// it can never collide with real user text.
+const VOICE_NOTE_BODY_TAG: &str = "\u{1}HEXATALK_VOICE_NOTE\u{1}";
+
 /// Defensive cap on how many background peerseal sessions run at once (one
 /// per online friend) — bounds concurrent Noise/relay connections for
 /// accounts with very large friends lists.
 const MAX_BACKGROUND_PEER_SESSIONS: usize = 25;
+
+/// Validates `API_URL` at startup. Shipped builds must only talk to HTTPS
+/// backends; a plaintext/HTTP override is rejected so a rogue `.env.local`
+/// cannot silently downgrade traffic.
+fn validate_api_url(raw: &str) -> Result<&str, &'static str> {
+    let trimmed = raw.trim();
+    if !(trimmed.starts_with("https://") || trimmed.starts_with("http://localhost:") || trimmed.starts_with("http://127.0.0.1:")) {
+        return Err("URL must start with https:// (local dev defaults to https://api.vyrapp.pro)");
+    }
+    if let Err(_) = url::Url::parse(trimmed) {
+        return Err("invalid URL");
+    }
+    Ok(trimmed)
+}
 
 /// Loopback port used purely as a single-instance lock + IPC channel for
 /// `vyrapp://` deep links -- whichever process wins the bind is "the" running
@@ -320,6 +344,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Missing API_URL (baked at compile time from .env.local). Rebuild the app.");
         std::process::exit(1);
     }
+    let deployment_url = match validate_api_url(&deployment_url) {
+        Ok(u) => u.to_string(),
+        Err(err) => {
+            eprintln!("Bad API_URL: {err}");
+            std::process::exit(1);
+        }
+    };
     eprintln!("HexaTalk backend: {deployment_url}");
 
     // UI fonts are embedded at Slint compile time (see the `import "*.ttf"`
@@ -555,6 +586,7 @@ struct ServerSettingsRaw {
     role_name_edit_input: String,
     confirm_delete_role_id: Option<String>,
     confirm_delete_server: bool,
+    invite_qr_visible: bool,
 }
 
 struct SettingsRaw {
@@ -669,6 +701,12 @@ struct ChatRaw {
     peer_sas: std::collections::HashMap<String, String>,
     peer_transport: std::collections::HashMap<String, String>,
     peer_remote_fp: std::collections::HashMap<String, String>,
+    peer_trust_badge: std::collections::HashMap<String, crate::state::trust::TrustBadge>,
+    qr_scan_active: bool,
+    qr_scan_preview: Option<std::sync::Arc<[u8]>>,
+    qr_scan_error: Option<String>,
+    chat_ttl_seconds: std::collections::HashMap<String, i64>,
+    voice_note_recording: bool,
     chat_store_enabled: bool,
     chat_store_allowed: bool,
     clear_chat_busy: bool,
@@ -755,6 +793,7 @@ impl UiSnapshot {
                 role_name_edit_input: app.role_name_edit_input.clone(),
                 confirm_delete_role_id: app.confirm_delete_role_id.clone(),
                 confirm_delete_server: app.confirm_delete_server,
+                invite_qr_visible: app.invite_qr_visible,
             });
         let settings = app.session.as_ref().map(|session| SettingsRaw {
             session: session.clone(),
@@ -883,6 +922,12 @@ impl UiSnapshot {
             peer_sas: app.peer_sas.clone(),
             peer_transport: app.peer_transport.clone(),
             peer_remote_fp: app.peer_remote_fp.clone(),
+            peer_trust_badge: app.peer_trust_badge.clone(),
+            qr_scan_active: app.qr_scan_active,
+            qr_scan_preview: app.qr_scan_preview.clone(),
+            qr_scan_error: app.qr_scan_error.clone(),
+            chat_ttl_seconds: app.chat_ttl_seconds.clone(),
+            voice_note_recording: app.voice_note_recording,
             chat_store_enabled: app.chat_store_enabled,
             chat_store_allowed: app.chat_store_allowed,
             clear_chat_busy: app.clear_chat_busy,
@@ -1299,6 +1344,20 @@ fn apply_server_settings(
     ui.set_ss_confirm_delete_role(s.confirm_delete_role_id.is_some());
 
     ui.set_ss_invite_code(server.invite_code.clone().into());
+    ui.set_ss_invite_qr_visible(s.invite_qr_visible);
+    // Rendered on this (the Slint UI) thread -- `slint::Image` isn't `Send`,
+    // same constraint as `img_cache::decode`. Only computed while the panel
+    // is actually open; encoding a short invite code as a QR is cheap
+    // (microseconds), so no cache is needed here unlike the avatar/
+    // attachment path in img_cache.rs.
+    ui.set_ss_invite_qr_image(
+        if s.invite_qr_visible && !server.invite_code.is_empty() {
+            crate::media::qr::render_invite_qr(&format!("hexatalk://invite/{}", server.invite_code))
+                .unwrap_or_default()
+        } else {
+            Default::default()
+        },
+    );
     ui.set_ss_confirm_delete_server(s.confirm_delete_server);
 }
 
@@ -1599,6 +1658,18 @@ fn channel_row_eq(a: &slint_ui::ChannelRow, b: &slint_ui::ChannelRow) -> bool {
         && a.category_id == b.category_id
 }
 
+/// Header-button label for the disappearing-messages TTL cycle
+/// (`Message::CycleChatTtl`). Kept as a small lookup rather than dynamic
+/// formatting so the four values always match the cycle exactly.
+fn ttl_label(seconds: i64) -> &'static str {
+    match seconds {
+        3600 => "Disappear: 1h",
+        86_400 => "Disappear: 24h",
+        604_800 => "Disappear: 7d",
+        _ => "Disappear: off",
+    }
+}
+
 fn friend_row_eq(a: &slint_ui::FriendRow, b: &slint_ui::FriendRow) -> bool {
     // `photo` is patched into the live model after the rows are set (see
     // fill_model_photos) and stays empty in both the fresh rows and the
@@ -1613,6 +1684,7 @@ fn friend_row_eq(a: &slint_ui::FriendRow, b: &slint_ui::FriendRow) -> bool {
         && a.photo_url == b.photo_url
         && a.online == b.online
         && a.favorite == b.favorite
+        && a.trust_badge == b.trust_badge
 }
 
 fn member_row_eq(a: &slint_ui::MemberRow, b: &slint_ui::MemberRow) -> bool {
@@ -1838,6 +1910,14 @@ fn apply_chat(
     ui.set_chat_sidebar_width(c.channel_list_width);
     ui.set_chat_new_server_name(c.new_server_name_input.clone().into());
     ui.set_chat_join_server_code(c.join_server_code_input.clone().into());
+    ui.set_chat_qr_scan_active(c.qr_scan_active);
+    ui.set_chat_qr_scan_error(c.qr_scan_error.clone().unwrap_or_default().into());
+    ui.set_chat_qr_scan_preview(
+        c.qr_scan_preview
+            .as_deref()
+            .and_then(img_cache::decode)
+            .unwrap_or_default(),
+    );
     ui.set_chat_server_status(c.server_status.clone().unwrap_or_default().into());
     ui.set_chat_new_group_open(c.new_group_open);
     ui.set_chat_new_group_name(c.new_group_name_input.clone().into());
@@ -1892,7 +1972,11 @@ fn apply_chat(
         })
         .cloned()
         .collect();
-    ui.set_chat_friends(viewmodel::friend_rows(&filtered_friends).as_slice().into());
+    ui.set_chat_friends(
+        viewmodel::friend_rows(&filtered_friends, &c.peer_trust_badge)
+            .as_slice()
+            .into(),
+    );
     ui.set_chat_blocked(viewmodel::blocked_rows(&c.blocked).as_slice().into());
     ui.set_chat_confirm_block_user_id(c.confirm_block_user_id.clone().unwrap_or_default().into());
     ui.set_chat_friend_request_busy(c.friend_request_busy);
@@ -2093,10 +2177,28 @@ fn apply_chat(
                 .unwrap_or_default()
                 .into(),
         );
+        ui.set_chat_trust_badge(
+            match cur_peer_id.and_then(|id| c.peer_trust_badge.get(id)) {
+                Some(crate::state::trust::TrustBadge::Verified) => "verified",
+                Some(crate::state::trust::TrustBadge::FingerprintChanged { .. }) => "changed",
+                Some(crate::state::trust::TrustBadge::Unverified) | None => "",
+            }
+            .into(),
+        );
     } else {
         ui.set_chat_connection_label("".into());
         ui.set_chat_sas_label("".into());
+        ui.set_chat_trust_badge("".into());
     }
+    ui.set_chat_voice_note_recording(c.voice_note_recording);
+    ui.set_chat_ttl_label(
+        c.active_conversation
+            .as_deref()
+            .map(|id| c.chat_ttl_seconds.get(id).copied().unwrap_or(0))
+            .map(ttl_label)
+            .unwrap_or("Disappear: off")
+            .into(),
+    );
     ui.set_chat_show_call_button(is_direct && c.my_call.is_none());
     let is_server_channel = matches!(
         c.active_conversation_kind.as_deref(),
@@ -2418,7 +2520,7 @@ fn apply_chat(
                         dirty = true;
                     }
                 }
-                if !row.attachment_url.is_empty() {
+                if !row.attachment_url.is_empty() && !row.is_voice_note {
                     if let Some(img) = img_cache::image_for(cache, &row.attachment_url) {
                         if row.attachment.size() != img.size() || row.attachment_loading {
                             row.attachment = img;
@@ -2740,6 +2842,8 @@ fn wire_chat_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Message>) 
         |t: slint::SharedString| Message::JoinServerCodeChanged(t.to_string())
     );
     on0!(on_chat_join_server, Message::JoinServer);
+    on0!(on_chat_start_qr_scan, Message::StartQrScan);
+    on0!(on_chat_stop_qr_scan, Message::StopQrScan);
 
     // ---- Sidebar: Chats tab ----
     on0!(on_chat_toggle_group_panel, Message::ToggleGroupPanel);
@@ -2948,6 +3052,8 @@ fn wire_chat_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Message>) 
 
     // ---- Chat area ----
     on0!(on_chat_start_call, Message::StartCall);
+    on0!(on_chat_confirm_sas_verified, Message::ConfirmSasVerified);
+    on0!(on_chat_cycle_ttl, Message::CycleChatTtl);
     on0!(on_chat_toggle_store, Message::ToggleStoreHistoryThisChat);
     on0!(on_chat_toggle_channel_mute, Message::ToggleChannelMute);
     on0!(
@@ -2968,6 +3074,8 @@ fn wire_chat_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Message>) 
     });
     on0!(on_chat_send, Message::SendMessage);
     on0!(on_chat_pick_attachment, Message::PickAttachmentImage);
+    on0!(on_chat_start_voice_note, Message::VoiceNoteRecordStart);
+    on0!(on_chat_stop_voice_note, Message::VoiceNoteRecordStop);
     on0!(on_chat_remove_attachment, Message::RemovePendingAttachment);
     on0!(on_chat_cancel_edit, Message::CancelEdit);
     on0!(on_chat_cancel_reply, Message::CancelReply);
@@ -2999,6 +3107,9 @@ fn wire_chat_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender<Message>) 
     });
     on1!(on_chat_open_attachment, |url: slint::SharedString| {
         Message::OpenAttachmentPreview(url.to_string())
+    });
+    on1!(on_chat_play_voice_note, |url: slint::SharedString| {
+        Message::PlayVoiceNoteAttachment(url.to_string())
     });
     on1!(on_chat_report, |id: slint::SharedString| {
         Message::ArmReportMessage(id.to_string())
@@ -3390,6 +3501,8 @@ fn wire_server_settings_callbacks(ui: &slint_ui::AppWindow, tx: &UnboundedSender
         Message::CopyInviteLink(code.to_string())
     });
     on0!(on_ss_regenerate_invite_code, Message::RegenerateInviteCode);
+    on0!(on_ss_show_invite_qr, Message::SetInviteQrVisible(true));
+    on0!(on_ss_hide_invite_qr, Message::SetInviteQrVisible(false));
     on0!(
         on_ss_toggle_confirm_delete_server,
         Message::ToggleConfirmDeleteServer

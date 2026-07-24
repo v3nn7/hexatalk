@@ -15,7 +15,7 @@ use maplit::btreemap;
 use crate::net::rt::write_clipboard_text;
 use crate::net::rt::{Task, WindowAction};
 
-use crate::{AVATAR_PALETTE, PEER_CLEAR_HISTORY_CTRL, scroll_chat_to_bottom};
+use crate::{AVATAR_PALETTE, PEER_CLEAR_HISTORY_CTRL, VOICE_NOTE_BODY_TAG, scroll_chat_to_bottom};
 
 use crate::crypto;
 use crate::media::call;
@@ -47,6 +47,21 @@ use crate::update_check::{UpdateOutcome, check_for_update_task, stage_exe_swap};
 /// invite code; `extract_invite_code` accepts either form pasted back in.
 fn build_invite_link(code: &str) -> String {
     format!("hexatalk://invite/{code}")
+}
+
+/// Disappearing-messages TTL cycle: off -> 1h -> 24h -> 7d -> off. `current`
+/// need not be one of the four values (e.g. a value written by a future
+/// build with a fifth step) -- anything unrecognized falls back to
+/// treating the cycle as "off", so clicking the header button always
+/// advances to 1h rather than getting stuck.
+fn next_ttl_seconds(current: i64) -> i64 {
+    const CYCLE_SECONDS: [i64; 4] = [0, 3600, 86_400, 604_800];
+    let next_index = CYCLE_SECONDS
+        .iter()
+        .position(|&s| s == current)
+        .map(|i| (i + 1) % CYCLE_SECONDS.len())
+        .unwrap_or(1);
+    CYCLE_SECONDS[next_index]
 }
 
 /// Discord-style text-channel name slug: lowercase, whitespace becomes
@@ -2278,6 +2293,44 @@ impl App {
                 self.server_status = Some(err);
                 Task::none()
             }
+            Message::StartQrScan => {
+                self.qr_scan_active = true;
+                self.qr_scan_preview = None;
+                self.qr_scan_error = None;
+                Task::none()
+            }
+            Message::StopQrScan => {
+                // The `qr-scan` job (see `App::subscription`) drops out of
+                // the desired set on the next reconcile and releases the
+                // camera then -- nothing else to tear down here.
+                self.qr_scan_active = false;
+                self.qr_scan_preview = None;
+                self.qr_scan_error = None;
+                Task::none()
+            }
+            Message::QrScanPreview(jpeg) => {
+                self.qr_scan_preview = Some(std::sync::Arc::from(jpeg));
+                Task::none()
+            }
+            Message::QrScanDecoded(content) => {
+                self.qr_scan_active = false;
+                self.qr_scan_preview = None;
+                self.qr_scan_error = None;
+                // Reuse the exact manual-entry path (`extract_invite_code`
+                // + `servers:joinByInviteCode`) instead of duplicating it --
+                // a scanned `hexatalk://invite/<code>` link parses through
+                // it unchanged.
+                self.join_server_code_input = content;
+                Task::done(Message::JoinServer)
+            }
+            Message::QrScanError(err) => {
+                // Overlay stays open (so the error + "Cancel" are visible)
+                // but the job stops being re-desired -- see the comment on
+                // `qr_scan_error.is_none()` in `App::subscription`.
+                self.qr_scan_preview = None;
+                self.qr_scan_error = Some(err);
+                Task::none()
+            }
             Message::GoHome => {
                 self.selected_server = None;
                 self.channels.clear();
@@ -2682,6 +2735,10 @@ impl App {
             Message::CopyInviteLink(code) => {
                 self.show_toast("Invite link copied");
                 write_clipboard_text(build_invite_link(&code));
+                Task::none()
+            }
+            Message::SetInviteQrVisible(visible) => {
+                self.invite_qr_visible = visible;
                 Task::none()
             }
             Message::ChannelsUpdated(channels) => {
@@ -3703,6 +3760,95 @@ impl App {
                 Task::none()
             }
 
+            Message::VoiceNoteRecordStart => {
+                if self.voice_note_recording {
+                    return Task::none();
+                }
+                self.voice_note_recording = true;
+                self.chat_error = None;
+                let slot = self.voice_note_slot.clone();
+                let device_name = self.settings_input_device.clone();
+                Task::perform(
+                    async move {
+                        let result =
+                            tokio::task::spawn_blocking(move || {
+                                crate::media::voice_note::VoiceNoteRecorder::start(device_name)
+                            })
+                            .await
+                            .unwrap_or_else(|e| Err(format!("recorder task panicked: {e}")));
+                        match result {
+                            Ok(recorder) => {
+                                if let Ok(mut guard) = slot.lock() {
+                                    *guard = Some(recorder);
+                                }
+                                Ok(())
+                            }
+                            Err(err) => Err(err),
+                        }
+                    },
+                    Message::VoiceNoteRecordStarted,
+                )
+            }
+            Message::VoiceNoteRecordStarted(Ok(())) => Task::none(),
+            Message::VoiceNoteRecordStarted(Err(err)) => {
+                self.voice_note_recording = false;
+                self.chat_error = Some(err);
+                Task::none()
+            }
+            Message::VoiceNoteRecordStop => {
+                self.voice_note_recording = false;
+                let slot = self.voice_note_slot.clone();
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let recorder = slot.lock().ok().and_then(|mut g| g.take());
+                            recorder.and_then(|r| r.stop())
+                        })
+                        .await
+                        .unwrap_or(None)
+                    },
+                    Message::VoiceNoteRecordStopped,
+                )
+            }
+            Message::VoiceNoteRecordCancel => {
+                self.voice_note_recording = false;
+                let slot = self.voice_note_slot.clone();
+                Task::perform(
+                    async move {
+                        let _ = tokio::task::spawn_blocking(move || {
+                            let recorder = slot.lock().ok().and_then(|mut g| g.take());
+                            // Stop and discard -- still joins the recorder
+                            // thread cleanly, just doesn't attach the result.
+                            recorder.and_then(|r| r.stop())
+                        })
+                        .await;
+                    },
+                    |()| Message::VoiceNoteRecordCancelled,
+                )
+            }
+            Message::VoiceNoteRecordCancelled => Task::none(),
+            Message::PlayVoiceNoteAttachment(url) => {
+                if let Some(bytes) = self.avatar_image_cache.get(&url) {
+                    crate::media::notify::play_voice_note(bytes.to_vec());
+                }
+                Task::none()
+            }
+            Message::VoiceNoteRecordStopped(None) => Task::none(),
+            Message::VoiceNoteRecordStopped(Some(wav_bytes)) => {
+                // Same 5MB ceiling the manual file-picker enforces
+                // (`AttachmentPick::TooLarge` below) -- `MAX_DURATION` in
+                // `voice_note.rs` is sized to stay under this at typical
+                // sample rates, but a high-rate pro-audio interface could
+                // still exceed it, so check for real rather than trust it.
+                if wav_bytes.len() > 5 * 1024 * 1024 {
+                    return Task::done(Message::AttachmentFilePicked(AttachmentPick::TooLarge));
+                }
+                Task::done(Message::AttachmentFilePicked(AttachmentPick::Ready(
+                    wav_bytes,
+                    "audio/wav".to_string(),
+                )))
+            }
+
             Message::SendMessage => {
                 let Some(client) = self.client.clone() else {
                     return Task::none();
@@ -3719,6 +3865,21 @@ impl App {
                     self.chat_error = Some("Message is too long (max 4000 characters)".to_string());
                     return Task::none();
                 }
+                // Voice notes are sent standalone: the body carries the
+                // detection tag instead of whatever's in the text field
+                // (see `VOICE_NOTE_BODY_TAG`'s doc comment for why the body
+                // is the only place this can be signaled at all). Simpler
+                // than supporting "text + voice note in one message" for a
+                // combination the recording flow doesn't produce anyway.
+                let body = if self
+                    .pending_attachment
+                    .as_ref()
+                    .is_some_and(|a| a.content_type == "audio/wav")
+                {
+                    VOICE_NOTE_BODY_TAG.to_string()
+                } else {
+                    body
+                };
                 let is_direct = self.active_conversation_kind.as_deref() == Some("direct");
 
                 // Direct chats: live peerseal (Noise E2EE) for realtime, plus
@@ -3979,7 +4140,19 @@ impl App {
                 } else {
                     None
                 };
-                if groupish && group_key.is_none() {
+                // DM groups: E2EE is expected to work, so block-and-retry
+                // rather than silently leak plaintext. Server channels
+                // (`channel`/`voice`) currently can NEVER bootstrap a group
+                // key -- the backend doesn't return member public keys for
+                // that conversation kind yet (see the `GroupKeyReady(Err)`
+                // handler's comment) -- so blocking here the same way used
+                // to wedge every channel send behind a key that could never
+                // arrive. Fall through to plaintext for those instead,
+                // matching the "silent fallback" the Err handler already
+                // does; `ensure_group_key()` still runs in the background
+                // so a channel picks up E2EE automatically if that backend
+                // limitation is ever lifted.
+                if kind == "group" && group_key.is_none() {
                     self.pending_attachment = attachment;
                     self.pending_reply = reply_to;
                     self.chat_error = Some(
@@ -4635,6 +4808,14 @@ impl App {
                         self.room_voice_status = Some(err.clone());
                         self.chat_error = Some(err);
                     }
+                    RoomVoiceEvent::RoomFull => {
+                        let msg = format!(
+                            "Voice room is full (max {} people)",
+                            crate::media::room_voice::MAX_ROOM_PARTICIPANTS
+                        );
+                        self.room_voice_status = Some(msg.clone());
+                        self.chat_error = Some(msg);
+                    }
                 }
                 Task::none()
             }
@@ -4650,8 +4831,18 @@ impl App {
                 if let Some(store) = self.group_key_store.as_mut() {
                     store.put(&conversation_id, epoch, key);
                 }
-                // Re-run decrypt on messages already in the buffer.
                 if self.active_conversation.as_deref() == Some(conversation_id.as_str()) {
+                    // Clear the "waiting for key" banner (set in
+                    // `Message::SendMessage`) now that one actually arrived --
+                    // nothing else ever cleared it, so a successful bootstrap
+                    // still left the red error showing until something
+                    // unrelated happened to reset `chat_error`.
+                    if self.chat_error.as_deref()
+                        == Some("Encrypting… group key not ready yet. Wait a second or reopen the chat.")
+                    {
+                        self.chat_error = None;
+                    }
+                    // Re-run decrypt on messages already in the buffer.
                     let msgs = std::mem::take(&mut self.messages);
                     self.messages = self.decrypt_incoming_messages(msgs);
                 }
@@ -5843,7 +6034,7 @@ impl App {
                 } else {
                     String::new()
                 };
-                Task::perform(
+                let heartbeat = Task::perform(
                     async move {
                         let mut args = btreemap! {
                             "sessionToken".to_string() => Value::String(session.token),
@@ -5859,7 +6050,30 @@ impl App {
                             .and_then(expect_null)
                     },
                     |_| Message::HeartbeatFinished,
-                )
+                );
+
+                // Disappearing messages: best-effort, local-only enforcement
+                // (the wire protocol can't carry a TTL -- see `chat_ttl_seconds`
+                // doc comment). Only the currently-open conversation is swept;
+                // whichever side has it open with a running client is the one
+                // that actually issues the delete, same as a manual delete
+                // would. Reuses `messages:remove` (via `Message::DeleteMessage`)
+                // unchanged -- no new backend call.
+                let mut tasks = vec![heartbeat];
+                if let Some(conv_id) = self.active_conversation.clone() {
+                    if let Some(&ttl_secs) = self.chat_ttl_seconds.get(&conv_id) {
+                        if ttl_secs > 0 {
+                            let now_ms = chrono::Utc::now().timestamp_millis();
+                            let cutoff_ms = ttl_secs.saturating_mul(1000);
+                            for msg in &self.messages {
+                                if !msg.deleted && now_ms.saturating_sub(msg.sent_at) > cutoff_ms {
+                                    tasks.push(Task::done(Message::DeleteMessage(msg.id.clone())));
+                                }
+                            }
+                        }
+                    }
+                }
+                Task::batch(tasks)
             }
             Message::HeartbeatFinished => Task::none(),
 
@@ -6235,6 +6449,49 @@ impl App {
             }
             Message::ChannelMuteFinished(Err(err)) => {
                 self.chat_error = Some(err);
+                Task::none()
+            }
+            Message::SetChatTtl(conversation_id, seconds) => {
+                if seconds > 0 {
+                    self.chat_ttl_seconds.insert(conversation_id, seconds);
+                } else {
+                    self.chat_ttl_seconds.remove(&conversation_id);
+                }
+                self.persist_settings();
+                Task::none()
+            }
+            Message::CycleChatTtl => {
+                let Some(conv_id) = self.active_conversation.clone() else {
+                    return Task::none();
+                };
+                let current = self.chat_ttl_seconds.get(&conv_id).copied().unwrap_or(0);
+                let next = next_ttl_seconds(current);
+                if next > 0 {
+                    self.chat_ttl_seconds.insert(conv_id, next);
+                } else {
+                    self.chat_ttl_seconds.remove(&conv_id);
+                }
+                self.persist_settings();
+                Task::none()
+            }
+            Message::ConfirmSasVerified => {
+                let Some(peer_id) = self.active_conversation_peer_id.clone() else {
+                    return Task::none();
+                };
+                let Some(fingerprint) = self.peer_remote_fp.get(&peer_id).cloned() else {
+                    // No live session yet — nothing to compare against.
+                    return Task::none();
+                };
+                match self.verified_peers.mark_verified(&peer_id, &fingerprint) {
+                    Ok(()) => {
+                        self.peer_trust_badge
+                            .insert(peer_id, crate::state::trust::TrustBadge::Verified);
+                        self.show_toast("Verified — SAS matches");
+                    }
+                    Err(err) => {
+                        self.chat_error = Some(format!("Could not save verification: {err}"));
+                    }
+                }
                 Task::none()
             }
             Message::ToggleShareViewSize => {
@@ -7063,5 +7320,36 @@ impl App {
                 Task::none()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ttl_cycle_advances_through_all_four_steps_and_wraps() {
+        let off = 0;
+        let one_hour = next_ttl_seconds(off);
+        assert_eq!(one_hour, 3600);
+        let one_day = next_ttl_seconds(one_hour);
+        assert_eq!(one_day, 86_400);
+        let one_week = next_ttl_seconds(one_day);
+        assert_eq!(one_week, 604_800);
+        let wrapped = next_ttl_seconds(one_week);
+        assert_eq!(wrapped, 0, "cycle must wrap back to off after 7d");
+    }
+
+    #[test]
+    fn unrecognized_current_value_advances_to_one_hour_not_stuck() {
+        // A value from some future extra step, or plain corrupt state --
+        // must never get stuck ignoring the button.
+        assert_eq!(next_ttl_seconds(42), 3600);
+    }
+
+    #[test]
+    fn invite_link_matches_the_scheme_the_qr_scanner_and_extract_invite_code_expect() {
+        assert_eq!(build_invite_link("ABC123"), "hexatalk://invite/ABC123");
+        assert_eq!(extract_invite_code(&build_invite_link("ABC123")), "ABC123");
     }
 }

@@ -106,7 +106,7 @@ cp -f "$BIN" "$APPDIR/usr/bin/HexaTalk"
 chmod +x "$APPDIR/usr/bin/HexaTalk"
 
 # Icon
-ICON_SRC="$ROOT/assets/textures/hexatalkicon.png"
+ICON_SRC="${ICON_SRC_OVERRIDE:-$ROOT/assets/textures/hexatalkicon.png}"
 if [[ -f "$ICON_SRC" ]]; then
   cp -f "$ICON_SRC" "$APPDIR/usr/share/icons/hicolor/256x256/apps/hexatalk.png"
   # AppImage top-level icon (required by some tools)

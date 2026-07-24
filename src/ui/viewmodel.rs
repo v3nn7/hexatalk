@@ -86,7 +86,23 @@ pub(crate) fn conversation_rows(
         .collect()
 }
 
-pub(crate) fn friend_rows<'a>(friends: impl IntoIterator<Item = &'a Friend>) -> Vec<ui::FriendRow> {
+/// `"verified"` / `"changed"` / `""` (unverified — the common, unremarkable
+/// case, left blank so the UI shows nothing rather than a permanent
+/// "unverified" label on every fresh friend).
+fn trust_badge_label(badge: Option<&crate::state::trust::TrustBadge>) -> slint::SharedString {
+    use crate::state::trust::TrustBadge;
+    match badge {
+        Some(TrustBadge::Verified) => "verified",
+        Some(TrustBadge::FingerprintChanged { .. }) => "changed",
+        Some(TrustBadge::Unverified) | None => "",
+    }
+    .into()
+}
+
+pub(crate) fn friend_rows<'a>(
+    friends: impl IntoIterator<Item = &'a Friend>,
+    trust_badges: &std::collections::HashMap<String, crate::state::trust::TrustBadge>,
+) -> Vec<ui::FriendRow> {
     friends
         .into_iter()
         .map(|f| {
@@ -120,6 +136,7 @@ pub(crate) fn friend_rows<'a>(friends: impl IntoIterator<Item = &'a Friend>) -> 
                 photo_url: f.avatar_image_url.clone().into(),
                 online,
                 favorite: f.favorite,
+                trust_badge: trust_badge_label(trust_badges.get(&f.user_id)),
             }
         })
         .collect()
@@ -552,6 +569,7 @@ pub(crate) fn chat_message_rows(
                 has_attachment: false,
                 attachment_loading: false,
                 attachment: Default::default(),
+                is_voice_note: false,
                 reactions: Default::default(),
                 can_edit: false,
                 can_delete: false,
@@ -589,6 +607,7 @@ pub(crate) fn chat_message_rows(
                 has_attachment: false,
                 attachment_loading: false,
                 attachment: Default::default(),
+                is_voice_note: false,
                 reactions: Default::default(),
                 can_edit: false,
                 can_delete,
@@ -615,12 +634,24 @@ pub(crate) fn chat_message_rows(
             .as_ref()
             .map(|(author, snippet)| format!("↩ {author}: {snippet}"))
             .unwrap_or_default();
+        // The `messages:list` REST shape has no attachment content-type field
+        // at all (see `net/api/dispatch_conv.rs` module doc) -- there is no
+        // backend-provided way to tell a voice note apart from any other
+        // attachment once it's round-tripped through history. Same trick as
+        // `PEER_CLEAR_HISTORY_CTRL`: a voice note's body is set to
+        // `VOICE_NOTE_BODY_TAG` at send time (see `Message::SendMessage`),
+        // so detection here is just a body comparison, valid for the
+        // sender's own echo, the live peer, and any later history reload.
+        let is_voice_note =
+            !deleted_visible && !msg.attachment_url.is_empty() && msg.body == crate::VOICE_NOTE_BODY_TAG;
         let body = if deleted_visible {
             if msg.body.is_empty() {
                 "(deleted)".to_string()
             } else {
                 format!("{} (deleted)", msg.body)
             }
+        } else if is_voice_note {
+            String::new()
         } else {
             msg.body.clone()
         };
@@ -661,8 +692,13 @@ pub(crate) fn chat_message_rows(
             body: body.into(),
             body_danger: deleted_visible,
             has_attachment: !deleted_visible && !msg.attachment_url.is_empty(),
-            attachment_loading: !deleted_visible && !msg.attachment_url.is_empty(),
+            // Voice notes never go through the image decode/cache path
+            // (see the `!row.is_voice_note` guard in main.rs), so there's
+            // nothing to "load" -- true here would get stuck forever since
+            // nothing ever clears it for a non-image attachment.
+            attachment_loading: !deleted_visible && !msg.attachment_url.is_empty() && !is_voice_note,
             attachment: Default::default(),
+            is_voice_note,
             reactions: if deleted_visible {
                 Default::default()
             } else {

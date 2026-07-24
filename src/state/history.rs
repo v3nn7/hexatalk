@@ -60,7 +60,7 @@ where
     })
 }
 
-fn hexatalk_dir() -> PathBuf {
+pub(crate) fn hexatalk_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("HexaTalk")

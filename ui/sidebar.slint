@@ -672,7 +672,20 @@ export component Sidebar inherits Rectangle {
                                     Avatar { initial: friend.initial; avatar-color: friend.avatar_color; photo-source: friend.photo; show-presence: true; online: friend.online; }
                                     VerticalLayout {
                                         spacing: 2px;
-                                        Text { text: friend.label; font-size: Theme.text-md; color: Theme.text-primary; }
+                                        HorizontalLayout {
+                                            spacing: 4px;
+                                            Text { text: friend.label; font-size: Theme.text-md; color: Theme.text-primary; }
+                                            if friend.trust_badge == "verified": Text {
+                                                text: "✓";
+                                                font-size: Theme.text-md;
+                                                color: Theme.success;
+                                            }
+                                            if friend.trust_badge == "changed": Text {
+                                                text: "⚠";
+                                                font-size: Theme.text-md;
+                                                color: Theme.warning;
+                                            }
+                                        }
                                         Text { text: friend.subtitle; font-size: 11px; color: Theme.text-muted; }
                                         Text { text: friend.meta; font-size: Theme.text-xs; color: Theme.text-muted; }
                                     }

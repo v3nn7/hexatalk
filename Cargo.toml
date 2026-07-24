@@ -59,6 +59,15 @@ rodio = { version = "0.19", default-features = true, features = ["symphonia-mp3"
 # Do not modify crates/reprotocol — integrate only.
 peerseal = { path = "crates/reprotocol" }
 rustls = { version = "0.23.42", default-features = false, features = ["std", "tls12", "ring"] }
+url = "2"
+# Server-invite QR: encode the existing alphanumeric invite code/link as an
+# image (same crate/version reprotocol's own optional `qr-image` feature
+# uses, kept as an independent dependency here since this is a different
+# payload/domain — server membership invites, not peerseal P2P pairing).
+qrcode = { version = "0.14", default-features = false, features = ["image"] }
+# In-app camera scanner for the QR invite screen.
+nokhwa = { version = "0.10", default-features = false, features = ["input-native"] }
+rqrr = "0.7"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

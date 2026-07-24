@@ -7,5 +7,6 @@ pub(crate) mod history;
 pub(crate) mod message;
 pub(crate) mod session_store;
 pub(crate) mod settings_store;
+pub(crate) mod trust;
 pub(crate) mod types;
 pub(crate) mod update;

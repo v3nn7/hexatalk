@@ -1398,3 +1398,44 @@ pub(crate) fn peer_invite_subscription(
         .await;
     })
 }
+
+/// Runs the in-app QR invite scanner (`media::qr_scan`) as a background
+/// job for as long as `App::qr_scan_active` stays true (see
+/// `App::subscription`). The OS camera thread is owned entirely by this
+/// job: `StopOnDrop` guarantees the camera is released the moment the job
+/// falls out of the desired set (user cancels, a code decodes, or the
+/// popup closes) -- reconciliation aborts this future, which drops the
+/// guard, which flips the stop flag the camera thread polls every ~200ms.
+/// Same idiom `room_voice.rs` uses for its own capture threads.
+pub(crate) fn qr_scan_subscription(tx: UnboundedSender<Message>) -> Job {
+    struct StopOnDrop(Arc<AtomicBool>);
+    impl Drop for StopOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    job("qr-scan", async move {
+        let stop = Arc::new(AtomicBool::new(false));
+        let _guard = StopOnDrop(stop.clone());
+        let (frame_tx, mut frame_rx) = tokio::sync::mpsc::unbounded_channel();
+        crate::media::qr_scan::spawn_qr_scan_thread(frame_tx, stop);
+        use crate::media::qr_scan::QrScanEvent;
+        while let Some(event) = frame_rx.recv().await {
+            let forwarded = match event {
+                QrScanEvent::Preview(jpeg) => tx.send(Message::QrScanPreview(jpeg)).is_ok(),
+                QrScanEvent::Decoded(content) => {
+                    let _ = tx.send(Message::QrScanDecoded(content));
+                    break;
+                }
+                QrScanEvent::Error(err) => {
+                    let _ = tx.send(Message::QrScanError(err));
+                    break;
+                }
+            };
+            if !forwarded {
+                break;
+            }
+        }
+    })
+}

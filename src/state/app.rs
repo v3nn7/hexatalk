@@ -34,6 +34,7 @@ use crate::net::subscriptions::{
 };
 use crate::state::history;
 use crate::state::message::Message;
+use crate::state::trust;
 use crate::state::session_store::{
     connect_task, load_panel_prefs, load_session_token_from_disk, hexatalk_data_dir,
 };
@@ -100,6 +101,15 @@ pub(crate) struct App {
     pub(crate) peer_sas: HashMap<String, String>,
     pub(crate) peer_transport: HashMap<String, String>,
     pub(crate) peer_remote_fp: HashMap<String, String>,
+    /// Persisted (disk-backed) SAS/fingerprint verification, keyed by
+    /// `user_id` — unlike `peer_sas`/`peer_remote_fp` this survives
+    /// disconnects and app restarts. Loaded once in `ensure_identity_key`.
+    pub(crate) verified_peers: trust::VerifiedPeerStore,
+    /// Per-session cache of `verified_peers.status_for(...)`, recomputed on
+    /// every `PeerEvent::Connected` so the UI doesn't re-derive it on every
+    /// render. Cleared like the other `peer_*` session maps on disconnect —
+    /// the underlying persisted verification in `verified_peers` is not.
+    pub(crate) peer_trust_badge: HashMap<String, trust::TrustBadge>,
     /// Local live messages from peerseal (not stored on Convex), per friend.
     pub(crate) peer_live_messages: HashMap<String, Vec<ChatMessage>>,
     pub(crate) peer_photo_seq: u64,
@@ -174,6 +184,29 @@ pub(crate) struct App {
     pub(crate) pending_join_server_icon: String,
     pub(crate) pending_join_invite_code: String,
     pub(crate) pending_join_invites_paused: bool,
+    /// Server invites panel: show the invite code/link as a QR image
+    /// (`media::qr::render_invite_qr`, computed on the UI thread) instead
+    /// of just the text code.
+    pub(crate) invite_qr_visible: bool,
+    /// In-app camera QR scanner for the join-server popup. Only a state
+    /// flag + the latest frame/error -- the camera thread itself lives in
+    /// the `qr-scan` subscription job (see `subscription()` below), which
+    /// starts/stops based on this flag the same way e.g. `call_subscription`
+    /// tracks `self.my_call`.
+    pub(crate) qr_scan_active: bool,
+    /// Latest camera frame, JPEG-encoded (same convention as the
+    /// screenshare preview) -- decoded to `slint::Image` on the UI thread
+    /// via `img_cache::decode`, never held as an `Image` here.
+    pub(crate) qr_scan_preview: Option<std::sync::Arc<[u8]>>,
+    pub(crate) qr_scan_error: Option<String>,
+    /// UI flag: a voice note is currently being recorded. The live
+    /// `VoiceNoteRecorder` itself can't travel through `Message` (which
+    /// must be `Clone`, and the recorder owns a unique OS stream/thread),
+    /// so it's stashed in this shared slot instead -- same idiom
+    /// `call_subscription`'s `share_control_slot` uses for a similar
+    /// non-`Clone` handle.
+    pub(crate) voice_note_recording: bool,
+    pub(crate) voice_note_slot: Arc<std::sync::Mutex<Option<crate::media::voice_note::VoiceNoteRecorder>>>,
     pub(crate) show_join_dialog: bool,
     pub(crate) new_channel_open: bool,
     pub(crate) new_channel_name_input: String,
@@ -348,6 +381,10 @@ pub(crate) struct App {
 
     /// Pad E2EE message envelopes to fixed size buckets (hides body length).
     pub(crate) e2ee_pad_messages: bool,
+    /// Disappearing-messages TTL per conversation, in seconds (absent or 0
+    /// = off). See the doc comment on `PersistedSettings::chat_ttl_seconds`
+    /// for the enforcement model.
+    pub(crate) chat_ttl_seconds: HashMap<String, i64>,
     /// Share detected app activity (Playing Minecraft / Active in …) with others.
     pub(crate) share_activity: bool,
     /// Last locally detected activity label (empty = nothing known).
@@ -420,6 +457,8 @@ impl App {
                 peer_sas: HashMap::new(),
                 peer_transport: HashMap::new(),
                 peer_remote_fp: HashMap::new(),
+                verified_peers: trust::VerifiedPeerStore::default(),
+                peer_trust_badge: HashMap::new(),
                 peer_live_messages: HashMap::new(),
                 peer_photo_seq: 0,
                 pending_peer_invite: HashMap::new(),
@@ -474,6 +513,12 @@ impl App {
                 pending_join_server_icon: String::new(),
                 pending_join_invite_code: String::new(),
                 pending_join_invites_paused: false,
+                invite_qr_visible: false,
+                qr_scan_active: false,
+                qr_scan_preview: None,
+                qr_scan_error: None,
+                voice_note_recording: false,
+                voice_note_slot: Arc::new(std::sync::Mutex::new(None)),
                 show_join_dialog: false,
                 new_channel_open: false,
                 new_channel_name_input: String::new(),
@@ -597,6 +642,7 @@ impl App {
                 plus_busy_status: None,
                 plus_checkout_busy: false,
                 e2ee_pad_messages: persisted_settings.e2ee_pad_messages.unwrap_or(true),
+                chat_ttl_seconds: persisted_settings.chat_ttl_seconds.clone(),
                 share_activity: persisted_settings.share_activity.unwrap_or(true),
                 current_activity: String::new(),
                 current_activity_icon: String::new(),
@@ -746,6 +792,7 @@ impl App {
                 .unwrap_or_default(),
             share_activity: Some(self.share_activity),
             e2ee_pad_messages: Some(self.e2ee_pad_messages),
+            chat_ttl_seconds: self.chat_ttl_seconds.clone(),
         });
     }
 
@@ -1047,6 +1094,7 @@ impl App {
                 self.peerseal_public_key = Some(b64.clone());
                 self.history_vault_key =
                     Some(history::vault_key_from_identity_private(&id.private));
+                self.verified_peers = trust::VerifiedPeerStore::load(&session.user_id);
                 b64
             }
             Err(err) => {
@@ -1088,6 +1136,7 @@ impl App {
         self.peer_sas.clear();
         self.peer_transport.clear();
         self.peer_remote_fp.clear();
+        self.peer_trust_badge.clear();
         self.peer_live_messages.clear();
         self.pending_peer_invite.clear();
         self.pending_invite_published.clear();
@@ -1104,6 +1153,7 @@ impl App {
         self.peer_sas.remove(peer_id);
         self.peer_transport.remove(peer_id);
         self.peer_remote_fp.remove(peer_id);
+        self.peer_trust_badge.remove(peer_id);
         self.peer_live_messages.remove(peer_id);
         self.pending_peer_invite.remove(peer_id);
         self.pending_invite_published.remove(peer_id);
@@ -1184,6 +1234,8 @@ impl App {
                 self.peer_connected.insert(peer_id.clone(), true);
                 self.peer_sas.insert(peer_id.clone(), sas_emojis);
                 self.peer_transport.insert(peer_id.clone(), transport);
+                let badge = self.verified_peers.status_for(&peer_id, &remote_fingerprint);
+                self.peer_trust_badge.insert(peer_id.clone(), badge);
                 self.peer_remote_fp
                     .insert(peer_id.clone(), remote_fingerprint);
                 self.peer_status
@@ -2013,6 +2065,16 @@ impl App {
             my_call_subscription(client.clone(), session.token.clone(), tx.clone()),
             tick_job(tx.clone()),
         ]);
+
+        // `qr_scan_error.is_some()` means the camera thread already gave up
+        // and exited on its own -- must NOT be in the desired set in that
+        // case, or `SubscriptionRegistry::reconcile` (which respawns any
+        // desired id whose task already finished) would relaunch the
+        // camera every reconcile tick in a tight retry storm instead of
+        // waiting for the user to explicitly retry.
+        if self.qr_scan_active && self.qr_scan_error.is_none() {
+            subs.push(crate::net::subscriptions::qr_scan_subscription(tx.clone()));
+        }
 
         if session.is_admin || session.is_moderator {
             subs.push(admin_users_subscription(

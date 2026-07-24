@@ -747,3 +747,133 @@ async fn main() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests: the ciphertext-blind invariant (see module doc) is a security
+// property, not just an implementation detail — assert it mechanically
+// instead of relying on code review alone.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_shared() -> Arc<Shared> {
+        Arc::new(Shared {
+            state: Mutex::new(State::default()),
+            next_peer_id: AtomicU64::new(1),
+            token: None,
+            max_peers: DEFAULT_MAX_PEERS,
+            max_conn_per_ip: DEFAULT_MAX_CONN_PER_IP,
+            max_rooms: DEFAULT_MAX_ROOMS,
+            max_rooms_per_ip: DEFAULT_MAX_ROOMS_PER_IP,
+            bytes_forwarded: AtomicU64::new(0),
+        })
+    }
+
+    /// `tracing_subscriber::fmt`'s `MakeWriter`, backed by an in-memory
+    /// buffer so a test can assert on exactly what would have been logged
+    /// (without touching the process-global subscriber `main()` installs).
+    #[derive(Clone, Default)]
+    struct LogBuf(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuf {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
+        type Writer = LogBuf;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Core relay invariant, asserted end-to-end against a real listener
+    /// and two real WebSocket clients (not mocks):
+    ///
+    /// 1. BINARY frames (the only thing legit peerseal clients ever send)
+    ///    are forwarded to other room members byte-for-byte.
+    /// 2. TEXT frames from a *client* never reach other peers — only the
+    ///    server itself may speak status lines (anti-spoofing).
+    /// 3. Nothing that looks like payload content ever appears in the logs
+    ///    — the relay only ever logs metadata (peer/room ids, byte
+    ///    counts), never the bytes themselves.
+    #[tokio::test]
+    async fn relay_forwards_binary_verbatim_drops_client_text_never_logs_payload() {
+        const CANARY: &str = "CIPHERTEXT-CANARY-3f9a1c-should-never-be-logged";
+
+        let log_buf = LogBuf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(log_buf.clone())
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shared = test_shared();
+        tokio::spawn(async move {
+            loop {
+                let (stream, peer_addr) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                let sh = Arc::clone(&shared);
+                tokio::spawn(async move {
+                    handle_connection(stream, peer_addr, sh, DEFAULT_MAX_FRAME).await;
+                });
+            }
+        });
+
+        let url = format!("ws://{addr}/v1/room/testroom");
+        let (mut a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        // First peer in the room: server sends the "waiting" status line.
+        let first = a.next().await.unwrap().unwrap();
+        assert!(matches!(first, Message::Text(_)));
+
+        let (mut b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        // Both peers get a "peer joined" status line once B connects.
+        let _ = a.next().await.unwrap().unwrap();
+        let _ = b.next().await.unwrap().unwrap();
+
+        // A binary "ciphertext" frame containing the canary must reach B
+        // byte-for-byte.
+        let payload = format!("\u{0}\u{1}{CANARY}\u{2}\u{3}").into_bytes();
+        a.send(Message::Binary(payload.clone().into())).await.unwrap();
+        match b.next().await.unwrap().unwrap() {
+            Message::Binary(bytes) => assert_eq!(bytes.as_ref(), payload.as_slice()),
+            other => panic!("expected Binary, got {other:?}"),
+        }
+
+        // A TEXT frame from a client (containing the same canary, simulating
+        // an attempt to inject a fake status line) must never reach B.
+        a.send(Message::Text(format!("\u{274c} {CANARY}").into()))
+            .await
+            .unwrap();
+        // Prove it wasn't just delayed: send a distinguishable binary frame
+        // right after and confirm that's the *next* thing B sees.
+        let sentinel = b"sentinel-after-dropped-text".to_vec();
+        a.send(Message::Binary(sentinel.clone().into())).await.unwrap();
+        match b.next().await.unwrap().unwrap() {
+            Message::Binary(bytes) => assert_eq!(bytes.as_ref(), sentinel.as_slice()),
+            other => panic!(
+                "expected the sentinel Binary next, got {other:?} — did the client TEXT leak through?"
+            ),
+        }
+
+        drop(a);
+        drop(b);
+
+        let logs = String::from_utf8_lossy(&log_buf.0.lock().unwrap_or_else(|e| e.into_inner())).into_owned();
+        assert!(
+            !logs.contains(CANARY),
+            "relay logs must never contain payload content, but found the canary in:\n{logs}"
+        );
+    }
+}

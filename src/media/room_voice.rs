@@ -48,6 +48,30 @@ pub(crate) enum RoomVoiceEvent {
     Status(String),
     Ended,
     Failed(String),
+    /// The room is at `MAX_ROOM_PARTICIPANTS` -- either a fresh join was
+    /// refused outright, or (rarer) capacity was hit while already
+    /// connected and further newcomers are being silently excluded from
+    /// this client's mesh. A dedicated variant reads better in the UI than
+    /// overloading `Failed` with a string, and lets the caller treat it
+    /// differently (e.g. not a retryable connection error).
+    RoomFull,
+}
+
+/// Full mesh means every participant maintains a WebRTC peer connection to
+/// every other participant: O(N^2) connections and, more importantly,
+/// O(N) simultaneous upload streams per client -- a typical home uplink
+/// and a laptop CPU both start struggling well before this. 12 keeps each
+/// client to at most 11 simultaneous peer connections; going higher without
+/// switching to a server-side SFU/mixer degrades silently instead of
+/// failing, which is worse. See `should_admit`/`RoomVoiceEvent::RoomFull`.
+pub(crate) const MAX_ROOM_PARTICIPANTS: usize = 12;
+
+/// Whether one more remote peer connection can be admitted, given how many
+/// this client already maintains. `limit` counts every human in the room
+/// including the local user, so the remote-connection budget is
+/// `limit - 1`.
+fn should_admit(current_peer_connections: usize, limit: usize) -> bool {
+    current_peer_connections < limit.saturating_sub(1)
 }
 
 pub(crate) struct RoomVoiceParams {
@@ -173,6 +197,16 @@ pub(crate) async fn run_room_voice(
     let config = ice_config();
 
     let jitter: Arc<Mutex<VecDeque<i16>>> = Arc::new(Mutex::new(VecDeque::new()));
+    // Per-peer adaptive jitter targets (see `jitter::JitterEstimator`),
+    // recomputed fresh from every active peer's latest estimate each time
+    // any peer's `on_track` loop pushes a packet -- the trim step below
+    // uses the max across peers. Unlike a one-way "ever-growing" ratchet,
+    // this shrinks back down as individual peers' conditions improve, and
+    // a peer's entry is removed the moment it leaves (see "Drop peers who
+    // left" below) so a departed peer's stale target can't keep inflating
+    // the shared buffer forever. Replaces the previous fixed ~500ms cap
+    // that ignored actual network conditions entirely.
+    let peer_jitter_targets: Arc<Mutex<HashMap<String, usize>>> = Arc::new(Mutex::new(HashMap::new()));
     let (playback_stop_tx, playback_stop_rx) = std::sync::mpsc::channel::<()>();
     // Ensure OS audio threads always stop if this future is cancelled (user
     // left the room / subscription dropped) without running the teardown path.
@@ -239,6 +273,9 @@ pub(crate) async fn run_room_voice(
     let mut peers: HashMap<String, PeerSlot> = HashMap::new();
     let mut applied_ice: HashMap<String, HashSet<String>> = HashMap::new();
     let any_connected = Arc::new(AtomicBool::new(false));
+    // Sent at most once per session so a full room doesn't spam a
+    // `RoomFull` status on every 2s roster poll.
+    let mut room_full_notified = false;
 
     // Signaling on the new API: the room roster is polled (there is a GET
     // endpoint for it), while mesh link state is rebuilt from WS
@@ -279,6 +316,16 @@ pub(crate) async fn run_room_voice(
                     _ => continue,
                 };
 
+                // Fresh join into an already-full room: refuse outright
+                // rather than silently connecting to an arbitrary subset
+                // of `remote_ids` (a `HashSet`, so iteration order isn't
+                // even meaningful to prioritize by).
+                if peers.is_empty() && remote_ids.len() >= MAX_ROOM_PARTICIPANTS {
+                    let _ = output.send(RoomVoiceEvent::RoomFull).await;
+                    let _ = output.send(RoomVoiceEvent::Ended).await;
+                    return;
+                }
+
                 // Drop peers who left.
                 let gone: Vec<String> = peers
                     .keys()
@@ -302,12 +349,22 @@ pub(crate) async fn run_room_voice(
                         if let Ok(mut tracks) = local_tracks.lock() {
                             tracks.retain(|t| !Arc::ptr_eq(t, &slot.local_track));
                         }
+                        if let Ok(mut targets) = peer_jitter_targets.lock() {
+                            targets.remove(&id);
+                        }
                     }
                 }
 
-                // Ensure a PC for every remote peer.
+                // Ensure a PC for every remote peer, up to the mesh cap.
                 for peer_id in remote_ids {
                     if peers.contains_key(&peer_id) {
+                        continue;
+                    }
+                    if !should_admit(peers.len(), MAX_ROOM_PARTICIPANTS) {
+                        if !room_full_notified {
+                            room_full_notified = true;
+                            let _ = output.send(RoomVoiceEvent::RoomFull).await;
+                        }
                         continue;
                     }
                     let is_offerer = user_id.as_str() < peer_id.as_str();
@@ -315,6 +372,7 @@ pub(crate) async fn run_room_voice(
                         &api,
                         &config,
                         Arc::clone(&jitter),
+                        Arc::clone(&peer_jitter_targets),
                         Arc::clone(&any_connected),
                         output.clone(),
                         peer_id.clone(),
@@ -409,6 +467,7 @@ pub(crate) async fn run_room_voice(
                                 &api,
                                 &config,
                                 Arc::clone(&jitter),
+                                Arc::clone(&peer_jitter_targets),
                                 Arc::clone(&any_connected),
                                 output.clone(),
                                 peer_id.clone(),
@@ -622,6 +681,7 @@ async fn create_peer_slot(
     api: &webrtc::api::API,
     config: &RTCConfiguration,
     jitter: Arc<Mutex<VecDeque<i16>>>,
+    peer_jitter_targets: Arc<Mutex<HashMap<String, usize>>>,
     any_connected: Arc<AtomicBool>,
     output: EventSender<RoomVoiceEvent>,
     peer_id: String,
@@ -648,11 +708,20 @@ async fn create_peer_slot(
         .map_err(|_| "Could not attach microphone track".to_string())?;
 
     let jitter_for_track = Arc::clone(&jitter);
+    let peer_jitter_targets_for_track = Arc::clone(&peer_jitter_targets);
     pc.on_track(Box::new(move |track: Arc<TrackRemote>, _r, _t| {
         let jitter = Arc::clone(&jitter_for_track);
+        let peer_jitter_targets = Arc::clone(&peer_jitter_targets_for_track);
         let gains = Arc::clone(&gains);
         let peer_id = peer_id.clone();
         Box::pin(async move {
+            // Own estimator per peer -- the shared buffer mixes audio from
+            // every peer in the room, but each peer's network conditions
+            // are independent, so the trim target below uses the max
+            // across all peers' latest estimates (see
+            // `peer_jitter_targets`'s doc comment on why a live max beats
+            // a one-way ratchet).
+            let mut jitter_estimator = super::jitter::JitterEstimator::new();
             loop {
                 match track.read_rtp().await {
                     Ok((packet, _)) => {
@@ -666,10 +735,18 @@ async fn create_peer_slot(
                             .and_then(|m| m.get(&peer_id).copied())
                             .unwrap_or(1.0);
                         crate::media::call::apply_gain(&mut samples, g);
+                        let my_target = jitter_estimator.on_packet_arrival(adpcm::WIRE_SAMPLE_RATE);
+                        let shared_target = {
+                            let mut targets = match peer_jitter_targets.lock() {
+                                Ok(t) => t,
+                                Err(_) => continue,
+                            };
+                            targets.insert(peer_id.clone(), my_target);
+                            targets.values().copied().max().unwrap_or(my_target)
+                        };
                         if let Ok(mut buf) = jitter.lock() {
                             buf.extend(samples);
-                            // Soft cap ~500ms at 24kHz across all peers.
-                            while buf.len() > 12000 {
+                            while buf.len() > shared_target {
                                 buf.pop_front();
                             }
                         }
@@ -833,4 +910,32 @@ fn start_ice_sender(
                 .await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admits_up_to_one_less_than_the_limit() {
+        // limit=12 counts the local user too, so 11 remote connections is
+        // the last one admitted.
+        assert!(should_admit(10, MAX_ROOM_PARTICIPANTS));
+        assert!(should_admit(10, 12));
+    }
+
+    #[test]
+    fn refuses_at_and_beyond_the_connection_budget() {
+        assert!(!should_admit(11, 12));
+        assert!(!should_admit(12, 12));
+        assert!(!should_admit(50, 12));
+    }
+
+    #[test]
+    fn boundary_is_exact_one_below_the_limit() {
+        for limit in [2usize, 5, 12, 16] {
+            assert!(should_admit(limit - 2, limit), "limit={limit}");
+            assert!(!should_admit(limit - 1, limit), "limit={limit}");
+        }
+    }
 }

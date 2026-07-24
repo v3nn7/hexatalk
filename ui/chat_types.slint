@@ -46,6 +46,9 @@ export struct ChatMessageRow {
     attachment_loading: bool,
     attachment: image,
     attachment_url: string,
+    /// True for a voice-note attachment (`content_type: "audio/wav"`) --
+    /// rendered as a play button instead of an image.
+    is_voice_note: bool,
     reactions: [ReactionRow],
     can_edit: bool,
     can_delete: bool,
@@ -102,6 +105,8 @@ export struct FriendRow {
     photo_url: string,
     online: bool,
     favorite: bool,
+    /// "verified" | "changed" | "" (unverified, the common case).
+    trust_badge: string,
 }
 
 export struct IncomingRequestRow {

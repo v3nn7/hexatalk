@@ -1080,7 +1080,8 @@ pub async fn dispatch(
             match find_in_servers(c, "channels", &conversation_id).await? {
                 Some((_, bundle)) => {
                     let my_id = my_user_id(c).await.unwrap_or_default();
-                    let (perms, _) = compute_perms(&bundle, &my_id);
+                    let (perms, _) =
+                        compute_channel_perms(c, &bundle, &my_id, &conversation_id).await?;
                     let mut obj = BTreeMap::new();
                     obj.insert(
                         "permissions".to_string(),
@@ -1769,6 +1770,113 @@ fn compute_perms(bundle: &serde_json::Value, my_id: &str) -> (i64, bool) {
     (perms_to_client(new_perms), false)
 }
 
+/// Fetches raw channel-level permission overwrites (REST/new bit space).
+/// Thin wrapper around the same GET the `listOverwrites` path already
+/// exposes, kept separate so `compute_channel_perms` doesn't have to
+/// re-derive the client-shape translation `listOverwrites` performs for
+/// external callers.
+async fn fetch_overwrites(
+    c: &ApiClient,
+    conversation_id: &str,
+) -> Result<Vec<serde_json::Value>, ApiError> {
+    let resp = c
+        .rest(
+            Method::GET,
+            &format!("/channels/{conversation_id}/overwrites"),
+            None,
+        )
+        .await?;
+    Ok(json_array(resp, "overwrites"))
+}
+
+/// Merges channel-level permission overwrites into a member's base
+/// permissions, Discord-style precedence: `@everyone` overwrite first,
+/// then the member's explicitly-assigned role overwrites (all applicable
+/// denies combined, then all applicable allows combined), then a
+/// member-specific overwrite last (highest precedence — applied after
+/// every role tier, so it wins any conflict). Each tier's allow/deny masks
+/// are in REST (new) bit space and translated to client bits delta-only
+/// (`perms_to_client_raw`), matching how `listOverwrites` already exposes
+/// them.
+fn apply_overwrites(
+    base_perms: i64,
+    everyone_role_id: &str,
+    my_id: &str,
+    my_role_ids: &[String],
+    overwrites: &[serde_json::Value],
+) -> i64 {
+    fn combine(overwrites: &[serde_json::Value], matches: impl Fn(&str, &str) -> bool) -> (i64, i64) {
+        let mut allow = 0i64;
+        let mut deny = 0i64;
+        for ow in overwrites {
+            let target_type = jstr(ow, "target_type");
+            let target_id = jstr(ow, "target_id");
+            if matches(&target_type, &target_id) {
+                allow |= perms_to_client_raw(jnum(ow, "allow") as i64);
+                deny |= perms_to_client_raw(jnum(ow, "deny") as i64);
+            }
+        }
+        (allow, deny)
+    }
+
+    let mut perms = base_perms;
+
+    // Tier 1: @everyone overwrite.
+    let (allow, deny) = combine(overwrites, |tt, tid| tt == "role" && tid == everyone_role_id);
+    perms = (perms & !deny) | allow;
+
+    // Tier 2: explicitly-assigned roles (excluding @everyone, already applied).
+    let (allow, deny) = combine(overwrites, |tt, tid| {
+        tt == "role" && tid != everyone_role_id && my_role_ids.iter().any(|r| r == tid)
+    });
+    perms = (perms & !deny) | allow;
+
+    // Tier 3: member-specific overwrite (highest precedence).
+    let (allow, deny) = combine(overwrites, |tt, tid| tt == "member" && tid == my_id);
+    perms = (perms & !deny) | allow;
+
+    perms
+}
+
+/// Same as `compute_perms`, but also merges channel-level permission
+/// overwrites (`channels:setOverwrite`) into the result. `compute_perms`
+/// alone never read these back — an admin could restrict a channel via
+/// `setOverwrite` and the restriction would silently never take effect
+/// for anyone but the server owner. Server-wide checks with no channel
+/// context (`roles:myPermissions`, `listChannels`) have no overwrites to
+/// merge and must keep calling `compute_perms` directly.
+async fn compute_channel_perms(
+    c: &ApiClient,
+    bundle: &serde_json::Value,
+    my_id: &str,
+    conversation_id: &str,
+) -> Result<(i64, bool), ApiError> {
+    let (base_perms, is_owner) = compute_perms(bundle, my_id);
+    if is_owner {
+        // Owner is never restricted by overwrites.
+        return Ok((base_perms, is_owner));
+    }
+    let roles = bundle
+        .get("roles")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let everyone_role_id = roles
+        .iter()
+        .find(|r| jnum(r, "position") as i64 == 0)
+        .map(|r| jstr(r, "id"))
+        .unwrap_or_default();
+    let my_role_ids: Vec<String> = bundle
+        .get("members")
+        .and_then(|m| m.as_array())
+        .and_then(|ms| ms.iter().find(|m| member_user_id(m) == my_id))
+        .map(member_role_ids)
+        .unwrap_or_default();
+    let overwrites = fetch_overwrites(c, conversation_id).await?;
+    let perms = apply_overwrites(base_perms, &everyone_role_id, my_id, &my_role_ids, &overwrites);
+    Ok((perms, is_owner))
+}
+
 /// Locates the server bundle containing a given channel/role id by
 /// scanning my servers (the new API has no "get channel by id" endpoint).
 /// Returns (server_id, bundle).
@@ -1816,4 +1924,102 @@ fn human_or(err: ApiError) -> Result<FunctionResult, ApiError> {
         }));
     }
     Err(ApiError(msg))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Bundle with one member ("me") in one role ("member") on top of
+    /// `@everyone` (position 0). `@everyone` gets SEND_MESSAGES; "member"
+    /// role gets nothing extra by default — tests add role/member/everyone
+    /// overwrites on top of this baseline.
+    fn base_bundle(owner_id: &str) -> serde_json::Value {
+        json!({
+            "server": { "owner_id": owner_id },
+            "roles": [
+                { "id": "role_everyone", "position": 0, "permissions": NEW_SEND_MESSAGES },
+                { "id": "role_member", "position": 1, "permissions": 0 },
+            ],
+            "members": [
+                { "user_id": "me", "role_ids": ["role_member"] },
+            ],
+        })
+    }
+
+    fn overwrite(target_type: &str, target_id: &str, allow: i64, deny: i64) -> serde_json::Value {
+        json!({
+            "target_type": target_type,
+            "target_id": target_id,
+            "allow": allow,
+            "deny": deny,
+        })
+    }
+
+    #[test]
+    fn no_overwrites_matches_compute_perms_exactly() {
+        let bundle = base_bundle("someone_else");
+        let (base, is_owner) = compute_perms(&bundle, "me");
+        assert!(!is_owner);
+        let merged = apply_overwrites(base, "role_everyone", "me", &["role_member".into()], &[]);
+        assert_eq!(merged, base, "no overwrites must not change the result");
+    }
+
+    #[test]
+    fn member_overwrite_denies_everyone_allow() {
+        let bundle = base_bundle("someone_else");
+        let (base, _) = compute_perms(&bundle, "me");
+        assert_ne!(base & OLD_SEND_MESSAGES, 0, "baseline should allow sending");
+        let overwrites = [overwrite("member", "me", 0, NEW_SEND_MESSAGES)];
+        let merged = apply_overwrites(base, "role_everyone", "me", &["role_member".into()], &overwrites);
+        assert_eq!(
+            merged & OLD_SEND_MESSAGES,
+            0,
+            "member-level deny must remove send permission"
+        );
+    }
+
+    #[test]
+    fn role_overwrite_allow_survives_unrelated_member_overwrite() {
+        let bundle = base_bundle("someone_else");
+        let (base, _) = compute_perms(&bundle, "me");
+        let overwrites = [
+            overwrite("role", "role_member", NEW_MANAGE_CHANNELS, 0),
+            // Member overwrite touches an unrelated bit only.
+            overwrite("member", "me", NEW_KICK, 0),
+        ];
+        let merged = apply_overwrites(base, "role_everyone", "me", &["role_member".into()], &overwrites);
+        assert_ne!(
+            merged & OLD_MANAGE_CHANNELS,
+            0,
+            "role-granted MANAGE_CHANNELS must survive an unrelated member overwrite"
+        );
+    }
+
+    #[test]
+    fn member_overwrite_wins_conflict_with_role_overwrite() {
+        let bundle = base_bundle("someone_else");
+        let (base, _) = compute_perms(&bundle, "me");
+        let overwrites = [
+            overwrite("role", "role_member", NEW_MANAGE_CHANNELS, 0),
+            overwrite("member", "me", 0, NEW_MANAGE_CHANNELS),
+        ];
+        let merged = apply_overwrites(base, "role_everyone", "me", &["role_member".into()], &overwrites);
+        assert_eq!(
+            merged & OLD_MANAGE_CHANNELS,
+            0,
+            "member-level deny must win over a role-level allow"
+        );
+    }
+
+    #[test]
+    fn owner_short_circuits_before_overwrites_are_even_relevant() {
+        let bundle = base_bundle("me");
+        let (base, is_owner) = compute_perms(&bundle, "me");
+        assert!(is_owner);
+        assert_eq!(base, OLD_ALL);
+        // compute_channel_perms returns immediately for owners without
+        // ever fetching overwrites (see the `if is_owner` early return),
+        // so no overwrite, however restrictive, can reach an owner.
+    }
 }

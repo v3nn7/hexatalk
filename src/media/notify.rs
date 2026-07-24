@@ -47,6 +47,11 @@ enum AudioCmd {
     Notify,
     RingtoneStart,
     RingtoneStop,
+    /// Play a voice-note WAV (see `media::voice_note::encode_wav`). Stops
+    /// any voice note already playing first -- same one-at-a-time policy
+    /// the ringtone slot uses.
+    PlayVoiceNote(Vec<u8>),
+    StopVoiceNote,
 }
 
 fn audio_tx() -> Option<&'static Sender<AudioCmd>> {
@@ -71,6 +76,7 @@ fn audio_thread(rx: mpsc::Receiver<AudioCmd>) {
     };
 
     let mut ring_sink: Option<Sink> = None;
+    let mut voice_note_sink: Option<Sink> = None;
 
     while let Ok(cmd) = rx.recv() {
         match cmd {
@@ -104,7 +110,41 @@ fn audio_thread(rx: mpsc::Receiver<AudioCmd>) {
                     sink.stop();
                 }
             }
+            AudioCmd::PlayVoiceNote(wav_bytes) => {
+                if let Some(prev) = voice_note_sink.take() {
+                    prev.stop();
+                }
+                let Ok(sink) = Sink::try_new(&handle) else {
+                    continue;
+                };
+                let Ok(source) = Decoder::new(Cursor::new(wav_bytes)) else {
+                    continue;
+                };
+                sink.append(source);
+                sink.play();
+                voice_note_sink = Some(sink);
+            }
+            AudioCmd::StopVoiceNote => {
+                if let Some(sink) = voice_note_sink.take() {
+                    sink.stop();
+                }
+            }
         }
+    }
+}
+
+/// Plays a voice-note WAV byte buffer through the shared audio thread.
+/// Stops any voice note already playing first.
+pub(crate) fn play_voice_note(wav_bytes: Vec<u8>) {
+    if let Some(tx) = audio_tx() {
+        let _ = tx.send(AudioCmd::PlayVoiceNote(wav_bytes));
+    }
+}
+
+/// Stops voice-note playback, if any is in progress.
+pub(crate) fn stop_voice_note() {
+    if let Some(tx) = audio_tx() {
+        let _ = tx.send(AudioCmd::StopVoiceNote);
     }
 }
 

@@ -479,6 +479,8 @@ export component AppWindow inherits Window {
     in property <bool> ss_editing_role_is_default: false;
     in property <bool> ss_confirm_delete_role: false;
     in property <string> ss_invite_code;
+    in property <bool> ss_invite_qr_visible: false;
+    in property <image> ss_invite_qr_image;
     in property <bool> ss_confirm_delete_server: false;
 
     callback ss_back;
@@ -524,6 +526,8 @@ export component AppWindow inherits Window {
     callback ss_copy_invite_code(string);
     callback ss_copy_invite_link(string);
     callback ss_regenerate_invite_code;
+    callback ss_show_invite_qr;
+    callback ss_hide_invite_qr;
     callback ss_toggle_confirm_delete_server;
     callback ss_delete_server;
 
@@ -565,6 +569,8 @@ export component AppWindow inherits Window {
         editing_role_is_default: root.ss_editing_role_is_default;
         confirm_delete_role: root.ss_confirm_delete_role;
         invite_code: root.ss_invite_code;
+        invite_qr_visible: root.ss_invite_qr_visible;
+        invite_qr_image: root.ss_invite_qr_image;
         confirm_delete_server: root.ss_confirm_delete_server;
 
         back => { root.ss_back(); }
@@ -610,6 +616,8 @@ export component AppWindow inherits Window {
         copy_invite_code(code) => { root.ss_copy_invite_code(code); }
         copy_invite_link(code) => { root.ss_copy_invite_link(code); }
         regenerate_invite_code => { root.ss_regenerate_invite_code(); }
+        show_invite_qr => { root.ss_show_invite_qr(); }
+        hide_invite_qr => { root.ss_hide_invite_qr(); }
         toggle_confirm_delete_server => { root.ss_toggle_confirm_delete_server(); }
         delete_server => { root.ss_delete_server(); }
     }
@@ -647,6 +655,9 @@ export component AppWindow inherits Window {
     in property <length> chat_sidebar_width: 320px;
     in-out property <string> chat_new_server_name;
     in-out property <string> chat_join_server_code;
+    in property <bool> chat_qr_scan_active: false;
+    in property <image> chat_qr_scan_preview;
+    in property <string> chat_qr_scan_error;
     in property <string> chat_server_status;
     in property <bool> chat_new_group_open: false;
     in-out property <string> chat_new_group_name;
@@ -707,6 +718,8 @@ export component AppWindow inherits Window {
     callback chat_create_server;
     callback chat_join_server_code_changed(string);
     callback chat_join_server;
+    callback chat_start_qr_scan;
+    callback chat_stop_qr_scan;
     callback chat_toggle_group_panel;
     callback chat_group_name_changed(string);
     callback chat_toggle_group_member(string);
@@ -779,6 +792,8 @@ export component AppWindow inherits Window {
     in property <bool> chat_peer_connected: false;
     in property <string> chat_connection_label;
     in property <string> chat_sas_label;
+    in property <string> chat_trust_badge;
+    in property <string> chat_ttl_label;
     in property <bool> chat_show_call_button: false;
     in property <bool> chat_is_server_channel: false;
     in property <bool> chat_channel_muted: false;
@@ -816,6 +831,8 @@ export component AppWindow inherits Window {
     in property <bool> chat_deafened: false;
 
     callback chat_start_call;
+    callback chat_confirm_sas_verified;
+    callback chat_cycle_ttl;
     callback chat_toggle_store;
     callback chat_toggle_channel_mute;
     callback chat_toggle_clear_confirm;
@@ -829,6 +846,9 @@ export component AppWindow inherits Window {
     callback chat_mention_pick(string);
     callback chat_send;
     callback chat_pick_attachment;
+    in property <bool> chat_voice_note_recording: false;
+    callback chat_start_voice_note;
+    callback chat_stop_voice_note;
     callback chat_remove_attachment;
     callback chat_cancel_edit;
     callback chat_cancel_reply;
@@ -839,6 +859,7 @@ export component AppWindow inherits Window {
     callback chat_delete(string);
     callback chat_purge(string);
     callback chat_open_attachment(string);
+    callback chat_play_voice_note(string);
     callback chat_report(string);
     callback chat_report_reason(string, string, string);
     callback chat_report_cancel(string);
@@ -1066,6 +1087,8 @@ export component AppWindow inherits Window {
                 peer_connected: root.chat_peer_connected;
                 connection_label: root.chat_connection_label;
                 sas_label: root.chat_sas_label;
+                trust_badge: root.chat_trust_badge;
+                ttl_label: root.chat_ttl_label;
                 show_call_button: root.chat_show_call_button;
                 is_server_channel: root.chat_is_server_channel;
                 channel_muted: root.chat_channel_muted;
@@ -1088,6 +1111,7 @@ export component AppWindow inherits Window {
                 message_input <=> root.chat_message_input;
                 mention_suggestions: root.chat_mention_suggestions;
                 has_pending_attachment: root.chat_has_pending_attachment;
+                voice_note_recording: root.chat_voice_note_recording;
                 pending_attachment_preview: root.chat_pending_attachment_preview;
                 has_pending_reply: root.chat_has_pending_reply;
                 pending_reply_line: root.chat_pending_reply_line;
@@ -1096,6 +1120,8 @@ export component AppWindow inherits Window {
                 warning_line: root.chat_warning_line;
 
                 start_call => { root.chat_start_call(); }
+                confirm_sas_verified => { root.chat_confirm_sas_verified(); }
+                cycle_ttl => { root.chat_cycle_ttl(); }
                 toggle_store => { root.chat_toggle_store(); }
                 toggle_channel_mute => { root.chat_toggle_channel_mute(); }
                 toggle_clear_confirm => { root.chat_toggle_clear_confirm(); }
@@ -1108,6 +1134,8 @@ export component AppWindow inherits Window {
                 mention_pick(name) => { root.chat_mention_pick(name); }
                 send => { root.chat_send(); }
                 pick_attachment => { root.chat_pick_attachment(); }
+                start_voice_note => { root.chat_start_voice_note(); }
+                stop_voice_note => { root.chat_stop_voice_note(); }
                 remove_attachment => { root.chat_remove_attachment(); }
                 cancel_edit => { root.chat_cancel_edit(); }
                 cancel_reply => { root.chat_cancel_reply(); }
@@ -1118,6 +1146,7 @@ export component AppWindow inherits Window {
                 delete(id) => { root.chat_delete(id); }
                 purge(id) => { root.chat_purge(id); }
                 open_attachment(url) => { root.chat_open_attachment(url); }
+                play_voice_note(url) => { root.chat_play_voice_note(url); }
                 report(id) => { root.chat_report(id); }
                 report_reason(id, body, reason) => { root.chat_report_reason(id, body, reason); }
                 report_cancel(id) => { root.chat_report_cancel(id); }
@@ -1351,9 +1380,67 @@ export component AppWindow inherits Window {
                 PrimaryButton { text: "Create"; clicked => { root.chat_create_server(); } }
                 Rectangle { height: 1px; background: Theme.border; }
                 TextInputField { placeholder: "Invite code or link"; value <=> root.chat_join_server_code; edited(t) => { root.chat_join_server_code_changed(t); } submitted => { root.chat_join_server(); } }
-                SecondaryButton { text: "Join"; clicked => { root.chat_join_server(); } }
+                HorizontalLayout {
+                    spacing: 8px;
+                    SecondaryButton { text: "Join"; clicked => { root.chat_join_server(); } }
+                    SecondaryButton { text: "Scan QR"; clicked => { root.chat_start_qr_scan(); } }
+                }
                 if root.chat_server_status != "": Text { text: root.chat_server_status; font-size: 11px; color: Theme.text-muted; wrap: word-wrap; }
                 SmallButton { text: "Close"; clicked => { root.chat_toggle_add_menu(); } }
+            }
+        }
+    }
+
+    // QR invite scanner: window-level overlay, same convention as the
+    // add/join-server popup above. Camera access is the most
+    // platform-fragile part of this feature -- `chat_qr_scan_error` always
+    // stays visible with a way back to manual code entry instead of
+    // getting the user stuck on a dead camera.
+    if root.chat_qr_scan_active: Rectangle {
+        width: size_ref.width;
+        height: size_ref.height;
+        background: #00000099;
+        TouchArea { clicked => { root.chat_stop_qr_scan(); } }
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(360px, parent.width - 48px);
+            height: qr_scan_col.preferred-height + 32px;
+            background: Theme.bg-elevated;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            border-radius: Theme.radius-md;
+            qr_scan_col := VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+                alignment: center;
+                Text { text: "SCAN INVITE"; font-size: Theme.text-xs; font-family: Theme.font-medium; letter-spacing: 1px; color: Theme.text-link; }
+                if root.chat_qr_scan_error == "": Image {
+                    source: root.chat_qr_scan_preview;
+                    width: 280px;
+                    height: 210px;
+                    image-fit: contain;
+                }
+                if root.chat_qr_scan_error == "": Text {
+                    text: "Point the camera at the invite QR code.";
+                    font-size: 12px;
+                    color: Theme.text-muted;
+                    horizontal-alignment: center;
+                }
+                if root.chat_qr_scan_error != "": Text {
+                    text: root.chat_qr_scan_error;
+                    font-size: 12px;
+                    color: Theme.danger;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+                if root.chat_qr_scan_error != "": Text {
+                    text: "Enter the invite code above instead.";
+                    font-size: 12px;
+                    color: Theme.text-muted;
+                    horizontal-alignment: center;
+                }
+                SmallButton { text: "Cancel"; clicked => { root.chat_stop_qr_scan(); } }
             }
         }
     }

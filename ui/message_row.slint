@@ -54,6 +54,7 @@ export component MessageRow inherits Rectangle {
     callback delete(string);
     callback purge(string);
     callback open_attachment(string);
+    callback play_voice_note(string);
     callback report(string);
     callback report_reason(string, string, string);
     callback report_cancel(string);
@@ -300,7 +301,27 @@ export component MessageRow inherits Rectangle {
                 wrap: word-wrap;
             }
 
-            if msg.has_attachment && msg.attachment.width > 0: Rectangle {
+            if msg.has_attachment && msg.is_voice_note: Rectangle {
+                width: 220px;
+                height: 44px;
+                background: Theme.bg-tertiary;
+                border-width: 1px;
+                border-radius: Theme.radius-md;
+                border-color: voice_touch.has-hover ? Theme.accent : Theme.border;
+                animate border-color { duration: 120ms; }
+                HorizontalLayout {
+                    padding: 10px;
+                    spacing: 8px;
+                    alignment: start;
+                    Text { text: "▶"; font-size: Theme.text-md; color: Theme.accent; vertical-alignment: center; }
+                    Text { text: "Voice message"; font-size: Theme.text-sm; color: Theme.text-primary; vertical-alignment: center; }
+                }
+                voice_touch := TouchArea {
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => { root.play_voice_note(msg.attachment_url); }
+                }
+            }
+            if msg.has_attachment && !msg.is_voice_note && msg.attachment.width > 0: Rectangle {
                 width: 288px;
                 height: 240px;
                 background: Theme.bg-tertiary;
@@ -332,7 +353,7 @@ export component MessageRow inherits Rectangle {
                     clicked => { root.open_attachment(msg.attachment_url); }
                 }
             }
-            if msg.has_attachment && msg.attachment.width <= 0: Text {
+            if msg.has_attachment && !msg.is_voice_note && msg.attachment.width <= 0: Text {
                 text: msg.attachment_loading ? "[loading image...]" : "[image unavailable]";
                 font-size: Theme.text-sm;
                 color: Theme.text-muted;

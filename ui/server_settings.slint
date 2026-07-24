@@ -131,6 +131,8 @@ export component ServerSettingsScreen inherits Rectangle {
 
     // Invites
     in property <string> invite_code;
+    in property <bool> invite_qr_visible: false;
+    in property <image> invite_qr_image;
 
     // Danger
     in property <bool> confirm_delete_server: false;
@@ -184,6 +186,8 @@ export component ServerSettingsScreen inherits Rectangle {
     callback copy_invite_code(string);
     callback copy_invite_link(string);
     callback regenerate_invite_code;
+    callback show_invite_qr;
+    callback hide_invite_qr;
 
     callback toggle_confirm_delete_server;
     callback delete_server;
@@ -628,6 +632,25 @@ export component ServerSettingsScreen inherits Rectangle {
                                     PrimaryButton { text: "Copy code"; width: 110px; clicked => { root.copy_invite_code(root.invite_code); } }
                                     SecondaryButton { text: "Copy link"; width: 110px; clicked => { root.copy_invite_link(root.invite_code); } }
                                     if root.is_owner: SecondaryButton { text: "Regenerate"; width: 110px; clicked => { root.regenerate_invite_code(); } }
+                                    if !root.invite_qr_visible: SecondaryButton { text: "Show QR"; width: 110px; clicked => { root.show_invite_qr(); } }
+                                    if root.invite_qr_visible: SecondaryButton { text: "Hide QR"; width: 110px; clicked => { root.hide_invite_qr(); } }
+                                }
+                                if root.invite_qr_visible && root.invite_qr_image.width > 0: VerticalLayout {
+                                    alignment: center;
+                                    padding-top: 8px;
+                                    Image {
+                                        source: root.invite_qr_image;
+                                        width: 220px;
+                                        height: 220px;
+                                        image-fit: contain;
+                                    }
+                                    Text {
+                                        text: "Scan with a phone camera, or in-app via \"Scan invite\" on the join screen.";
+                                        font-size: 11px;
+                                        color: Theme.text-muted;
+                                        horizontal-alignment: center;
+                                        wrap: word-wrap;
+                                    }
                                 }
                             }
                         }

@@ -444,6 +444,38 @@ pub(crate) enum Message {
     ToggleShareSystemAudio,
     /// Mute notifications for the active channel/conversation.
     ToggleChannelMute,
+    /// User compared SAS/fingerprint with the currently active DM peer
+    /// out-of-band and confirmed it matches; persists the verification
+    /// keyed by peer user_id (survives disconnects/restarts).
+    ConfirmSasVerified,
+    /// Toggle the invite QR code display in the server invites panel.
+    SetInviteQrVisible(bool),
+    /// User opened/closed the in-app camera QR scanner (join-server popup).
+    /// The camera thread itself is owned by the `qr-scan` subscription job
+    /// (see `App::subscription`) and stops automatically when it's no
+    /// longer in the desired job set.
+    StartQrScan,
+    StopQrScan,
+    QrScanPreview(Vec<u8>),
+    QrScanDecoded(String),
+    QrScanError(String),
+    /// Set (or clear, with 0) the disappearing-messages TTL for a
+    /// conversation, in seconds.
+    SetChatTtl(String, i64),
+    /// Advance the active conversation's TTL through off -> 1h -> 24h -> 7d
+    /// -> off (the header button's click handler).
+    CycleChatTtl,
+    /// Voice notes: record from the mic, encode as WAV, send through the
+    /// existing attachment pipeline unchanged (see `AttachmentFilePicked`).
+    VoiceNoteRecordStart,
+    VoiceNoteRecordStarted(Result<(), String>),
+    VoiceNoteRecordStop,
+    VoiceNoteRecordCancel,
+    VoiceNoteRecordCancelled,
+    VoiceNoteRecordStopped(Option<Vec<u8>>),
+    /// Play a received voice-note attachment (already-cached decrypted
+    /// bytes, keyed by `attachment_url` -- same cache avatars/photos use).
+    PlayVoiceNoteAttachment(String),
     ChannelMuteFinished(Result<bool, String>),
     OpenCommandPalette,
     CloseCommandPalette,

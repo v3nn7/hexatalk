@@ -86,55 +86,8 @@ pub(super) fn turn_ice_server() -> Option<RTCIceServer> {
     })
 }
 
-/// Bounds for the adaptive jitter buffer target (see `JitterEstimator`):
-/// never so small that ordinary network jitter causes underruns, never so
-/// large that a jitter spike adds more latency than a call can tolerate.
-const JITTER_TARGET_MIN_MS: f32 = 40.0;
-const JITTER_TARGET_MAX_MS: f32 = 500.0;
-
-/// Tracks how irregular packet arrival timing is and derives a target
-/// buffer depth from it: a stable connection converges toward
-/// `JITTER_TARGET_MIN_MS` of latency, while a bursty one grows the target
-/// (up to `JITTER_TARGET_MAX_MS`) to absorb the burstiness instead of
-/// glitching. This replaces what used to be a single fixed 500ms cap on
-/// the jitter buffer regardless of actual network behavior.
-struct JitterEstimator {
-    last_arrival: Option<std::time::Instant>,
-    last_interval_ms: f32,
-    /// RFC 3550-style smoothed mean absolute deviation of inter-packet
-    /// arrival intervals.
-    jitter_ms: f32,
-}
-
-impl JitterEstimator {
-    fn new() -> Self {
-        Self {
-            last_arrival: None,
-            // 20ms is this call's nominal frame interval (480 samples at
-            // 24kHz); used only as the initial reference before the first
-            // real interval is observed.
-            last_interval_ms: 20.0,
-            jitter_ms: 0.0,
-        }
-    }
-
-    /// Call once per received packet. Returns the current target buffer
-    /// depth in samples (at this call's fixed 24kHz wire sample rate).
-    fn on_packet_arrival(&mut self) -> usize {
-        let now = std::time::Instant::now();
-        if let Some(last) = self.last_arrival {
-            let interval_ms = now.duration_since(last).as_secs_f32() * 1000.0;
-            let deviation = (interval_ms - self.last_interval_ms).abs();
-            self.jitter_ms += (deviation - self.jitter_ms) / 16.0;
-            self.last_interval_ms = interval_ms;
-        }
-        self.last_arrival = Some(now);
-
-        let target_ms = (self.jitter_ms * 4.0 + JITTER_TARGET_MIN_MS)
-            .clamp(JITTER_TARGET_MIN_MS, JITTER_TARGET_MAX_MS);
-        (target_ms * (adpcm::WIRE_SAMPLE_RATE as f32 / 1000.0)) as usize
-    }
-}
+use super::call_stats;
+use super::jitter::JitterEstimator;
 
 /// Default noise gate threshold (linear amplitude, 0..1).
 pub(crate) const DEFAULT_NOISE_GATE: f32 = 0.008;
@@ -351,7 +304,7 @@ pub(crate) fn list_output_devices() -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn find_input_device(name: &Option<String>) -> Option<cpal::Device> {
+pub(crate) fn find_input_device(name: &Option<String>) -> Option<cpal::Device> {
     let host = cpal::default_host();
     if let Some(name) = name {
         if let Ok(mut devices) = host.input_devices() {
@@ -1468,12 +1421,27 @@ pub(crate) async fn run_call(params: CallParams, mut output: EventSender<CallEve
         return;
     }
 
+    // Connection-quality polling (see call_stats.rs doc comment): biases
+    // the per-packet jitter target when the remote side's RTCP receiver
+    // reports show loss or high RTT, reacting sooner than the jitter
+    // estimator's own smoothed arrival-timing signal would on its own.
+    // `_stats_poll_guard` aborts the polling task when the call ends --
+    // without it the task's `Arc<RTCPeerConnection>` would keep both the
+    // connection and the poll loop alive indefinitely.
+    let jitter_bias_ms = call_stats::new_bias();
+    let _stats_poll_guard = crate::net::rt::AbortOnDrop(call_stats::spawn_stats_poll(
+        Arc::clone(&pc),
+        Arc::clone(&jitter_bias_ms),
+    ));
+
     let jitter_for_track = Arc::clone(&jitter);
     let gains_for_track = Arc::clone(&gains);
+    let jitter_bias_ms_for_track = Arc::clone(&jitter_bias_ms);
     pc.on_track(Box::new(
         move |track: Arc<TrackRemote>, _receiver, _transceiver| {
             let jitter = Arc::clone(&jitter_for_track);
             let gains = Arc::clone(&gains_for_track);
+            let jitter_bias_ms = Arc::clone(&jitter_bias_ms_for_track);
             Box::pin(async move {
                 let mut jitter_estimator = JitterEstimator::new();
                 loop {
@@ -1492,7 +1460,8 @@ pub(crate) async fn run_call(params: CallParams, mut output: EventSender<CallEve
                                 .and_then(|m| m.get("*").copied())
                                 .unwrap_or(1.0);
                             apply_gain(&mut samples, g);
-                            let target = jitter_estimator.on_packet_arrival();
+                            let target = jitter_estimator.on_packet_arrival(adpcm::WIRE_SAMPLE_RATE)
+                                + call_stats::bias_samples(&jitter_bias_ms, adpcm::WIRE_SAMPLE_RATE);
                             if let Ok(mut buf) = jitter.lock() {
                                 buf.extend(samples);
                                 while buf.len() > target {
