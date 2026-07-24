@@ -1852,7 +1852,17 @@ fn apply_chat(
     ui: &slint_ui::AppWindow,
 ) {
     let session = &c.session;
-    let unread_count = c.conversations.iter().filter(|conv| conv.unread).count() as i32;
+    // `conversations:listMyConversations` shouldn't include server channels
+    // at all (those are `self.channels`, a completely separate list/sidebar
+    // section), but the REST response has been seen carrying `kind:
+    // "channel"` rows through here too -- filter them out at every use site
+    // instead of trusting the backend to scope this endpoint correctly.
+    let is_dm_or_group = |kind: &str| matches!(kind, "direct" | "group");
+    let unread_count = c
+        .conversations
+        .iter()
+        .filter(|conv| is_dm_or_group(&conv.kind) && conv.unread)
+        .count() as i32;
     let home_active = c.selected_server.is_none()
         && matches!(
             c.sidebar_tab,
@@ -1932,9 +1942,15 @@ fn apply_chat(
         |rows| ui.set_chat_group_candidates(rows.into()),
     );
     ui.set_chat_group_create_status(c.group_create_status.clone().unwrap_or_default().into());
+    let dm_conversations: Vec<ConversationSummary> = c
+        .conversations
+        .iter()
+        .filter(|conv| is_dm_or_group(&conv.kind))
+        .cloned()
+        .collect();
     set_rows_if_changed(
         &CONVO_ROWS_CACHE,
-        viewmodel::conversation_rows(&c.conversations, c.active_conversation.as_deref()),
+        viewmodel::conversation_rows(&dm_conversations, c.active_conversation.as_deref()),
         convo_row_eq,
         |rows| ui.set_chat_conversations(rows.into()),
     );
