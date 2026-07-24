@@ -17,7 +17,11 @@ export struct BotRow {
 }
 
 export struct DeviceRow {
+    /// Human-readable label shown in the list.
     name: string,
+    /// Raw device identifier (what actually gets selected/stored) -- "" for
+    /// the "System default" entry.
+    id: string,
     selected: bool,
 }
 
@@ -658,7 +662,7 @@ export component SettingsScreen inherits Rectangle {
                                 }
                                 VerticalLayout {
                                     spacing: 2px;
-                                    for d in root.input_devices: DeviceItem { text: d.name; active: d.selected; clicked => { root.input_device_selected(d.name); } }
+                                    for d in root.input_devices: DeviceItem { text: d.name; active: d.selected; clicked => { root.input_device_selected(d.id); } }
                                 }
                                 FieldLabel { text: "Speaker"; }
                                 if root.output_devices.length == 0: Text {
@@ -668,7 +672,7 @@ export component SettingsScreen inherits Rectangle {
                                 }
                                 VerticalLayout {
                                     spacing: 2px;
-                                    for d in root.output_devices: DeviceItem { text: d.name; active: d.selected; clicked => { root.output_device_selected(d.name); } }
+                                    for d in root.output_devices: DeviceItem { text: d.name; active: d.selected; clicked => { root.output_device_selected(d.id); } }
                                 }
                                 Text { text: "Device choice applies the next time you start or accept a call."; font-size: 11px; color: Theme.text-muted; wrap: word-wrap; }
                                 Divider {}

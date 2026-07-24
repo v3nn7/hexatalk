@@ -1232,7 +1232,33 @@ impl App {
                 // chat pane leaves the "Loading…" state (even for an empty
                 // history, which then shows the empty state instead).
                 self.chat_history_loading = false;
-                let messages = self.decrypt_incoming_messages(messages);
+                let mut messages = self.decrypt_incoming_messages(messages);
+                // Server channel messages: `authorAvatarImageUrl` in the
+                // `/conversations/:id/messages` response is empty for
+                // channel/voice kind (the REST migration's message shape
+                // doesn't carry the author's photo there the way it does
+                // for DMs/groups -- same gap as `groupKeys:listMemberPublicKeys`
+                // not returning member keys for channels). The already-fetched
+                // server member list has the real photo, keyed by user id, so
+                // backfill from it instead of falling back to initials.
+                if matches!(self.active_conversation_kind.as_deref(), Some("channel") | Some("voice"))
+                    && !self.server_members.is_empty()
+                {
+                    for m in &mut messages {
+                        if m.author_avatar_url.is_empty() {
+                            if let Some(member) =
+                                self.server_members.iter().find(|sm| sm.user_id == m.author_id)
+                            {
+                                if !member.avatar_image_url.is_empty() {
+                                    m.author_avatar_url = member.avatar_image_url.clone();
+                                }
+                                if m.author_avatar_color.is_empty() {
+                                    m.author_avatar_color = member.avatar_color.clone();
+                                }
+                            }
+                        }
+                    }
+                }
                 // Mention ping (Discord-style): mention toast + message
                 // beep when a genuinely new, recent message pings us (by
                 // name, or @everyone in a channel/group). Skips our own

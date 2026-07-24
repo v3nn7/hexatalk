@@ -1459,26 +1459,30 @@ fn apply_settings(
     ui.set_settings_bot_status_is_error(bot_status_is_error);
     let mut input_devices = vec![slint_ui::DeviceRow {
         name: "System default".into(),
+        id: "".into(),
         selected: s.settings_input_device.is_none(),
     }];
     input_devices.extend(
         s.settings_input_devices
             .iter()
             .map(|d| slint_ui::DeviceRow {
-                name: d.clone().into(),
+                name: crate::media::call::friendly_device_name(d).into(),
+                id: d.clone().into(),
                 selected: s.settings_input_device.as_deref() == Some(d.as_str()),
             }),
     );
     ui.set_settings_input_devices(input_devices.as_slice().into());
     let mut output_devices = vec![slint_ui::DeviceRow {
         name: "System default".into(),
+        id: "".into(),
         selected: s.settings_output_device.is_none(),
     }];
     output_devices.extend(
         s.settings_output_devices
             .iter()
             .map(|d| slint_ui::DeviceRow {
-                name: d.clone().into(),
+                name: crate::media::call::friendly_device_name(d).into(),
+                id: d.clone().into(),
                 selected: s.settings_output_device.as_deref() == Some(d.as_str()),
             }),
     );

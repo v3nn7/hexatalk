@@ -304,6 +304,57 @@ pub(crate) fn list_output_devices() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Turns a raw cpal device name into something a user can actually read.
+///
+/// WASAPI (Windows) and CoreAudio (macOS) already hand cpal human-readable
+/// names ("Microphone (Realtech Audio)"), so this is a no-op there -- none
+/// of the patterns below match, the input passes through unchanged. ALSA
+/// (Linux) instead exposes raw PCM device identifiers
+/// (`sysdefault:CARD=Generic`, `front:CARD=Generic,DEV=0`,
+/// `surround51:CARD=Generic,DEV=0`, plain `pipewire`/`pulse`/`jack`/`default`)
+/// straight from `arecord -L`, which is what the settings dropdown was
+/// showing verbatim.
+///
+/// The underlying raw string is still what gets stored/matched against
+/// (`find_input_device`) -- this is display-only formatting.
+pub(crate) fn friendly_device_name(raw: &str) -> String {
+    if let Some(card) = raw
+        .split_once(":CARD=")
+        .map(|(_, rest)| rest)
+        .or_else(|| raw.strip_prefix("CARD="))
+    {
+        let (card_name, dev) = match card.split_once(",DEV=") {
+            Some((name, dev)) => (name, dev.parse::<u32>().ok()),
+            None => (card, None),
+        };
+        let prefix = raw.split_once(':').map(|(p, _)| p).unwrap_or("");
+        let suffix = match prefix {
+            "sysdefault" | "default" => String::new(),
+            "front" => " (stereo)".to_string(),
+            "surround40" => " (4.0 surround)".to_string(),
+            "surround51" => " (5.1 surround)".to_string(),
+            "surround71" => " (7.1 surround)".to_string(),
+            "hw" => " (direct hardware)".to_string(),
+            "plughw" => " (hardware)".to_string(),
+            "dmix" | "dsnoop" => " (shared)".to_string(),
+            other if !other.is_empty() => format!(" ({other})"),
+            _ => String::new(),
+        };
+        let dev_suffix = match dev {
+            Some(n) if n != 0 => format!(", device {n}"),
+            _ => String::new(),
+        };
+        return format!("{card_name}{suffix}{dev_suffix}");
+    }
+    match raw {
+        "pipewire" => "PipeWire".to_string(),
+        "pulse" => "PulseAudio".to_string(),
+        "jack" => "JACK".to_string(),
+        "default" => "Default".to_string(),
+        other => other.to_string(),
+    }
+}
+
 pub(crate) fn find_input_device(name: &Option<String>) -> Option<cpal::Device> {
     let host = cpal::default_host();
     if let Some(name) = name {
@@ -2064,6 +2115,73 @@ pub(crate) async fn run_call(params: CallParams, mut output: EventSender<CallEve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alsa_card_devices_get_a_readable_label() {
+        assert_eq!(friendly_device_name("sysdefault:CARD=Generic"), "Generic");
+        assert_eq!(
+            friendly_device_name("front:CARD=Generic,DEV=0"),
+            "Generic (stereo)"
+        );
+        assert_eq!(
+            friendly_device_name("surround40:CARD=Generic,DEV=0"),
+            "Generic (4.0 surround)"
+        );
+        assert_eq!(
+            friendly_device_name("surround51:CARD=Generic,DEV=0"),
+            "Generic (5.1 surround)"
+        );
+        assert_eq!(
+            friendly_device_name("surround71:CARD=Generic,DEV=0"),
+            "Generic (7.1 surround)"
+        );
+        assert_eq!(friendly_device_name("sysdefault:CARD=Camera"), "Camera");
+        assert_eq!(
+            friendly_device_name("front:CARD=Camera,DEV=0"),
+            "Camera (stereo)"
+        );
+    }
+
+    #[test]
+    fn nonzero_device_index_is_kept_visible() {
+        assert_eq!(
+            friendly_device_name("front:CARD=Generic,DEV=1"),
+            "Generic (stereo), device 1"
+        );
+    }
+
+    #[test]
+    fn alsa_meta_devices_get_proper_case() {
+        assert_eq!(friendly_device_name("pipewire"), "PipeWire");
+        assert_eq!(friendly_device_name("pulse"), "PulseAudio");
+        assert_eq!(friendly_device_name("jack"), "JACK");
+        assert_eq!(friendly_device_name("default"), "Default");
+    }
+
+    #[test]
+    fn already_friendly_names_pass_through_unchanged() {
+        // What WASAPI/CoreAudio already hand cpal on Windows/macOS -- none
+        // of the ALSA patterns match, so this must be a no-op.
+        assert_eq!(
+            friendly_device_name("Microphone (Realtek Audio)"),
+            "Microphone (Realtek Audio)"
+        );
+        assert_eq!(
+            friendly_device_name("MacBook Pro Microphone"),
+            "MacBook Pro Microphone"
+        );
+    }
+
+    #[test]
+    fn unknown_alsa_prefix_is_kept_not_dropped() {
+        // A plugin prefix this function doesn't specifically know about
+        // must still show up (as a parenthesized suffix) rather than being
+        // silently swallowed.
+        assert_eq!(
+            friendly_device_name("someweirdplugin:CARD=Generic,DEV=0"),
+            "Generic (someweirdplugin)"
+        );
+    }
 
     /// A frame that fits in a single chunk must still come out whole.
     #[test]

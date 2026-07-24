@@ -99,9 +99,18 @@ fn emit_obfuscated_secrets() {
     // Platform-specific full-download artefact on astrakit R2.
     // Windows keeps the historical HexaTalk.exe name so existing clients
     // keep working; Linux ships an explicit arch tag.
+    //
+    // UPDATE_DOWNLOAD_URL / UPDATE_SIGNATURE_URL override BOTH platforms at
+    // once with a single literal URL -- fine for a single-platform build
+    // (e.g. CI building only the Windows exe), but a build that produces
+    // installers for multiple OSes from the same `.env.local` needs
+    // per-platform values instead. Use UPDATE_DOWNLOAD_URL_WINDOWS /
+    // UPDATE_DOWNLOAD_URL_LINUX (+ the _SIGNATURE_ counterparts) for that;
+    // the plain (non-suffixed) var still wins if both are set for the same
+    // platform being built right now.
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
-    let (download_url, signature_url) = match (target_os.as_str(), target_arch.as_str()) {
+    let (default_download, default_signature) = match (target_os.as_str(), target_arch.as_str()) {
         ("windows", _) => (
             "https://astrakit.pro/HexaTalk.exe".to_string(),
             "https://astrakit.pro/HexaTalk.exe.sig".to_string(),
@@ -119,6 +128,28 @@ fn emit_obfuscated_secrets() {
             "https://astrakit.pro/HexaTalk.exe.sig".to_string(),
         ),
     };
+    let platform_suffix = match target_os.as_str() {
+        "windows" => "WINDOWS",
+        "linux" => "LINUX",
+        _ => "",
+    };
+    let pick = |generic: &str, default: String| -> String {
+        let per_platform = if platform_suffix.is_empty() {
+            String::new()
+        } else {
+            env_value(&format!("{generic}_{platform_suffix}"))
+        };
+        let generic_val = env_value(generic);
+        if !generic_val.is_empty() {
+            generic_val
+        } else if !per_platform.is_empty() {
+            per_platform
+        } else {
+            default
+        }
+    };
+    let download_url = pick("UPDATE_DOWNLOAD_URL", default_download);
+    let signature_url = pick("UPDATE_SIGNATURE_URL", default_signature);
 
     // Production API deployment — always the default for shipped builds.
     // `.env.local` may override during experiments, but an empty/missing
@@ -141,15 +172,38 @@ fn emit_obfuscated_secrets() {
         ("TURN_USERNAME", env_value("TURN_USERNAME")),
         ("TURN_CREDENTIAL", env_value("TURN_CREDENTIAL")),
         ("PEERSEAL_RELAY", relay),
-        ("UPDATE_VERSION_URL", "https://astrakit.pro/version.txt".to_string()),
+        (
+            "UPDATE_VERSION_URL",
+            {
+                let from_env = env_value("UPDATE_VERSION_URL");
+                if from_env.is_empty() {
+                    "https://astrakit.pro/version.txt".to_string()
+                } else {
+                    from_env
+                }
+            },
+        ),
         ("UPDATE_DOWNLOAD_URL", download_url),
         ("UPDATE_SIGNATURE_URL", signature_url),
         (
             "UPDATE_PUBLIC_KEY_B64",
-            // Public half of RELEASE_SIGNING_KEY_HEX (the 8a3f..c4d seed).
-            // Verified 2026-07-21 against the live HexaTalk.exe.sig on
-            // astrakit.pro — the previous value matched no released sig.
-            "s/DvU/KKqatNTN+gV+NqxkpQRgl+0pUL92222x+a1O8=".to_string(),
+            {
+                // Override for a self-hosted update backend: the base64
+                // public half of *your own* ed25519 keypair (see
+                // scripts/sign_release.py's doc comment for how the keypair
+                // is generated) -- must match whatever RELEASE_SIGNING_KEY_HEX
+                // signs releases with, or every downloaded update fails
+                // signature verification and update_check.rs discards it.
+                let from_env = env_value("UPDATE_PUBLIC_KEY_B64");
+                if from_env.is_empty() {
+                    // Public half of the project's own RELEASE_SIGNING_KEY_HEX.
+                    // Verified 2026-07-21 against the live HexaTalk.exe.sig on
+                    // astrakit.pro — the previous value matched no released sig.
+                    "s/DvU/KKqatNTN+gV+NqxkpQRgl+0pUL92222x+a1O8=".to_string()
+                } else {
+                    from_env
+                }
+            },
         ),
         // Directory (trailing slash) that bsdiff-compatible incremental
         // update patches are uploaded to, named `HexaTalk-<from>-<to>.delta`
@@ -158,7 +212,14 @@ fn emit_obfuscated_secrets() {
         // kept as tightly in sync as the other update endpoints.
         (
             "UPDATE_DELTA_BASE_URL",
-            "https://astrakit.pro/deltas/".to_string(),
+            {
+                let from_env = env_value("UPDATE_DELTA_BASE_URL");
+                if from_env.is_empty() {
+                    "https://astrakit.pro/deltas/".to_string()
+                } else {
+                    from_env
+                }
+            },
         ),
         // AES-256 key (base64 of 32 raw bytes) used to decrypt HTD1-framed
         // delta files on download. Must match RELEASE_DELTA_KEY_HEX used by

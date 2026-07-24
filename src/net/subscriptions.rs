@@ -69,6 +69,21 @@ const EVENT_DEBOUNCE: Duration = Duration::from_millis(400);
 /// Upper bound on how long a dirty flag may sit unrefreshed while events
 /// keep arriving (a busy channel would otherwise starve the refetch).
 const EVENT_MAX_WAIT: Duration = Duration::from_secs(1);
+/// How long a subscription stops making requests after hitting a 429.
+/// Without this, a subscription that just got rate-limited would retry on
+/// its very next `DEFAULT_TICK` (30s) or matching WS event, which — if the
+/// backend's rate-limit window slides forward on every new request it
+/// receives, even a limited one — means a live app just kept the ban
+/// perpetually renewed instead of it ever expiring, no matter how long the
+/// user waited with the app open.
+const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(120);
+
+/// True when an API error's message indicates the backend rate-limited us
+/// (HTTP 429). `ApiError`'s `Display` renders as `"{status}: {body}"` (see
+/// `dispatch_servers.rs::human_or`'s identical convention).
+fn is_rate_limited(err_msg: &str) -> bool {
+    err_msg.trim_start().starts_with("429")
+}
 
 /// Pending debounce state: `(first_event_at, last_event_at)` while a matching
 /// WS event has been seen but the refetch has not run yet.
@@ -135,6 +150,10 @@ async fn run_query_subscription<F, M>(
     // Dirty flag for the trailing debounce: matching events only arm it,
     // the refetch fires once the burst goes quiet.
     let mut pending: PendingRefresh = None;
+    // Set after a 429; suppresses actual network calls until it elapses,
+    // even though `ticker`/matching WS events keep firing on their normal
+    // cadence underneath (see `RATE_LIMIT_BACKOFF`'s doc comment).
+    let mut rate_limited_until: Option<Instant> = None;
     loop {
         let refresh = tokio::select! {
             _ = ticker.tick() => {
@@ -177,13 +196,30 @@ async fn run_query_subscription<F, M>(
         if !refresh {
             continue;
         }
+        if let Some(until) = rate_limited_until {
+            if Instant::now() < until {
+                continue;
+            }
+            rate_limited_until = None;
+        }
         match client.query(name, args.clone()).await {
             Ok(result) => {
                 if !deliver(name, result, &mut on_result) {
                     return;
                 }
             }
-            Err(err) => eprintln!("[net] {name} fetch failed (state kept): {err}"),
+            Err(err) => {
+                let msg = err.to_string();
+                if is_rate_limited(&msg) {
+                    eprintln!(
+                        "[net] {name} rate-limited (429) — backing off {}s",
+                        RATE_LIMIT_BACKOFF.as_secs()
+                    );
+                    rate_limited_until = Some(Instant::now() + RATE_LIMIT_BACKOFF);
+                } else {
+                    eprintln!("[net] {name} fetch failed (state kept): {msg}");
+                }
+            }
         }
     }
 }
@@ -1438,4 +1474,25 @@ pub(crate) fn qr_scan_subscription(tx: UnboundedSender<Message>) -> Job {
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_429_in_the_status_prefixed_error_format() {
+        // ApiError's Display is "{status}: {body}" (see
+        // dispatch_servers.rs::human_or's identical convention).
+        assert!(is_rate_limited("429: Too Many Requests"));
+        assert!(is_rate_limited("429: rate limit exceeded, retry in 60s"));
+    }
+
+    #[test]
+    fn does_not_misfire_on_other_statuses_or_unrelated_errors() {
+        assert!(!is_rate_limited("404: Not Found"));
+        assert!(!is_rate_limited("500: Internal Server Error"));
+        assert!(!is_rate_limited("connection refused"));
+        assert!(!is_rate_limited(""));
+    }
 }
